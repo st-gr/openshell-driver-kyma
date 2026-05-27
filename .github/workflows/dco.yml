@@ -1,0 +1,16 @@
+name: dco
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+jobs:
+  dco:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify DCO sign-off
+        uses: tim-actions/dco@2fd0504dc0d27b33f542867c300c87840c0dcd1c # v1.1.0
