@@ -1,0 +1,17 @@
+# Third-party notices
+
+This file lists third-party components incorporated into or distributed with
+this project.
+
+## Vendored
+
+- `proto/compute_driver.proto`
+  Source: NVIDIA/OpenShell (https://github.com/NVIDIA/OpenShell)
+  License: Apache-2.0
+  The SPDX header in the file is preserved verbatim.
+
+## Generated at release time
+
+The set of transitive Rust dependencies is captured by `Cargo.lock`. A
+machine-generated dependency manifest is produced at release time and
+attached to each tagged release.
