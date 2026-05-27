@@ -1,0 +1,114 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "openshell-driver-kyma.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "openshell-driver-kyma.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openshell-driver-kyma.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+          {{- toYaml . | nindent 8 }}
+        {{- end }}
+        # The driver pod itself does not benefit from an Istio sidecar
+        # (it talks gRPC over a Unix domain socket).
+        sidecar.istio.io/inject: "false"
+      annotations:
+        # Ensure the pod restarts when values change.
+        checksum/values: {{ .Values | toYaml | sha256sum }}
+        {{- with .Values.podAnnotations }}
+          {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "openshell-driver-kyma.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: driver
+          image: {{ include "openshell-driver-kyma.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --socket
+            - {{ .Values.driver.socket | quote }}
+            - --namespace
+            - {{ .Values.namespace | quote }}
+            - --supervisor-image
+            - {{ .Values.driver.supervisorImage | quote }}
+            - --supervisor-binary-path
+            - {{ .Values.driver.supervisorBinaryPath | quote }}
+            - --supervisor-mount-path
+            - {{ .Values.driver.supervisorMountPath | quote }}
+            {{- if .Values.driver.gatewayEndpoint }}
+            - --gateway-endpoint
+            - {{ .Values.driver.gatewayEndpoint | quote }}
+            {{- end }}
+            - --istio-inject-sandboxes={{ .Values.driver.istioInjectSandboxes }}
+            - --enable-apirule={{ .Values.driver.enableApirule }}
+            {{- if .Values.driver.clusterDomain }}
+            - --cluster-domain
+            - {{ .Values.driver.clusterDomain | quote }}
+            {{- end }}
+            - --gpu-support={{ .Values.driver.gpuSupport }}
+            - --enable-network-policy={{ .Values.driver.enableNetworkPolicy }}
+            - --health-port
+            - {{ .Values.driver.healthPort | quote }}
+            - --log-level
+            - {{ .Values.driver.logLevel | quote }}
+          env:
+            - name: RUST_LOG
+              value: {{ .Values.driver.logLevel | quote }}
+          ports:
+            - name: health
+              containerPort: {{ .Values.driver.healthPort }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          volumeMounts:
+            - name: socket-dir
+              mountPath: {{ dir .Values.driver.socket | quote }}
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: socket-dir
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

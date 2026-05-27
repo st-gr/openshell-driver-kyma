@@ -1,0 +1,75 @@
+# Default values for openshell-driver-kyma.
+# Override with `helm install ... -f my-values.yaml --set ...`.
+
+# Sandbox provisioning namespace. The driver creates Sandbox CRs here.
+# Cluster-admin must label this namespace
+# `pod-security.kubernetes.io/enforce: privileged` because the supervisor
+# inside each sandbox needs SYS_ADMIN/NET_ADMIN/SYS_PTRACE/SYSLOG capabilities.
+namespace: openshell-system
+
+image:
+  repository: ghcr.io/st-gr/openshell-driver-kyma
+  tag: ""        # defaults to .Chart.AppVersion when empty
+  pullPolicy: IfNotPresent
+
+# Service account (created by this chart unless overridden).
+serviceAccount:
+  create: true
+  name: openshell-driver
+
+# CLI flags exposed to operators. Each maps 1:1 to a `--<flag>` on the
+# binary; see openshell-driver-kyma --help for the authoritative list.
+driver:
+  socket: /var/run/openshell-driver.sock
+  supervisorImage: ghcr.io/nvidia/openshell-community/supervisor:latest
+  supervisorBinaryPath: /usr/local/bin/openshell-sandbox
+  supervisorMountPath: /opt/openshell/bin
+  gatewayEndpoint: ""
+  istioInjectSandboxes: false
+  enableApirule: false
+  clusterDomain: ""
+  gpuSupport: true
+  enableNetworkPolicy: false
+  healthPort: 9090
+  logLevel: info
+
+# Driver pod resource requests and limits. Modest defaults that fit any
+# Kyma namespace ResourceQuota out of the box.
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 256Mi
+
+# Driver pod security context. Locked down to PSS `restricted`.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
+  runAsNonRoot: true
+  runAsUser: 65532
+
+# Optional pre-install CRD pre-flight Job that aborts the install if the
+# kubernetes-sigs/agent-sandbox CRD is missing.
+crdPreInstallCheck:
+  enabled: true
+  image: bitnami/kubectl:latest
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Pod-level annotations (leave Istio alone for the driver pod).
+podAnnotations: {}
+podLabels: {}

@@ -1,0 +1,93 @@
+{{- if .Values.crdPreInstallCheck.enabled -}}
+# Pre-install / pre-upgrade hook: aborts the release if the
+# `agents.x-k8s.io/v1alpha1/Sandbox` CRD is not installed on the cluster.
+# Install it first with:
+#   kubectl apply -f \
+#     https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/main/k8s/crds/agents.x-k8s.io_sandboxes.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "openshell-driver-kyma.fullname" . }}-crd-check
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "openshell-driver-kyma.fullname" . }}-crd-check
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-9"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+rules:
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "openshell-driver-kyma.fullname" . }}-crd-check
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-8"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "openshell-driver-kyma.fullname" . }}-crd-check
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "openshell-driver-kyma.fullname" . }}-crd-check
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "openshell-driver-kyma.fullname" . }}-crd-check
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 60
+  template:
+    metadata:
+      labels:
+        {{- include "openshell-driver-kyma.labels" . | nindent 8 }}
+        sidecar.istio.io/inject: "false"
+    spec:
+      serviceAccountName: {{ include "openshell-driver-kyma.fullname" . }}-crd-check
+      restartPolicy: Never
+      containers:
+        - name: crd-check
+          image: {{ .Values.crdPreInstallCheck.image }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              if ! kubectl get crd sandboxes.agents.x-k8s.io >/dev/null 2>&1; then
+                echo "ERROR: agents.x-k8s.io/v1alpha1/Sandbox CRD is not installed."
+                echo "Install it with:"
+                echo "  kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/main/k8s/crds/agents.x-k8s.io_sandboxes.yaml"
+                exit 1
+              fi
+              echo "agent-sandbox CRD found"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+            runAsNonRoot: true
+            runAsUser: 65532
+            seccompProfile:
+              type: RuntimeDefault
+{{- end }}

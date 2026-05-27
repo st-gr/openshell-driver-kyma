@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "openshell-driver-kyma.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "openshell-driver-kyma.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: health
+      port: {{ .Values.driver.healthPort }}
+      targetPort: health
+      protocol: TCP
