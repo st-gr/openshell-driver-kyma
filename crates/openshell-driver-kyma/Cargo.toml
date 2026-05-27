@@ -1,0 +1,68 @@
+[package]
+name = "openshell-driver-kyma"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "OpenShell ComputeDriver gRPC service for SAP BTP Kyma clusters"
+
+[lib]
+name = "openshell_driver_kyma"
+path = "src/lib.rs"
+
+[[bin]]
+name = "openshell-driver-kyma"
+path = "src/main.rs"
+
+[dependencies]
+computev1 = { path = "../computev1" }
+
+# gRPC + protobuf
+tonic = { workspace = true }
+prost = { workspace = true }
+
+# Kubernetes
+kube = { workspace = true }
+k8s-openapi = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+
+# HTTP server
+axum = { workspace = true }
+tower = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+
+# Observability
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+prometheus = { workspace = true }
+
+# CLI
+clap = { workspace = true }
+
+# Errors
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Serde
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+
+[dev-dependencies]
+mockall = { workspace = true }
+tower-test = { workspace = true }
+tempfile = { workspace = true }
+assert_cmd = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true, features = ["full", "test-util"] }
+
+[features]
+# Gates Tier-3 live-cluster tests in tests/live_cluster.rs.
+integration = []
