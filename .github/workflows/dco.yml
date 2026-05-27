@@ -6,6 +6,10 @@ on:
 jobs:
   dco:
     runs-on: ubuntu-latest
+    # Skip mechanical dependabot bumps. Dependabot commits are not authored
+    # by humans, carry no new IP, and lack a Signed-off-by trailer by
+    # default. Real human PRs still go through this check.
+    if: github.actor != 'dependabot[bot]'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -13,4 +17,5 @@ jobs:
           fetch-depth: 0
 
       - name: Verify DCO sign-off
-        uses: tim-actions/dco@2fd0504dc0d27b33f542867c300c87840c0dcd1c # v1.1.0
+        # Pinned to v1.1.0 (released 2021-06-10), the latest tag.
+        uses: tim-actions/dco@f2279e6e62d5a7d9115b0cb8e837b777b1b02e21
