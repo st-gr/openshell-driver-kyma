@@ -1,0 +1,18 @@
+{
+  "config": {
+    "default": true,
+    "MD013": false,        // line length — disabled, prose flows
+    "MD024": {              // duplicate headings — allow per-section
+      "siblings_only": true
+    },
+    "MD033": false,        // inline HTML — needed for badges
+    "MD041": false         // first-line h1 — relaxed for index files
+  },
+  "ignores": [
+    "target/",
+    "reference-openshift/",
+    "node_modules/",
+    "coverage/",
+    "**/CHANGELOG.md"
+  ]
+}
