@@ -1,0 +1,62 @@
+# syntax=docker/dockerfile:1.7
+# Development toolchain image for openshell-driver-kyma.
+#
+# Built once locally and reused for cargo build/test, fmt, clippy, helm lint,
+# and markdown lint. Mount the repo at /workspace and a named Docker volume at
+# /workspace/target so Cargo's incremental cache survives between runs.
+#
+# Build:
+#   docker build -f deploy/Dockerfile.dev -t openshell-driver-kyma-dev:latest .
+#
+# Use:
+#   make dev-shell                  # interactive shell
+#   make dev-test                   # cargo fmt + clippy + tests
+#   make dev-build                  # cargo build --release
+#   make dev-shell-with-kube        # adds $HOME/.kube read-only
+
+ARG RUST_VERSION=1.95.0
+FROM rust:${RUST_VERSION}-slim-bookworm
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Toolchain prerequisites: protoc for tonic-build, pkg-config for kube/openssl,
+# git for DCO sign-off, build-essential for native deps, plus general utilities.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        git \
+        jq \
+        pkg-config \
+        protobuf-compiler \
+        build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Cargo plugins used by Tasks and CI (cargo-chef caches deps, cargo-llvm-cov
+# generates coverage reports for local Tier-1 verification).
+RUN cargo install --locked cargo-chef cargo-llvm-cov
+
+# kubectl for Tier-3 integration tests against the live Kyma cluster.
+ARG KUBECTL_VERSION=v1.30.0
+RUN curl -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" \
+        -o /usr/local/bin/kubectl \
+    && chmod +x /usr/local/bin/kubectl
+
+# Helm for chart linting and template rendering.
+ARG HELM_VERSION=v3.16.0
+RUN curl -fsSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" \
+        | tar -xz -C /tmp \
+    && mv /tmp/linux-amd64/helm /usr/local/bin/helm \
+    && rm -rf /tmp/linux-amd64
+
+# markdownlint-cli2 for repo-hygiene checks.
+RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm \
+    && npm install -g markdownlint-cli2 \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Pre-install rustfmt + clippy (bundled with the rust image, but ensure pinned).
+RUN rustup component add rustfmt clippy
+
+WORKDIR /workspace
+
+# Default to a login shell so PATH and toolchain wrappers work as expected.
+CMD ["/bin/bash"]
