@@ -1,0 +1,39 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      tonic-stack:
+        patterns:
+          - tonic*
+          - prost*
+      kube-stack:
+        patterns:
+          - kube*
+          - k8s-openapi
+      tokio-stack:
+        patterns:
+          - tokio*
+          - axum
+          - tower*
+          - hyper*
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(ci)"
+
+  - package-ecosystem: docker
+    directory: /deploy
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore(docker)"

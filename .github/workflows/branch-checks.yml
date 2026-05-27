@@ -1,0 +1,42 @@
+name: branch-checks
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  fmt-clippy-test-build:
+    name: fmt + clippy + test + build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install protoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends protobuf-compiler libprotobuf-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: branch-checks
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings -W clippy::pedantic
+
+      - name: cargo build
+        run: cargo build --release --workspace
+
+      - name: cargo test (lib + Tier-2 integration)
+        run: cargo test --workspace --lib --tests
