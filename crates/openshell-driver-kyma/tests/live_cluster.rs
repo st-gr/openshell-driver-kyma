@@ -20,11 +20,11 @@
 
 #![cfg(all(unix, feature = "integration"))]
 
+use computev1::pb::compute_driver_server::ComputeDriver;
 use computev1::pb::{
     CreateSandboxRequest, DeleteSandboxRequest, DriverSandbox, DriverSandboxSpec,
     DriverSandboxTemplate, GetSandboxRequest, ListSandboxesRequest,
 };
-use computev1::pb::compute_driver_server::ComputeDriver;
 use k8s_openapi::api::core::v1::Namespace;
 use kube::{
     api::{Api, ListParams, PatchParams, PostParams},
@@ -117,8 +117,7 @@ async fn sandbox_crd_present(client: &Client) -> bool {
     let ar = sandbox_api_resource();
     // Try a list with limit=1 in a known-safe namespace; any response
     // (including empty) means the CRD is registered.
-    let api: Api<DynamicObject> =
-        Api::namespaced_with(client.clone(), "default", &ar);
+    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), "default", &ar);
     api.list(&ListParams::default().limit(1)).await.is_ok()
 }
 
@@ -166,9 +165,7 @@ async fn setup_integration() -> Option<(Driver, Client, String)> {
     let ns = match integration_namespace() {
         Some(n) => n,
         None => {
-            eprintln!(
-                "INTEGRATION_TEST_NAMESPACE not set; skipping live cluster tests."
-            );
+            eprintln!("INTEGRATION_TEST_NAMESPACE not set; skipping live cluster tests.");
             return None;
         }
     };
@@ -266,7 +263,9 @@ fn denylist_extra_via_env_panics() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_create_and_list_sandbox() {
-    let Some((driver, client, ns)) = setup_integration().await else { return; };
+    let Some((driver, client, ns)) = setup_integration().await else {
+        return;
+    };
     let name = unique_name("create-list");
 
     driver
@@ -289,7 +288,9 @@ async fn test_create_and_list_sandbox() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_get_sandbox() {
-    let Some((driver, client, ns)) = setup_integration().await else { return; };
+    let Some((driver, client, ns)) = setup_integration().await else {
+        return;
+    };
     let name = unique_name("get");
 
     driver
@@ -315,7 +316,9 @@ async fn test_get_sandbox() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_delete_sandbox_idempotent() {
-    let Some((driver, client, ns)) = setup_integration().await else { return; };
+    let Some((driver, client, ns)) = setup_integration().await else {
+        return;
+    };
     let name = unique_name("delete");
 
     driver
@@ -349,7 +352,9 @@ async fn test_delete_sandbox_idempotent() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_verify_labels_and_supervisor_init_container() {
-    let Some((driver, client, ns)) = setup_integration().await else { return; };
+    let Some((driver, client, ns)) = setup_integration().await else {
+        return;
+    };
     let name = unique_name("verify");
 
     driver
@@ -364,16 +369,30 @@ async fn test_verify_labels_and_supervisor_init_container() {
 
     // Required labels.
     let labels = obj.metadata.labels.expect("labels present");
-    assert_eq!(labels.get("openshell.ai/managed-by").map(|s| s.as_str()), Some("openshell"));
-    assert_eq!(labels.get("kagenti.io/type").map(|s| s.as_str()), Some("agent"));
-    assert_eq!(labels.get("openshell.ai/sandbox-id").map(|s| s.as_str()), Some(format!("id-{name}").as_str()));
+    assert_eq!(
+        labels.get("openshell.ai/managed-by").map(|s| s.as_str()),
+        Some("openshell")
+    );
+    assert_eq!(
+        labels.get("kagenti.io/type").map(|s| s.as_str()),
+        Some("agent")
+    );
+    assert_eq!(
+        labels.get("openshell.ai/sandbox-id").map(|s| s.as_str()),
+        Some(format!("id-{name}").as_str())
+    );
 
     // Supervisor init container.
     let init = obj
         .data
         .pointer("/spec/podTemplate/spec/initContainers/0/name")
         .and_then(|v| v.as_str());
-    assert_eq!(init, Some("supervisor-init"), "init container missing in {:?}", obj.data);
+    assert_eq!(
+        init,
+        Some("supervisor-init"),
+        "init container missing in {:?}",
+        obj.data
+    );
 
     // Istio inject label stamped on the pod template (default cfg has it disabled).
     let inject = obj
@@ -391,7 +410,9 @@ async fn test_e2e_sandbox_reaches_ready_or_records_status() {
     // to push a status. We don't require Ready=True (the controller may
     // need image pulls or scheduling) but we DO require the controller
     // observes the CR within 60s.
-    let Some((driver, client, ns)) = setup_integration().await else { return; };
+    let Some((driver, client, ns)) = setup_integration().await else {
+        return;
+    };
     let name = unique_name("e2e");
 
     driver
