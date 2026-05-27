@@ -1,2 +1,593 @@
-//! KymaProvisioner — Sandbox CR lifecycle via kube-rs DynamicObject.
-//! Implementation lands in Tasks 11-15 (and Task 40 wires the enricher).
+//! `KymaProvisioner` — `SandboxProvisioner` impl backed by `kube-rs`.
+//!
+//! Manages `agents.x-k8s.io/v1alpha1/Sandbox` CRs in a single namespace via
+//! `kube::Api<DynamicObject>` (the CRD is third-party so we don't generate
+//! a typed wrapper). The supervisor binary is delivered via init container
+//! + `emptyDir`, mirroring the Go OpenShift driver's approach (see
+//! `docs/why-init-container.md`).
+//!
+//! Test strategy: the pure JSON construction in `build_sandbox_spec` is
+//! covered by extensive unit tests. The HTTP-touching methods (`create`,
+//! `get`, `list`, `delete`, `watch`, `has_gpu_capacity`) are exercised via
+//! the Tier-3 live-cluster suite in `tests/live_cluster.rs`, since wiring a
+//! mock `tower::Service` for `kube::Client` is non-trivial in kube 3.x and
+//! the Tier-3 tests provide stronger guarantees.
+
+use crate::config::Config;
+use crate::error::DriverError;
+use crate::helpers::{
+    build_env_list, build_resources, merge_maps, object_to_driver_sandbox,
+};
+use crate::interfaces::{SandboxProvisioner, WatchEvent};
+use async_trait::async_trait;
+use computev1::pb::DriverSandbox;
+use futures::{StreamExt, TryStreamExt};
+use k8s_openapi::api::core::v1::Node;
+use kube::{
+    api::{Api, ApiResource, DeleteParams, DynamicObject, ListParams, PostParams},
+    core::GroupVersionKind,
+    runtime::watcher,
+    Client,
+};
+use serde_json::{json, Value};
+use std::collections::HashMap;
+use tokio::sync::mpsc;
+
+const LABEL_SANDBOX_ID: &str = "openshell.ai/sandbox-id";
+const LABEL_MANAGED_BY: &str = "openshell.ai/managed-by";
+const LABEL_KAGENTI: &str = "kagenti.io/type";
+const LABEL_ISTIO_INJECT: &str = "sidecar.istio.io/inject";
+const SUPERVISOR_VOLUME: &str = "supervisor-bin";
+const AGENT_CONTAINER_NAME: &str = "agent";
+const SUPERVISOR_INIT_NAME: &str = "supervisor-init";
+const SANDBOX_SERVICE_ACCOUNT: &str = "openshell-sandbox";
+const GPU_RESOURCE: &str = "nvidia.com/gpu";
+
+/// `KymaProvisioner` implements `SandboxProvisioner` for SAP BTP Kyma.
+pub struct KymaProvisioner {
+    client: Client,
+    cfg: Config,
+    sandbox_ar: ApiResource,
+}
+
+impl KymaProvisioner {
+    /// Build a provisioner around an existing `kube::Client` and `Config`.
+    #[must_use]
+    pub fn new(client: Client, cfg: Config) -> Self {
+        let gvk = GroupVersionKind {
+            group: "agents.x-k8s.io".into(),
+            version: "v1alpha1".into(),
+            kind: "Sandbox".into(),
+        };
+        let sandbox_ar = ApiResource::from_gvk_with_plural(&gvk, "sandboxes");
+        Self {
+            client,
+            cfg,
+            sandbox_ar,
+        }
+    }
+
+    fn sandboxes_api(&self) -> Api<DynamicObject> {
+        Api::namespaced_with(self.client.clone(), &self.cfg.namespace, &self.sandbox_ar)
+    }
+
+    /// Build the Sandbox CR's `spec` JSON value. Pure function; no I/O.
+    /// Mirrors the Go reference's `buildSandboxSpec` but adds Kyma-specific
+    /// behavior: when `cfg.istio_inject_sandboxes` is false, stamps the
+    /// `sidecar.istio.io/inject: "false"` label on the pod template so
+    /// Istio leaves the pod alone.
+    #[must_use]
+    pub fn build_sandbox_spec(&self, sb: &DriverSandbox) -> Value {
+        let spec = sb.spec.as_ref();
+        let template = spec.and_then(|s| s.template.as_ref());
+
+        // ---------- supervisor init container ----------
+        let init_container = json!({
+            "name": SUPERVISOR_INIT_NAME,
+            "image": self.cfg.supervisor_image,
+            "command": [
+                "cp",
+                self.cfg.supervisor_binary_path,
+                format!("{}/", self.cfg.supervisor_mount_path),
+            ],
+            "volumeMounts": [
+                {
+                    "name": SUPERVISOR_VOLUME,
+                    "mountPath": self.cfg.supervisor_mount_path,
+                }
+            ],
+        });
+
+        // ---------- agent container ----------
+        let image = template.map(|t| t.image.as_str()).unwrap_or("");
+        let env_list = self.build_full_env_list(sb);
+
+        let mut agent_container = json!({
+            "name": AGENT_CONTAINER_NAME,
+            "image": image,
+            "command": [format!("{}/openshell-sandbox", self.cfg.supervisor_mount_path)],
+            "env": env_list,
+            "securityContext": {
+                "privileged": true,
+                "runAsUser": 0,
+                "capabilities": {
+                    "add": ["SYS_ADMIN", "NET_ADMIN", "SYS_PTRACE", "SYSLOG"]
+                }
+            },
+            "volumeMounts": [
+                {
+                    "name": SUPERVISOR_VOLUME,
+                    "mountPath": self.cfg.supervisor_mount_path,
+                    "readOnly": true,
+                }
+            ],
+        });
+
+        // Resources: use what the user asked for, or fall back to defaults
+        // sized for typical Kyma namespace quotas.
+        let resources = match template.and_then(|t| t.resources.as_ref()) {
+            Some(res) => build_resources(res, spec.is_some_and(|s| s.gpu)),
+            None => json!({
+                "requests": { "cpu": "100m", "memory": "128Mi" },
+                "limits":   { "cpu": "500m", "memory": "512Mi" },
+            }),
+        };
+        agent_container["resources"] = resources;
+
+        // ---------- pod spec ----------
+        let mut pod_spec = json!({
+            "initContainers": [init_container],
+            "containers": [agent_container],
+            "serviceAccountName": SANDBOX_SERVICE_ACCOUNT,
+            "volumes": [
+                {
+                    "name": SUPERVISOR_VOLUME,
+                    "emptyDir": {}
+                }
+            ],
+        });
+
+        // Optional `runtimeClassName` passthrough from `platform_config`.
+        if let Some(pc) = template.and_then(|t| t.platform_config.as_ref()) {
+            if let Some(rcn) = pc.fields.get("runtime_class_name") {
+                if let Some(s) = rcn.kind.as_ref().and_then(string_from_value_kind) {
+                    pod_spec["runtimeClassName"] = Value::String(s);
+                }
+            }
+        }
+
+        // ---------- pod template metadata (labels) ----------
+        let user_labels = template
+            .map(|t| t.labels.clone())
+            .unwrap_or_default();
+        let mut driver_labels: HashMap<String, String> = HashMap::new();
+        driver_labels.insert(LABEL_SANDBOX_ID.into(), sb.id.clone());
+        driver_labels.insert(LABEL_MANAGED_BY.into(), "openshell".into());
+        driver_labels.insert(LABEL_KAGENTI.into(), "agent".into());
+        if !self.cfg.istio_inject_sandboxes {
+            driver_labels.insert(LABEL_ISTIO_INJECT.into(), "false".into());
+        }
+        let labels = merge_maps(&user_labels, &driver_labels);
+
+        json!({
+            "podTemplate": {
+                "metadata": { "labels": labels },
+                "spec": pod_spec,
+            }
+        })
+    }
+
+    fn build_full_env_list(&self, sb: &DriverSandbox) -> Vec<Value> {
+        let spec = sb.spec.as_ref();
+        let template = spec.and_then(|s| s.template.as_ref());
+        let spec_env = spec.map(|s| s.environment.clone()).unwrap_or_default();
+        let tmpl_env = template
+            .map(|t| t.environment.clone())
+            .unwrap_or_default();
+
+        let mut envs = build_env_list(&spec_env, &tmpl_env);
+
+        // Driver-injected environment for the supervisor.
+        let mut gw_env: HashMap<String, String> = HashMap::new();
+        gw_env.insert("OPENSHELL_SANDBOX_ID".into(), sb.id.clone());
+        gw_env.insert("OPENSHELL_SANDBOX".into(), sb.name.clone());
+        gw_env.insert("OPENSHELL_SANDBOX_COMMAND".into(), "sleep infinity".into());
+        if !self.cfg.gateway_endpoint.is_empty() {
+            gw_env.insert("OPENSHELL_ENDPOINT".into(), self.cfg.gateway_endpoint.clone());
+        }
+        gw_env.insert("ANTHROPIC_BASE_URL".into(), "https://inference.local/v1".into());
+        gw_env.insert("OPENAI_BASE_URL".into(), "https://inference.local/v1".into());
+
+        for (k, v) in gw_env {
+            envs.push(json!({ "name": k, "value": v }));
+        }
+        // Stable order for deterministic tests.
+        envs.sort_by(|a, b| {
+            a["name"]
+                .as_str()
+                .unwrap_or("")
+                .cmp(b["name"].as_str().unwrap_or(""))
+        });
+        envs
+    }
+
+    fn build_dynamic_object(&self, sb: &DriverSandbox) -> DynamicObject {
+        let mut driver_labels: HashMap<String, String> = HashMap::new();
+        driver_labels.insert(LABEL_SANDBOX_ID.into(), sb.id.clone());
+        driver_labels.insert(LABEL_MANAGED_BY.into(), "openshell".into());
+        driver_labels.insert(LABEL_KAGENTI.into(), "agent".into());
+
+        let user_labels = sb
+            .spec
+            .as_ref()
+            .and_then(|s| s.template.as_ref())
+            .map(|t| t.labels.clone())
+            .unwrap_or_default();
+        let labels_map = merge_maps(&user_labels, &driver_labels);
+        let labels: std::collections::BTreeMap<String, String> = labels_map
+            .iter()
+            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+            .collect();
+
+        let mut obj = DynamicObject::new(&sb.name, &self.sandbox_ar);
+        obj.metadata.namespace = Some(self.cfg.namespace.clone());
+        obj.metadata.labels = Some(labels);
+        obj.data = json!({ "spec": self.build_sandbox_spec(sb) });
+        obj
+    }
+}
+
+fn string_from_value_kind(
+    kind: &prost_types::value::Kind,
+) -> Option<String> {
+    match kind {
+        prost_types::value::Kind::StringValue(s) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+#[async_trait]
+impl SandboxProvisioner for KymaProvisioner {
+    async fn create(&self, sb: &DriverSandbox) -> Result<(), DriverError> {
+        let obj = self.build_dynamic_object(sb);
+        self.sandboxes_api()
+            .create(&PostParams::default(), &obj)
+            .await?;
+        tracing::info!(
+            sandbox_id = %sb.id,
+            sandbox_name = %sb.name,
+            namespace = %self.cfg.namespace,
+            "sandbox CR created"
+        );
+        Ok(())
+    }
+
+    async fn delete(&self, name: &str) -> Result<(), DriverError> {
+        match self.sandboxes_api().delete(name, &DeleteParams::default()).await {
+            Ok(_) => Ok(()),
+            Err(kube::Error::Api(s)) if s.code == 404 => {
+                Err(DriverError::NotFound(name.to_string()))
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    async fn get(&self, name: &str) -> Result<DriverSandbox, DriverError> {
+        match self.sandboxes_api().get(name).await {
+            Ok(obj) => Ok(object_to_driver_sandbox(&obj)),
+            Err(kube::Error::Api(s)) if s.code == 404 => {
+                Err(DriverError::NotFound(name.to_string()))
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    async fn list(&self) -> Result<Vec<DriverSandbox>, DriverError> {
+        let lp = ListParams::default()
+            .labels(&format!("{LABEL_MANAGED_BY}=openshell"));
+        let list = self.sandboxes_api().list(&lp).await?;
+        Ok(list.items.iter().map(object_to_driver_sandbox).collect())
+    }
+
+    async fn watch(&self) -> Result<mpsc::Receiver<WatchEvent>, DriverError> {
+        let api = self.sandboxes_api();
+        let cfg = watcher::Config::default()
+            .labels(&format!("{LABEL_MANAGED_BY}=openshell"));
+
+        let (tx, rx) = mpsc::channel::<WatchEvent>(64);
+
+        tokio::spawn(async move {
+            let mut stream = watcher(api, cfg).boxed();
+            while let Ok(Some(ev)) = stream.try_next().await {
+                use kube::runtime::watcher::Event;
+                let event = match ev {
+                    Event::Apply(obj) | Event::InitApply(obj) => {
+                        WatchEvent::Updated(object_to_driver_sandbox(&obj))
+                    }
+                    Event::Delete(obj) => {
+                        let id = obj
+                            .metadata
+                            .labels
+                            .as_ref()
+                            .and_then(|l| l.get(LABEL_SANDBOX_ID).cloned())
+                            .unwrap_or_default();
+                        WatchEvent::Deleted(id)
+                    }
+                    Event::Init | Event::InitDone => continue,
+                };
+                if tx.send(event).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        Ok(rx)
+    }
+
+    async fn validate_create(&self, sb: &DriverSandbox) -> Result<(), DriverError> {
+        if let Some(spec) = sb.spec.as_ref() {
+            if spec.gpu {
+                let ok = self.has_gpu_capacity().await?;
+                if !ok {
+                    return Err(DriverError::FailedPrecondition(format!(
+                        "no nodes with {GPU_RESOURCE} allocatable in the cluster"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn has_gpu_capacity(&self) -> Result<bool, DriverError> {
+        if !self.cfg.gpu_support {
+            return Ok(false);
+        }
+        let nodes: Api<Node> = Api::all(self.client.clone());
+        let list = nodes.list(&ListParams::default()).await?;
+        for node in list.items {
+            if let Some(alloc) = node.status.as_ref().and_then(|s| s.allocatable.as_ref()) {
+                if let Some(q) = alloc.get(GPU_RESOURCE) {
+                    if q.0 != "0" {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+        Ok(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use computev1::pb::{DriverSandbox, DriverSandboxSpec, DriverSandboxTemplate};
+
+    fn make_provisioner() -> KymaProvisioner {
+        let cfg = Config {
+            namespace: "test-ns".into(),
+            ..Config::default()
+        };
+        // Construct a Client pointed at a placeholder; tests only call
+        // pure methods (build_sandbox_spec, build_dynamic_object).
+        let svc = tower::service_fn(|_req: http::Request<kube::client::Body>| async move {
+            Ok::<_, std::convert::Infallible>(http::Response::new(kube::client::Body::empty()))
+        });
+        let client = Client::new(svc, "test-ns");
+        KymaProvisioner::new(client, cfg)
+    }
+
+    fn make_sandbox(id: &str, name: &str, image: &str) -> DriverSandbox {
+        DriverSandbox {
+            id: id.into(),
+            name: name.into(),
+            spec: Some(DriverSandboxSpec {
+                template: Some(DriverSandboxTemplate {
+                    image: image.into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn build_sandbox_spec_includes_supervisor_init_container() {
+        let p = make_provisioner();
+        let sb = make_sandbox("sb-1", "create-test", "agent:latest");
+        let spec = p.build_sandbox_spec(&sb);
+
+        let init = &spec["podTemplate"]["spec"]["initContainers"][0];
+        assert_eq!(init["name"], "supervisor-init");
+        assert_eq!(init["image"], p.cfg.supervisor_image);
+        assert_eq!(init["command"][0], "cp");
+        assert_eq!(init["command"][1], p.cfg.supervisor_binary_path);
+        assert_eq!(
+            init["command"][2],
+            format!("{}/", p.cfg.supervisor_mount_path)
+        );
+    }
+
+    #[tokio::test]
+    async fn build_sandbox_spec_agent_container_runs_supervisor() {
+        let p = make_provisioner();
+        let sb = make_sandbox("sb-1", "create-test", "myimage:1.2");
+        let spec = p.build_sandbox_spec(&sb);
+
+        let c = &spec["podTemplate"]["spec"]["containers"][0];
+        assert_eq!(c["name"], "agent");
+        assert_eq!(c["image"], "myimage:1.2");
+        assert_eq!(
+            c["command"][0],
+            format!("{}/openshell-sandbox", p.cfg.supervisor_mount_path)
+        );
+    }
+
+    #[tokio::test]
+    async fn build_sandbox_spec_security_context_has_required_caps() {
+        let p = make_provisioner();
+        let sb = make_sandbox("sb-1", "x", "img");
+        let spec = p.build_sandbox_spec(&sb);
+
+        let sc = &spec["podTemplate"]["spec"]["containers"][0]["securityContext"];
+        assert_eq!(sc["privileged"], true);
+        assert_eq!(sc["runAsUser"], 0);
+        let caps: Vec<&str> = sc["capabilities"]["add"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(caps, vec!["SYS_ADMIN", "NET_ADMIN", "SYS_PTRACE", "SYSLOG"]);
+    }
+
+    #[tokio::test]
+    async fn build_sandbox_spec_emptydir_volume_mounted_readonly() {
+        let p = make_provisioner();
+        let sb = make_sandbox("sb-1", "x", "img");
+        let spec = p.build_sandbox_spec(&sb);
+
+        let vol = &spec["podTemplate"]["spec"]["volumes"][0];
+        assert_eq!(vol["name"], "supervisor-bin");
+        assert!(vol.get("emptyDir").is_some());
+        let mount = &spec["podTemplate"]["spec"]["containers"][0]["volumeMounts"][0];
+        assert_eq!(mount["name"], "supervisor-bin");
+        assert_eq!(mount["readOnly"], true);
+    }
+
+    #[tokio::test]
+    async fn build_sandbox_spec_service_account_pinned() {
+        let p = make_provisioner();
+        let sb = make_sandbox("sb-1", "x", "img");
+        let spec = p.build_sandbox_spec(&sb);
+        assert_eq!(
+            spec["podTemplate"]["spec"]["serviceAccountName"],
+            "openshell-sandbox"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_sandbox_spec_default_labels_present() {
+        let p = make_provisioner();
+        let sb = make_sandbox("sb-1", "x", "img");
+        let spec = p.build_sandbox_spec(&sb);
+        let labels = &spec["podTemplate"]["metadata"]["labels"];
+        assert_eq!(labels["openshell.ai/sandbox-id"], "sb-1");
+        assert_eq!(labels["openshell.ai/managed-by"], "openshell");
+        assert_eq!(labels["kagenti.io/type"], "agent");
+    }
+
+    #[tokio::test]
+    async fn istio_inject_label_set_when_disabled() {
+        let p = make_provisioner();
+        let sb = make_sandbox("sb-1", "x", "img");
+        let spec = p.build_sandbox_spec(&sb);
+        assert_eq!(
+            spec["podTemplate"]["metadata"]["labels"]["sidecar.istio.io/inject"],
+            "false"
+        );
+    }
+
+    #[tokio::test]
+    async fn istio_inject_label_absent_when_enabled() {
+        let cfg = Config {
+            namespace: "test-ns".into(),
+            istio_inject_sandboxes: true,
+            ..Config::default()
+        };
+        let svc = tower::service_fn(|_req: http::Request<kube::client::Body>| async move {
+            Ok::<_, std::convert::Infallible>(http::Response::new(kube::client::Body::empty()))
+        });
+        let client = Client::new(svc, "test-ns");
+        let p = KymaProvisioner::new(client, cfg);
+        let sb = make_sandbox("sb-1", "x", "img");
+        let spec = p.build_sandbox_spec(&sb);
+        assert!(
+            spec["podTemplate"]["metadata"]["labels"]
+                .get("sidecar.istio.io/inject")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn user_labels_merged_with_driver_labels() {
+        let p = make_provisioner();
+        let mut sb = make_sandbox("sb-1", "x", "img");
+        sb.spec.as_mut().unwrap().template.as_mut().unwrap().labels =
+            [("custom".to_string(), "user".to_string())]
+                .into_iter()
+                .collect();
+        let spec = p.build_sandbox_spec(&sb);
+        let labels = &spec["podTemplate"]["metadata"]["labels"];
+        assert_eq!(labels["custom"], "user");
+        assert_eq!(labels["openshell.ai/sandbox-id"], "sb-1");
+    }
+
+    #[tokio::test]
+    async fn default_resources_injected_when_template_omits_resources() {
+        let p = make_provisioner();
+        let sb = make_sandbox("sb-1", "x", "img");
+        let spec = p.build_sandbox_spec(&sb);
+        let res = &spec["podTemplate"]["spec"]["containers"][0]["resources"];
+        assert_eq!(res["requests"]["cpu"], "100m");
+        assert_eq!(res["requests"]["memory"], "128Mi");
+        assert_eq!(res["limits"]["cpu"], "500m");
+        assert_eq!(res["limits"]["memory"], "512Mi");
+    }
+
+    #[tokio::test]
+    async fn explicit_resources_passed_through() {
+        let p = make_provisioner();
+        let mut sb = make_sandbox("sb-1", "x", "img");
+        sb.spec.as_mut().unwrap().template.as_mut().unwrap().resources =
+            Some(computev1::pb::DriverResourceRequirements {
+                cpu_request: "200m".into(),
+                memory_request: "256Mi".into(),
+                cpu_limit: "1".into(),
+                memory_limit: "1Gi".into(),
+            });
+        let spec = p.build_sandbox_spec(&sb);
+        let res = &spec["podTemplate"]["spec"]["containers"][0]["resources"];
+        assert_eq!(res["requests"]["cpu"], "200m");
+        assert_eq!(res["limits"]["memory"], "1Gi");
+    }
+
+    #[tokio::test]
+    async fn driver_injected_env_present() {
+        let p = make_provisioner();
+        let sb = make_sandbox("sb-1", "create-test", "img");
+        let spec = p.build_sandbox_spec(&sb);
+        let env = spec["podTemplate"]["spec"]["containers"][0]["env"]
+            .as_array()
+            .unwrap();
+        let names: Vec<&str> = env.iter().map(|e| e["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"OPENSHELL_SANDBOX_ID"));
+        assert!(names.contains(&"OPENSHELL_SANDBOX"));
+        assert!(names.contains(&"ANTHROPIC_BASE_URL"));
+        assert!(names.contains(&"OPENAI_BASE_URL"));
+    }
+
+    #[tokio::test]
+    async fn has_gpu_capacity_short_circuits_when_flag_disabled() {
+        let cfg = Config {
+            namespace: "test-ns".into(),
+            gpu_support: false,
+            ..Config::default()
+        };
+        let svc = tower::service_fn(|_req: http::Request<kube::client::Body>| async move {
+            Ok::<_, std::convert::Infallible>(http::Response::new(kube::client::Body::empty()))
+        });
+        let client = Client::new(svc, "test-ns");
+        let p = KymaProvisioner::new(client, cfg);
+        // No HTTP request is made because the flag short-circuits.
+        assert_eq!(p.has_gpu_capacity().await.unwrap(), false);
+    }
+
+    #[tokio::test]
+    async fn validate_create_passes_when_no_gpu_requested() {
+        let p = make_provisioner();
+        let sb = make_sandbox("sb-1", "x", "img");
+        // gpu=false in the spec; no node check should be needed.
+        p.validate_create(&sb).await.unwrap();
+    }
+}
