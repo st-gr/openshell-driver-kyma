@@ -28,6 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         jq \
         pkg-config \
         protobuf-compiler \
+        libprotobuf-dev \
         build-essential \
     && rm -rf /var/lib/apt/lists/*
 
