@@ -36,15 +36,12 @@ impl KymaEnricher {
 impl PlatformEnricher for KymaEnricher {
     async fn detect_psa(&self, namespace: &str) -> Result<String, DriverError> {
         let ns_api: Api<Namespace> = Api::all(self.client.clone());
-        let ns = ns_api
-            .get(namespace)
-            .await
-            .map_err(|e| match e {
-                kube::Error::Api(s) if s.code == 404 => DriverError::FailedPrecondition(
-                    format!("namespace {namespace} not found"),
-                ),
-                other => DriverError::Kube(other),
-            })?;
+        let ns = ns_api.get(namespace).await.map_err(|e| match e {
+            kube::Error::Api(s) if s.code == 404 => {
+                DriverError::FailedPrecondition(format!("namespace {namespace} not found"))
+            }
+            other => DriverError::Kube(other),
+        })?;
 
         let value = ns
             .metadata
@@ -72,11 +69,13 @@ impl PlatformEnricher for KymaEnricher {
         // Ensure metadata.labels exists.
         let metadata = template
             .as_object_mut()
-            .and_then(|t| t.entry("metadata").or_insert_with(|| json!({})).as_object_mut())
+            .and_then(|t| {
+                t.entry("metadata")
+                    .or_insert_with(|| json!({}))
+                    .as_object_mut()
+            })
             .ok_or_else(|| {
-                DriverError::Internal(anyhow::anyhow!(
-                    "pod template has no metadata object"
-                ))
+                DriverError::Internal(anyhow::anyhow!("pod template has no metadata object"))
             })?;
 
         let labels = metadata
@@ -92,10 +91,7 @@ impl PlatformEnricher for KymaEnricher {
         if !self.cfg.istio_inject_sandboxes {
             // Stamp the deny-injection label so Istio leaves the pod alone,
             // even if the namespace has injection enabled.
-            labels.insert(
-                ISTIO_INJECT_LABEL.into(),
-                Value::String("false".into()),
-            );
+            labels.insert(ISTIO_INJECT_LABEL.into(), Value::String("false".into()));
         } else {
             // Explicitly remove any prior value we added so the namespace's
             // default applies.
@@ -105,11 +101,7 @@ impl PlatformEnricher for KymaEnricher {
         Ok(template)
     }
 
-    fn render_apirule(
-        &self,
-        sandbox_id: &str,
-        sandbox_name: &str,
-    ) -> Option<Value> {
+    fn render_apirule(&self, sandbox_id: &str, sandbox_name: &str) -> Option<Value> {
         if !self.cfg.enable_apirule {
             return None;
         }
@@ -183,7 +175,10 @@ mod tests {
         });
         let out = e.enrich_pod_template(template, "ns").await.unwrap();
         assert_eq!(out["metadata"]["labels"]["existing"], "v");
-        assert_eq!(out["metadata"]["labels"]["sidecar.istio.io/inject"], "false");
+        assert_eq!(
+            out["metadata"]["labels"]["sidecar.istio.io/inject"],
+            "false"
+        );
     }
 
     #[tokio::test]
@@ -213,7 +208,10 @@ mod tests {
         });
         let template = json!({ "spec": {} });
         let out = e.enrich_pod_template(template, "ns").await.unwrap();
-        assert_eq!(out["metadata"]["labels"]["sidecar.istio.io/inject"], "false");
+        assert_eq!(
+            out["metadata"]["labels"]["sidecar.istio.io/inject"],
+            "false"
+        );
     }
 
     #[tokio::test]

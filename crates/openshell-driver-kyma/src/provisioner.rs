@@ -3,7 +3,7 @@
 //! Manages `agents.x-k8s.io/v1alpha1/Sandbox` CRs in a single namespace via
 //! `kube::Api<DynamicObject>` (the CRD is third-party so we don't generate
 //! a typed wrapper). The supervisor binary is delivered via init container
-//! + `emptyDir`, mirroring the Go OpenShift driver's approach (see
+//! plus `emptyDir`, mirroring the Go OpenShift driver's approach (see
 //! `docs/why-init-container.md`).
 //!
 //! Test strategy: the pure JSON construction in `build_sandbox_spec` is
@@ -15,9 +15,7 @@
 
 use crate::config::Config;
 use crate::error::DriverError;
-use crate::helpers::{
-    build_env_list, build_resources, merge_maps, object_to_driver_sandbox,
-};
+use crate::helpers::{build_env_list, build_resources, merge_maps, object_to_driver_sandbox};
 use crate::interfaces::{SandboxProvisioner, WatchEvent};
 use async_trait::async_trait;
 use computev1::pb::DriverSandbox;
@@ -157,9 +155,7 @@ impl KymaProvisioner {
         }
 
         // ---------- pod template metadata (labels) ----------
-        let user_labels = template
-            .map(|t| t.labels.clone())
-            .unwrap_or_default();
+        let user_labels = template.map(|t| t.labels.clone()).unwrap_or_default();
         let mut driver_labels: HashMap<String, String> = HashMap::new();
         driver_labels.insert(LABEL_SANDBOX_ID.into(), sb.id.clone());
         driver_labels.insert(LABEL_MANAGED_BY.into(), "openshell".into());
@@ -181,9 +177,7 @@ impl KymaProvisioner {
         let spec = sb.spec.as_ref();
         let template = spec.and_then(|s| s.template.as_ref());
         let spec_env = spec.map(|s| s.environment.clone()).unwrap_or_default();
-        let tmpl_env = template
-            .map(|t| t.environment.clone())
-            .unwrap_or_default();
+        let tmpl_env = template.map(|t| t.environment.clone()).unwrap_or_default();
 
         let mut envs = build_env_list(&spec_env, &tmpl_env);
 
@@ -193,10 +187,19 @@ impl KymaProvisioner {
         gw_env.insert("OPENSHELL_SANDBOX".into(), sb.name.clone());
         gw_env.insert("OPENSHELL_SANDBOX_COMMAND".into(), "sleep infinity".into());
         if !self.cfg.gateway_endpoint.is_empty() {
-            gw_env.insert("OPENSHELL_ENDPOINT".into(), self.cfg.gateway_endpoint.clone());
+            gw_env.insert(
+                "OPENSHELL_ENDPOINT".into(),
+                self.cfg.gateway_endpoint.clone(),
+            );
         }
-        gw_env.insert("ANTHROPIC_BASE_URL".into(), "https://inference.local/v1".into());
-        gw_env.insert("OPENAI_BASE_URL".into(), "https://inference.local/v1".into());
+        gw_env.insert(
+            "ANTHROPIC_BASE_URL".into(),
+            "https://inference.local/v1".into(),
+        );
+        gw_env.insert(
+            "OPENAI_BASE_URL".into(),
+            "https://inference.local/v1".into(),
+        );
 
         for (k, v) in gw_env {
             envs.push(json!({ "name": k, "value": v }));
@@ -237,9 +240,7 @@ impl KymaProvisioner {
     }
 }
 
-fn string_from_value_kind(
-    kind: &prost_types::value::Kind,
-) -> Option<String> {
+fn string_from_value_kind(kind: &prost_types::value::Kind) -> Option<String> {
     match kind {
         prost_types::value::Kind::StringValue(s) => Some(s.clone()),
         _ => None,
@@ -263,7 +264,11 @@ impl SandboxProvisioner for KymaProvisioner {
     }
 
     async fn delete(&self, name: &str) -> Result<(), DriverError> {
-        match self.sandboxes_api().delete(name, &DeleteParams::default()).await {
+        match self
+            .sandboxes_api()
+            .delete(name, &DeleteParams::default())
+            .await
+        {
             Ok(_) => Ok(()),
             Err(kube::Error::Api(s)) if s.code == 404 => {
                 Err(DriverError::NotFound(name.to_string()))
@@ -283,16 +288,14 @@ impl SandboxProvisioner for KymaProvisioner {
     }
 
     async fn list(&self) -> Result<Vec<DriverSandbox>, DriverError> {
-        let lp = ListParams::default()
-            .labels(&format!("{LABEL_MANAGED_BY}=openshell"));
+        let lp = ListParams::default().labels(&format!("{LABEL_MANAGED_BY}=openshell"));
         let list = self.sandboxes_api().list(&lp).await?;
         Ok(list.items.iter().map(object_to_driver_sandbox).collect())
     }
 
     async fn watch(&self) -> Result<mpsc::Receiver<WatchEvent>, DriverError> {
         let api = self.sandboxes_api();
-        let cfg = watcher::Config::default()
-            .labels(&format!("{LABEL_MANAGED_BY}=openshell"));
+        let cfg = watcher::Config::default().labels(&format!("{LABEL_MANAGED_BY}=openshell"));
 
         let (tx, rx) = mpsc::channel::<WatchEvent>(64);
 
@@ -302,7 +305,7 @@ impl SandboxProvisioner for KymaProvisioner {
                 use kube::runtime::watcher::Event;
                 let event = match ev {
                     Event::Apply(obj) | Event::InitApply(obj) => {
-                        WatchEvent::Updated(object_to_driver_sandbox(&obj))
+                        WatchEvent::Updated(Box::new(object_to_driver_sandbox(&obj)))
                     }
                     Event::Delete(obj) => {
                         let id = obj
@@ -354,6 +357,46 @@ impl SandboxProvisioner for KymaProvisioner {
             }
         }
         Ok(false)
+    }
+
+    async fn apply_apirule(&self, manifest: serde_json::Value) -> Result<(), DriverError> {
+        let gvk = GroupVersionKind {
+            group: "gateway.kyma-project.io".into(),
+            version: "v2".into(),
+            kind: "APIRule".into(),
+        };
+        let ar = ApiResource::from_gvk_with_plural(&gvk, "apirules");
+        let api: Api<DynamicObject> =
+            Api::namespaced_with(self.client.clone(), &self.cfg.namespace, &ar);
+
+        let name = manifest
+            .pointer("/metadata/name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let mut obj = DynamicObject::new(name, &ar);
+        obj.metadata.namespace = Some(self.cfg.namespace.clone());
+        if let Some(labels) = manifest
+            .pointer("/metadata/labels")
+            .and_then(|v| v.as_object())
+        {
+            obj.metadata.labels = Some(
+                labels
+                    .iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect(),
+            );
+        }
+        if let Some(spec) = manifest.get("spec") {
+            obj.data = serde_json::json!({ "spec": spec });
+        }
+
+        api.create(&PostParams::default(), &obj).await?;
+        tracing::info!(
+            apirule = %name,
+            namespace = %self.cfg.namespace,
+            "APIRule created"
+        );
+        Ok(())
     }
 }
 
@@ -502,11 +545,9 @@ mod tests {
         let p = KymaProvisioner::new(client, cfg);
         let sb = make_sandbox("sb-1", "x", "img");
         let spec = p.build_sandbox_spec(&sb);
-        assert!(
-            spec["podTemplate"]["metadata"]["labels"]
-                .get("sidecar.istio.io/inject")
-                .is_none()
-        );
+        assert!(spec["podTemplate"]["metadata"]["labels"]
+            .get("sidecar.istio.io/inject")
+            .is_none());
     }
 
     #[tokio::test]
@@ -539,13 +580,18 @@ mod tests {
     async fn explicit_resources_passed_through() {
         let p = make_provisioner();
         let mut sb = make_sandbox("sb-1", "x", "img");
-        sb.spec.as_mut().unwrap().template.as_mut().unwrap().resources =
-            Some(computev1::pb::DriverResourceRequirements {
-                cpu_request: "200m".into(),
-                memory_request: "256Mi".into(),
-                cpu_limit: "1".into(),
-                memory_limit: "1Gi".into(),
-            });
+        sb.spec
+            .as_mut()
+            .unwrap()
+            .template
+            .as_mut()
+            .unwrap()
+            .resources = Some(computev1::pb::DriverResourceRequirements {
+            cpu_request: "200m".into(),
+            memory_request: "256Mi".into(),
+            cpu_limit: "1".into(),
+            memory_limit: "1Gi".into(),
+        });
         let spec = p.build_sandbox_spec(&sb);
         let res = &spec["podTemplate"]["spec"]["containers"][0]["resources"];
         assert_eq!(res["requests"]["cpu"], "200m");
@@ -580,7 +626,7 @@ mod tests {
         let client = Client::new(svc, "test-ns");
         let p = KymaProvisioner::new(client, cfg);
         // No HTTP request is made because the flag short-circuits.
-        assert_eq!(p.has_gpu_capacity().await.unwrap(), false);
+        assert!(!p.has_gpu_capacity().await.unwrap());
     }
 
     #[tokio::test]

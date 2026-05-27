@@ -11,5 +11,5 @@ pub mod pb {
     tonic::include_proto!("openshell.compute.v1");
 }
 
-pub use pb::compute_driver_server;
 pub use pb::compute_driver_client;
+pub use pb::compute_driver_server;

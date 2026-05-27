@@ -12,11 +12,10 @@
 
 use async_trait::async_trait;
 use computev1::pb::{
-    compute_driver_client::ComputeDriverClient,
-    compute_driver_server::ComputeDriverServer, watch_sandboxes_event::Payload,
-    CreateSandboxRequest, DeleteSandboxRequest, DriverSandbox, DriverSandboxSpec,
-    DriverSandboxTemplate, GetCapabilitiesRequest, GetSandboxRequest, ListSandboxesRequest,
-    StopSandboxRequest, ValidateSandboxCreateRequest, WatchSandboxesRequest,
+    compute_driver_client::ComputeDriverClient, compute_driver_server::ComputeDriverServer,
+    watch_sandboxes_event::Payload, CreateSandboxRequest, DeleteSandboxRequest, DriverSandbox,
+    DriverSandboxSpec, DriverSandboxTemplate, GetCapabilitiesRequest, GetSandboxRequest,
+    ListSandboxesRequest, StopSandboxRequest, ValidateSandboxCreateRequest, WatchSandboxesRequest,
 };
 use mockall::mock;
 use openshell_driver_kyma::{
@@ -48,6 +47,7 @@ mock! {
         async fn watch(&self) -> Result<mpsc::Receiver<WatchEvent>, DriverError>;
         async fn validate_create(&self, sb: &DriverSandbox) -> Result<(), DriverError>;
         async fn has_gpu_capacity(&self) -> Result<bool, DriverError>;
+        async fn apply_apirule(&self, manifest: serde_json::Value) -> Result<(), DriverError>;
     }
 }
 
@@ -186,8 +186,7 @@ async fn grpc_create_then_get_round_trips() {
     m.expect_sandbox_created().return_const(());
 
     let (_dir, socket) = temp_socket();
-    let (mut client, shutdown, handle) =
-        start_server(socket, p, MockEnricher::new(), m).await;
+    let (mut client, shutdown, handle) = start_server(socket, p, MockEnricher::new(), m).await;
 
     client
         .create_sandbox(CreateSandboxRequest {
@@ -323,11 +322,11 @@ async fn grpc_validate_returns_failed_precondition_when_provisioner_rejects() {
 #[tokio::test]
 async fn grpc_watch_streams_two_events_then_closes() {
     let (tx, rx) = mpsc::channel::<WatchEvent>(4);
-    tx.send(WatchEvent::Updated(DriverSandbox {
+    tx.send(WatchEvent::Updated(Box::new(DriverSandbox {
         id: "id-A".into(),
         name: "A".into(),
         ..Default::default()
-    }))
+    })))
     .await
     .unwrap();
     tx.send(WatchEvent::Deleted("id-B".into())).await.unwrap();
@@ -342,8 +341,7 @@ async fn grpc_watch_streams_two_events_then_closes() {
     m.expect_watch_event_received().return_const(());
 
     let (_dir, socket) = temp_socket();
-    let (mut client, shutdown, handle) =
-        start_server(socket, p, MockEnricher::new(), m).await;
+    let (mut client, shutdown, handle) = start_server(socket, p, MockEnricher::new(), m).await;
 
     let mut stream = client
         .watch_sandboxes(WatchSandboxesRequest {})

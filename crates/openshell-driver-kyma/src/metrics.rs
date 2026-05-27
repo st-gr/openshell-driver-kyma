@@ -137,7 +137,6 @@ pub struct HealthState {
 }
 
 /// Build the axum router that exposes /healthz, /readyz, /metrics.
-#[must_use]
 pub fn router(state: HealthState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
@@ -247,7 +246,9 @@ mod tests {
         });
 
         // /healthz
-        let resp = reqwest::get(format!("http://{addr}/healthz")).await.unwrap();
+        let resp = reqwest::get(format!("http://{addr}/healthz"))
+            .await
+            .unwrap();
         assert_eq!(resp.status(), 200);
         assert_eq!(resp.text().await.unwrap(), "ok");
 
@@ -256,7 +257,9 @@ mod tests {
         assert_eq!(resp.status(), 200);
 
         // /metrics
-        let resp = reqwest::get(format!("http://{addr}/metrics")).await.unwrap();
+        let resp = reqwest::get(format!("http://{addr}/metrics"))
+            .await
+            .unwrap();
         assert_eq!(resp.status(), 200);
         let body = resp.text().await.unwrap();
         assert!(body.contains("openshell_driver_sandbox_created_total"));

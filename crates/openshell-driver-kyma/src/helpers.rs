@@ -159,10 +159,7 @@ pub fn build_resources(res: &DriverResourceRequirements, gpu: bool) -> Value {
 /// Merge two string maps. Values in `b` override values in `a`. Returned as
 /// a JSON map so it slots straight into a pod-template label block.
 #[must_use]
-pub fn merge_maps(
-    a: &HashMap<String, String>,
-    b: &HashMap<String, String>,
-) -> Map<String, Value> {
+pub fn merge_maps(a: &HashMap<String, String>, b: &HashMap<String, String>) -> Map<String, Value> {
     let mut out = Map::new();
     for (k, v) in a {
         out.insert(k.clone(), Value::String(v.clone()));

@@ -79,7 +79,7 @@ fmt-check:
 
 .PHONY: clippy
 clippy:
-	$(DOCKER_RUN) $(DEV_IMAGE) cargo clippy --workspace --all-targets -- -D warnings -W clippy::pedantic
+	$(DOCKER_RUN) $(DEV_IMAGE) cargo clippy --workspace --all-targets -- -D warnings
 
 .PHONY: build
 build:

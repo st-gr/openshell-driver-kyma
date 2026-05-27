@@ -5,16 +5,14 @@
 
 use crate::config::Config;
 use crate::error::DriverError;
-use crate::interfaces::{
-    DriverMetrics, PlatformEnricher, SandboxProvisioner, WatchEvent,
-};
+use crate::interfaces::{DriverMetrics, PlatformEnricher, SandboxProvisioner, WatchEvent};
 use computev1::pb::{
     compute_driver_server::ComputeDriver, CreateSandboxRequest, CreateSandboxResponse,
-    DeleteSandboxRequest, DeleteSandboxResponse, GetCapabilitiesRequest,
-    GetCapabilitiesResponse, GetSandboxRequest, GetSandboxResponse, ListSandboxesRequest,
-    ListSandboxesResponse, StopSandboxRequest, StopSandboxResponse,
-    ValidateSandboxCreateRequest, ValidateSandboxCreateResponse, WatchSandboxesDeletedEvent,
-    WatchSandboxesEvent, WatchSandboxesRequest, WatchSandboxesSandboxEvent,
+    DeleteSandboxRequest, DeleteSandboxResponse, GetCapabilitiesRequest, GetCapabilitiesResponse,
+    GetSandboxRequest, GetSandboxResponse, ListSandboxesRequest, ListSandboxesResponse,
+    StopSandboxRequest, StopSandboxResponse, ValidateSandboxCreateRequest,
+    ValidateSandboxCreateResponse, WatchSandboxesDeletedEvent, WatchSandboxesEvent,
+    WatchSandboxesRequest, WatchSandboxesSandboxEvent,
 };
 use futures::Stream;
 use std::pin::Pin;
@@ -25,16 +23,13 @@ use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status};
 
 const DRIVER_NAME: &str = "kyma";
-const DEFAULT_SANDBOX_IMAGE: &str =
-    "ghcr.io/nvidia/openshell-community/sandboxes/base:latest";
+const DEFAULT_SANDBOX_IMAGE: &str = "ghcr.io/nvidia/openshell-community/sandboxes/base:latest";
 
-pub type WatchStream =
-    Pin<Box<dyn Stream<Item = Result<WatchSandboxesEvent, Status>> + Send>>;
+pub type WatchStream = Pin<Box<dyn Stream<Item = Result<WatchSandboxesEvent, Status>> + Send>>;
 
 /// `Driver` exposes the OpenShell ComputeDriver gRPC contract.
 pub struct Driver {
     provisioner: Arc<dyn SandboxProvisioner>,
-    #[allow(dead_code)] // wired into provisioner.create in Task 40
     enricher: Arc<dyn PlatformEnricher>,
     metrics: Arc<dyn DriverMetrics>,
     cfg: Config,
@@ -120,9 +115,28 @@ impl ComputeDriver for Driver {
         let start = Instant::now();
         let gpu = spec.gpu;
         let name = sb.name.clone();
+        let id = sb.id.clone();
         match self.provisioner.create(&sb).await {
             Ok(()) => {
                 self.metrics.sandbox_created(&name, gpu, start.elapsed());
+
+                // Optional APIRule post — gated by --enable-apirule. Failure
+                // here does NOT roll back the Sandbox CR; we surface it as
+                // a metric and log so operators can investigate. Returning
+                // the create-success keeps the gateway happy.
+                if self.cfg.enable_apirule {
+                    if let Some(manifest) = self.enricher.render_apirule(&id, &name) {
+                        if let Err(e) = self.provisioner.apply_apirule(manifest).await {
+                            self.metrics.sandbox_failed(&name, "apirule_failed");
+                            tracing::warn!(
+                                sandbox_name = %name,
+                                error = %e,
+                                "APIRule create failed; sandbox CR remains"
+                            );
+                        }
+                    }
+                }
+
                 Ok(Response::new(CreateSandboxResponse {}))
             }
             Err(e) => {
@@ -137,11 +151,7 @@ impl ComputeDriver for Driver {
         req: Request<GetSandboxRequest>,
     ) -> Result<Response<GetSandboxResponse>, Status> {
         let name = req.into_inner().sandbox_name;
-        let sandbox = self
-            .provisioner
-            .get(&name)
-            .await
-            .map_err(Status::from)?;
+        let sandbox = self.provisioner.get(&name).await.map_err(Status::from)?;
         Ok(Response::new(GetSandboxResponse {
             sandbox: Some(sandbox),
         }))
@@ -151,11 +161,7 @@ impl ComputeDriver for Driver {
         &self,
         _req: Request<ListSandboxesRequest>,
     ) -> Result<Response<ListSandboxesResponse>, Status> {
-        let sandboxes = self
-            .provisioner
-            .list()
-            .await
-            .map_err(Status::from)?;
+        let sandboxes = self.provisioner.list().await.map_err(Status::from)?;
         Ok(Response::new(ListSandboxesResponse { sandboxes }))
     }
 
@@ -208,23 +214,19 @@ impl ComputeDriver for Driver {
                 WatchEvent::Updated(sandbox) => {
                     metrics.watch_event_received("updated");
                     WatchSandboxesEvent {
-                        payload: Some(
-                            computev1::pb::watch_sandboxes_event::Payload::Sandbox(
-                                WatchSandboxesSandboxEvent {
-                                    sandbox: Some(sandbox),
-                                },
-                            ),
-                        ),
+                        payload: Some(computev1::pb::watch_sandboxes_event::Payload::Sandbox(
+                            WatchSandboxesSandboxEvent {
+                                sandbox: Some(*sandbox),
+                            },
+                        )),
                     }
                 }
                 WatchEvent::Deleted(id) => {
                     metrics.watch_event_received("deleted");
                     WatchSandboxesEvent {
-                        payload: Some(
-                            computev1::pb::watch_sandboxes_event::Payload::Deleted(
-                                WatchSandboxesDeletedEvent { sandbox_id: id },
-                            ),
-                        ),
+                        payload: Some(computev1::pb::watch_sandboxes_event::Payload::Deleted(
+                            WatchSandboxesDeletedEvent { sandbox_id: id },
+                        )),
                     }
                 }
             };
@@ -238,9 +240,7 @@ impl ComputeDriver for Driver {
 mod tests {
     use super::*;
     use crate::interfaces::{MockDriverMetrics, MockPlatformEnricher, MockSandboxProvisioner};
-    use computev1::pb::{
-        DriverSandbox, DriverSandboxSpec, DriverSandboxTemplate,
-    };
+    use computev1::pb::{DriverSandbox, DriverSandboxSpec, DriverSandboxTemplate};
     use mockall::predicate::*;
     use std::time::Duration;
     use tokio::sync::mpsc;
@@ -281,11 +281,8 @@ mod tests {
             gpu_support: true,
             ..Config::default()
         };
-        let d = make_driver_with_mocks(
-            cfg,
-            MockSandboxProvisioner::new(),
-            MockDriverMetrics::new(),
-        );
+        let d =
+            make_driver_with_mocks(cfg, MockSandboxProvisioner::new(), MockDriverMetrics::new());
         let r = d
             .get_capabilities(Request::new(GetCapabilitiesRequest {}))
             .await
@@ -306,11 +303,8 @@ mod tests {
             gpu_support: false,
             ..Config::default()
         };
-        let d = make_driver_with_mocks(
-            cfg,
-            MockSandboxProvisioner::new(),
-            MockDriverMetrics::new(),
-        );
+        let d =
+            make_driver_with_mocks(cfg, MockSandboxProvisioner::new(), MockDriverMetrics::new());
         let r = d
             .get_capabilities(Request::new(GetCapabilitiesRequest {}))
             .await
@@ -559,11 +553,11 @@ mod tests {
         // Pre-build a channel with one Updated and one Deleted event, then
         // drop the sender to close the stream.
         let (tx, rx) = mpsc::channel::<WatchEvent>(4);
-        tx.send(WatchEvent::Updated(DriverSandbox {
+        tx.send(WatchEvent::Updated(Box::new(DriverSandbox {
             id: "id-A".into(),
             name: "A".into(),
             ..Default::default()
-        }))
+        })))
         .await
         .unwrap();
         tx.send(WatchEvent::Deleted("id-B".into())).await.unwrap();
@@ -573,9 +567,8 @@ mod tests {
         // mockall can't return a non-Clone mpsc::Receiver directly; wrap in
         // a one-shot Option pattern.
         let rx_cell = std::sync::Mutex::new(Some(rx));
-        p.expect_watch().returning(move || {
-            Ok(rx_cell.lock().unwrap().take().expect("watch called once"))
-        });
+        p.expect_watch()
+            .returning(move || Ok(rx_cell.lock().unwrap().take().expect("watch called once")));
 
         let mut m = MockDriverMetrics::new();
         m.expect_watch_event_received().return_const(());
@@ -620,9 +613,8 @@ mod tests {
 
         let mut p = MockSandboxProvisioner::new();
         let rx_cell = std::sync::Mutex::new(Some(rx));
-        p.expect_watch().returning(move || {
-            Ok(rx_cell.lock().unwrap().take().expect("watch called once"))
-        });
+        p.expect_watch()
+            .returning(move || Ok(rx_cell.lock().unwrap().take().expect("watch called once")));
 
         let m = MockDriverMetrics::new();
         let d = make_driver_with_mocks(Config::default(), p, m);

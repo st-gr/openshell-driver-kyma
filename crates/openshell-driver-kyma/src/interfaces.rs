@@ -11,10 +11,14 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 /// One observation produced by the Sandbox CR watcher.
+///
+/// `Updated` carries a boxed snapshot to keep the variant sizes balanced —
+/// `DriverSandbox` is several hundred bytes whereas the `Deleted` payload
+/// is just a `String`.
 #[derive(Debug, Clone)]
 pub enum WatchEvent {
     /// A Sandbox CR was created or updated. Carries the latest snapshot.
-    Updated(DriverSandbox),
+    Updated(Box<DriverSandbox>),
     /// A Sandbox CR was deleted. Carries the sandbox id label value.
     Deleted(String),
 }
@@ -30,6 +34,11 @@ pub trait SandboxProvisioner: Send + Sync + 'static {
     async fn watch(&self) -> Result<mpsc::Receiver<WatchEvent>, DriverError>;
     async fn validate_create(&self, sb: &DriverSandbox) -> Result<(), DriverError>;
     async fn has_gpu_capacity(&self) -> Result<bool, DriverError>;
+
+    /// POST a rendered Kyma `APIRule` manifest. No-op when the APIRule
+    /// flag is off — the driver layer still gates the call site, this
+    /// method only handles the HTTP for callers that pass a manifest.
+    async fn apply_apirule(&self, manifest: serde_json::Value) -> Result<(), DriverError>;
 }
 
 /// Kyma-specific behaviors layered onto the bare provisioner: Pod Security
@@ -54,11 +63,7 @@ pub trait PlatformEnricher: Send + Sync + 'static {
 
     /// Renders the optional APIRule manifest. Returns `None` when the
     /// `--enable-apirule` flag is off.
-    fn render_apirule(
-        &self,
-        sandbox_id: &str,
-        sandbox_name: &str,
-    ) -> Option<serde_json::Value>;
+    fn render_apirule(&self, sandbox_id: &str, sandbox_name: &str) -> Option<serde_json::Value>;
 }
 
 /// Bounded-cardinality counters and histograms. Implementations should
@@ -77,7 +82,7 @@ mod tests {
 
     #[test]
     fn watch_event_constructs() {
-        let _u = WatchEvent::Updated(DriverSandbox::default());
+        let _u = WatchEvent::Updated(Box::default());
         let _d = WatchEvent::Deleted("sb-1".to_string());
     }
 }

@@ -47,49 +47,38 @@ async fn main() -> Result<()> {
         "starting openshell-driver-kyma"
     );
 
-    let kube_client = build_kube_client()
-        .await
-        .context("build kube client")?;
+    let kube_client = build_kube_client().await.context("build kube client")?;
 
     // PSA fail-fast: must happen before we bind the listener, so a
     // misconfigured cluster never sees a half-up driver.
-    let enricher = Arc::new(KymaEnricher::new(kube_client.clone(), cfg.clone()))
-        as Arc<dyn PlatformEnricher>;
+    let enricher =
+        Arc::new(KymaEnricher::new(kube_client.clone(), cfg.clone())) as Arc<dyn PlatformEnricher>;
     enricher
         .detect_psa(&cfg.namespace)
         .await
         .context("PSA pre-flight check")?;
     tracing::info!(namespace = %cfg.namespace, "PSA enforce=privileged confirmed");
 
-    let provisioner = Arc::new(KymaProvisioner::new(kube_client, cfg.clone()))
-        as Arc<dyn SandboxProvisioner>;
-    let metrics_concrete = Arc::new(
-        PrometheusMetrics::new().context("build Prometheus registry")?,
-    );
+    let provisioner =
+        Arc::new(KymaProvisioner::new(kube_client, cfg.clone())) as Arc<dyn SandboxProvisioner>;
+    let metrics_concrete = Arc::new(PrometheusMetrics::new().context("build Prometheus registry")?);
     let metrics = metrics_concrete.clone() as Arc<dyn DriverMetrics>;
     let ready = Arc::new(AtomicBool::new(false));
 
     // Clean up any stale socket from a previous run.
     let _ = std::fs::remove_file(&cfg.socket);
-    let listener = UnixListener::bind(&cfg.socket)
-        .with_context(|| format!("bind UDS at {}", cfg.socket))?;
-    std::fs::set_permissions(&cfg.socket, std::fs::Permissions::from_mode(0o660))
-        .ok();
+    let listener =
+        UnixListener::bind(&cfg.socket).with_context(|| format!("bind UDS at {}", cfg.socket))?;
+    std::fs::set_permissions(&cfg.socket, std::fs::Permissions::from_mode(0o660)).ok();
     let stream = UnixListenerStream::new(listener);
 
-    let driver = Driver::new_with_deps(
-        provisioner,
-        enricher.clone(),
-        metrics,
-        cfg.clone(),
-    );
+    let driver = Driver::new_with_deps(provisioner, enricher.clone(), metrics, cfg.clone());
     let svc = ComputeDriverServer::new(driver);
 
     // Sidecar HTTP server for kubelet probes + Prometheus scrapes.
-    let http_addr: std::net::SocketAddr =
-        format!("0.0.0.0:{}", cfg.health_port)
-            .parse()
-            .context("parse health-port")?;
+    let http_addr: std::net::SocketAddr = format!("0.0.0.0:{}", cfg.health_port)
+        .parse()
+        .context("parse health-port")?;
     let http_metrics = metrics_concrete.clone();
     let http_ready = ready.clone();
     let http_handle = tokio::spawn(async move {
@@ -114,8 +103,7 @@ async fn main() -> Result<()> {
 }
 
 fn init_tracing(level: &str) {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(level));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .json()
