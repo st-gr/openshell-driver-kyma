@@ -1,0 +1,20 @@
+apiVersion: v2
+name: openshell-driver-kyma
+description: OpenShell ComputeDriver gRPC service for SAP BTP Kyma clusters.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.27.0-0"
+keywords:
+  - openshell
+  - compute-driver
+  - kyma
+  - kubernetes
+  - agents
+home: https://github.com/st-gr/openshell-driver-kyma
+sources:
+  - https://github.com/st-gr/openshell-driver-kyma
+maintainers:
+  - name: openshell-driver-kyma contributors
+annotations:
+  category: Infrastructure
