@@ -1459,6 +1459,7 @@ dependencies = [
  "futures",
  "http",
  "http-body-util",
+ "hyper-util",
  "k8s-openapi",
  "kube",
  "mockall",

@@ -63,6 +63,8 @@ tempfile = { workspace = true }
 assert_cmd = { workspace = true }
 reqwest = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }
+hyper-util = { workspace = true }
+async-trait = { workspace = true }
 
 [features]
 # Gates Tier-3 live-cluster tests in tests/live_cluster.rs.
