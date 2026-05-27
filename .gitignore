@@ -1,0 +1,40 @@
+# Build artifacts
+target/
+**/*.rs.bk
+*.pdb
+
+# Local reference clones (read-only inspiration; not part of this repo)
+reference-openshift/
+
+# Sockets and lock files
+*.sock
+
+# Kubeconfig (NEVER commit cluster credentials)
+kubeconfig*
+*.kubeconfig
+.kube/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Coverage and profiling
+coverage/
+*.profraw
+lcov.info
+
+# Distribution
+dist/
+*.tgz
+
+# Note: Cargo.lock IS committed for binary crates (we ship binaries).
