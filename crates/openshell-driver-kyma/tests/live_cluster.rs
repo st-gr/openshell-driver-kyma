@@ -61,6 +61,31 @@ const SYSTEM_DENYLIST: &[&str] = &[
     "agent-sandbox-system",
 ];
 
+/// Pure validation: panic if `ns` is on the deny-list extended by `extra_denylist`.
+/// Split out from `integration_namespace()` so unit tests for deny-list
+/// behavior do not need to mutate process-global env vars (which would
+/// leak into the live tests running afterwards in the same process).
+fn validate_namespace_against_denylist(ns: &str, extra_denylist: Option<&str>) {
+    let mut denylist: Vec<String> = SYSTEM_DENYLIST.iter().map(|s| (*s).into()).collect();
+    if let Some(extra) = extra_denylist {
+        for n in extra.split(',') {
+            let n = n.trim();
+            if !n.is_empty() {
+                denylist.push(n.to_string());
+            }
+        }
+    }
+
+    if denylist.iter().any(|d| d == ns) {
+        panic!(
+            "Refusing to run integration tests against denylisted namespace {ns:?}.\n\
+             System denylist: {SYSTEM_DENYLIST:?}\n\
+             Set INTEGRATION_TEST_NAMESPACE to a project-owned namespace and\n\
+             optionally extend the denylist via INTEGRATION_TEST_NAMESPACE_DENYLIST."
+        );
+    }
+}
+
 /// Read the test namespace from `INTEGRATION_TEST_NAMESPACE`, panicking if
 /// the value is on the deny-list. Operators can extend the deny-list at
 /// runtime via `INTEGRATION_TEST_NAMESPACE_DENYLIST` (comma-separated).
@@ -70,25 +95,8 @@ fn integration_namespace() -> Option<String> {
     if ns.is_empty() {
         return None;
     }
-
-    let mut denylist: Vec<String> = SYSTEM_DENYLIST.iter().map(|s| (*s).into()).collect();
-    if let Ok(extra) = std::env::var("INTEGRATION_TEST_NAMESPACE_DENYLIST") {
-        for n in extra.split(',') {
-            let n = n.trim();
-            if !n.is_empty() {
-                denylist.push(n.to_string());
-            }
-        }
-    }
-
-    if denylist.iter().any(|d| d == &ns) {
-        panic!(
-            "Refusing to run integration tests against denylisted namespace {ns:?}.\n\
-             System denylist: {SYSTEM_DENYLIST:?}\n\
-             Set INTEGRATION_TEST_NAMESPACE to a project-owned namespace and\n\
-             optionally extend the denylist via INTEGRATION_TEST_NAMESPACE_DENYLIST."
-        );
-    }
+    let extra = std::env::var("INTEGRATION_TEST_NAMESPACE_DENYLIST").ok();
+    validate_namespace_against_denylist(&ns, extra.as_deref());
     Some(ns)
 }
 
@@ -144,9 +152,17 @@ async fn ensure_test_namespace(client: &Client, ns: &str) {
             .await
             .expect("create test namespace");
     } else {
-        // Patch the PSA label in case it was removed.
+        // Patch the PSA label in case it was removed. Server-side apply
+        // requires apiVersion + kind in the patch body so the API server
+        // can resolve the resource type; omitting them returns 400
+        // "invalid object type: /, Kind=".
         let patch = serde_json::json!({
-            "metadata": { "labels": { PSA_LABEL: "privileged" } }
+            "apiVersion": "v1",
+            "kind": "Namespace",
+            "metadata": {
+                "name": ns,
+                "labels": { PSA_LABEL: "privileged" }
+            }
         });
         ns_api
             .patch(
@@ -245,16 +261,15 @@ fn make_create_request(name: &str, image: &str) -> CreateSandboxRequest {
 #[test]
 #[should_panic(expected = "denylisted")]
 fn denylist_kube_system_panics() {
-    std::env::set_var("INTEGRATION_TEST_NAMESPACE", "kube-system");
-    let _ = integration_namespace();
+    // Bypass env vars entirely; mutating them here would leak into the
+    // live tests running later in the same process.
+    validate_namespace_against_denylist("kube-system", None);
 }
 
 #[test]
 #[should_panic(expected = "denylisted")]
 fn denylist_extra_via_env_panics() {
-    std::env::set_var("INTEGRATION_TEST_NAMESPACE", "verboten");
-    std::env::set_var("INTEGRATION_TEST_NAMESPACE_DENYLIST", "verboten,other");
-    let _ = integration_namespace();
+    validate_namespace_against_denylist("verboten", Some("verboten,other"));
 }
 
 // ---------------------------------------------------------------------------
