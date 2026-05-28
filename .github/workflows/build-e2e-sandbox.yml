@@ -1,0 +1,52 @@
+name: build-e2e-sandbox
+# Builds and publishes the minimal sandbox-base image used by the
+# `make e2e-cli` end-to-end test. The image carries the `sandbox` user
+# + iproute2 + nftables that the OpenShell supervisor requires.
+#
+# Triggered on push to main when the e2e Dockerfile or this workflow
+# changes, and on manual dispatch.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'e2e/sandbox/**'
+      - '.github/workflows/build-e2e-sandbox.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Lowercase repo owner
+        id: repo
+        run: echo "lower=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: e2e/sandbox
+          file: e2e/sandbox/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ steps.repo.outputs.lower }}/e2e-sandbox:${{ github.sha }}
+            ghcr.io/${{ steps.repo.outputs.lower }}/e2e-sandbox:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
