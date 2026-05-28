@@ -27,55 +27,22 @@ for the implementation plan.
 
 ## Quick start
 
-### Prerequisites on the cluster
+Follow [`docs/getting-started.md`](docs/getting-started.md) — a
+linear walkthrough from "I have a Kyma cluster" to a running sandbox
+in ~15 minutes. It mirrors what `make e2e-cli` does in CI, so it's
+guaranteed to track the implementation.
 
-- Kyma cluster with the **Istio** module enabled (default in Kyma).
-- The
-  [`kubernetes-sigs/agent-sandbox`](https://github.com/kubernetes-sigs/agent-sandbox)
-  CRD installed:
+For production deploys (OIDC user auth, public Kyma APIRule, image
+digests pinned), see [`docs/production-deployment.md`](docs/production-deployment.md).
 
-  ```bash
-  kubectl apply -f \
-    https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/main/k8s/crds/agents.x-k8s.io_sandboxes.yaml
-  ```
+For private VPN routing through SAP Cloud Connector, see
+[`docs/cloud-connector-setup.md`](docs/cloud-connector-setup.md).
 
-- A namespace for sandbox CRs, labeled
-  `pod-security.kubernetes.io/enforce: privileged` (cluster-admin operation
-  — required because the supervisor inside each sandbox needs `SYS_ADMIN`,
-  `NET_ADMIN`, `SYS_PTRACE`, and `SYSLOG` capabilities to install
-  Landlock/seccomp). The driver fails fast if this label is missing.
+For installing the `openshell` CLI itself, see
+[`docs/install-cli.md`](docs/install-cli.md).
 
-  ```bash
-  kubectl create namespace openshell-system
-  kubectl label namespace openshell-system \
-    pod-security.kubernetes.io/enforce=privileged --overwrite
-  ```
-
-### Install via Helm
-
-```bash
-helm install openshell-driver-kyma deploy/helm/openshell-driver-kyma \
-  --namespace openshell-system --create-namespace \
-  --set image.repository=ghcr.io/st-gr/openshell-driver-kyma \
-  --set image.tag=latest
-```
-
-### Verify the driver is running
-
-```bash
-kubectl -n openshell-system get pods
-kubectl -n openshell-system logs deploy/openshell-driver-kyma
-# Expected: "driver ready" line in JSON tracing output
-```
-
-### Connect the OpenShell gateway
-
-The driver listens on a Unix domain socket inside the pod. Run the
-gateway as a sidecar in the same pod (sharing an `emptyDir` for the
-socket) and start it with `--compute-driver-socket=/shared/driver.sock`.
-A reference deployment lives at
-[`deploy/gateway-with-driver.yaml`](deploy/gateway-with-driver.yaml) (TBD
-— upstream gateway dependency tracked in the design spec section 6).
+For programmatic gRPC access without the CLI, see
+[`docs/openshell-api-programmatic-usage.md`](docs/openshell-api-programmatic-usage.md).
 
 ## Configuration reference
 
