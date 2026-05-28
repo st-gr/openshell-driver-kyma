@@ -58,3 +58,20 @@ deploy/runner/.env*
 scripts/node_modules/
 
 .claude/
+
+# Screenshots and other operator-environment artifacts that may carry
+# subaccount UUIDs, tunnel IDs, support emails, or hostnames. The
+# repo intentionally has no committed design assets — anything matching
+# the patterns below is operator-private and must never land here.
+sensitive-*
+*-gitignore.*
+*PII*
+*pii*
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.webp
+# Specific filename safety net for the SCC screenshot.
+sensitive-PII-created-sap-cloud-connector-gitignore.png
