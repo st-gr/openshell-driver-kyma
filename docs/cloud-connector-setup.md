@@ -111,10 +111,14 @@ The "Add Service Channel" dialog asks for four required fields:
   segment between `api.` and `.kyma.ondemand.com`, e.g.
   `c-abc1234`). It must be unique across all Service Channels on
   the same SCC; reusing the shoot ID makes that natural.
-- **Local Port** — any free TCP port on the SCC host. `8443`,
-  `6443`, or `30443` are conventional for Kubernetes apiservers;
-  avoid ports already in use by another channel or by a service
-  on the SCC host.
+- **Local Port** — any free TCP port on the SCC host EXCEPT
+  `8443` (reserved by SCC's own admin UI) and `8080` (reserved by
+  SCC's HTTPS proxy listener). `6443` is the cleanest choice — it
+  matches the Kubernetes default apiserver port, so `kubectl`
+  users find the resulting kubeconfig URL natural. If `6443` is
+  also taken, try `30443` or `38443`. SCC will reject any port it
+  cannot bind with a "port not available" message, which is the
+  fast feedback loop here.
 - **Connections** — TCP connection pool size. `1` is plenty for
   one developer running `kubectl` interactively; raise to `2`-`4`
   if multiple users share the channel or you need parallel
