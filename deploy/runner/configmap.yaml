@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gh-runner-env
+  namespace: gh-runner
+  labels:
+    app.kubernetes.io/name: gh-runner
+    app.kubernetes.io/managed-by: openshell-driver-kyma
+data:
+  # Anthropic-compatible base URL of the in-cluster your-llm-gateway (nginx
+  # routes /gateway/anthropic/* through to the Claude proxy upstream).
+  # In-cluster path means no public ingress, no IP allowlist drama,
+  # no public APIRule quota burn.
+  ANTHROPIC_BASE_URL: "http://nginx.your-llm-gateway.svc.cluster.local:8080/gateway/anthropic"
+  # Default model for Claude Code invocations.
+  ANTHROPIC_MODEL: "claude-opus-4-7"
+  # Disables Anthropic SDK's optional telemetry pings.
+  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"

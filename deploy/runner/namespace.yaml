@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gh-runner
+  labels:
+    # Pod Security Admission: the runner pod fits the restricted profile
+    # (runs as UID 1000, no privileged caps, no hostPath, etc.).
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+    # No Istio sidecar — the runner only talks to in-cluster Services and
+    # GitHub egress; the gateway/runner pair does not need mTLS.
+    istio-injection: disabled
+    app.kubernetes.io/name: gh-runner
+    app.kubernetes.io/managed-by: openshell-driver-kyma
