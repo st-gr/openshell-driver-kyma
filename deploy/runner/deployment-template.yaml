@@ -1,0 +1,101 @@
+# Parameterized Deployment template for a single self-hosted runner pod
+# bound to one GitHub repo. The placeholders __OWNER__, __REPO__, and
+# __NAME__ are substituted by scripts/add-runner-repo.js, which writes
+# the rendered file to deploy/runner/deployments/<owner>-<repo>.yaml.
+#
+# Image: ghcr.io/actions/actions-runner — the same image the official
+# Actions Runner Controller uses. Replace `:latest` with a pinned
+# digest (recorded in deploy/runner/README.md) before any production
+# rollout.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: __NAME__
+  namespace: gh-runner
+  labels:
+    app.kubernetes.io/name: gh-runner
+    app.kubernetes.io/managed-by: openshell-driver-kyma
+    runner-repo: __OWNER__-__REPO__
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate    # ephemeral runners; no rolling update value
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gh-runner
+      runner-repo: __OWNER__-__REPO__
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gh-runner
+        app.kubernetes.io/managed-by: openshell-driver-kyma
+        runner-repo: __OWNER__-__REPO__
+    spec:
+      serviceAccountName: gh-runner
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      restartPolicy: Always
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: runner
+          image: ghcr.io/actions/actions-runner:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "/runner-entrypoint/entrypoint.sh"]
+          env:
+            - name: ACCESS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: gh-runner-creds
+                  key: GITHUB_PAT
+            - name: ANTHROPIC_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: gh-runner-creds
+                  key: ANTHROPIC_AUTH_TOKEN
+            - name: REPO_URL
+              value: "https://github.com/__OWNER__/__REPO__"
+            - name: RUNNER_NAME
+              value: "__NAME__"
+            - name: LABELS
+              value: "self-hosted,kyma"
+          envFrom:
+            - configMapRef:
+                name: gh-runner-env
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            runAsNonRoot: true
+            runAsUser: 1001
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          volumeMounts:
+            - name: entrypoint
+              mountPath: /runner-entrypoint
+              readOnly: true
+            - name: runner-work
+              mountPath: /home/runner/_work
+            - name: runner-tmp
+              mountPath: /tmp
+      volumes:
+        - name: entrypoint
+          configMap:
+            name: gh-runner-entrypoint
+            defaultMode: 0o555      # readable + executable for all
+        - name: runner-work
+          emptyDir:
+            sizeLimit: 4Gi
+        - name: runner-tmp
+          emptyDir:
+            sizeLimit: 1Gi

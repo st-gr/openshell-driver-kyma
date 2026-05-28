@@ -1,0 +1,73 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gh-runner-entrypoint
+  namespace: gh-runner
+  labels:
+    app.kubernetes.io/name: gh-runner
+    app.kubernetes.io/managed-by: openshell-driver-kyma
+data:
+  # Custom entrypoint for ghcr.io/actions/actions-runner.
+  #
+  # Replaces the third-party myoung34/github-runner image entirely.
+  # ~30 lines of bash that we own and audit. Reads ACCESS_TOKEN
+  # (GitHub PAT) and REPO_URL from env, mints a short-lived
+  # registration token via the GitHub API, registers, runs, and
+  # deregisters on SIGTERM. No supply-chain dependency beyond
+  # GitHub's own runner image and bash + curl.
+  entrypoint.sh: |
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    : "${ACCESS_TOKEN:?ACCESS_TOKEN (GitHub PAT) env var is required}"
+    : "${REPO_URL:?REPO_URL (https://github.com/<owner>/<repo>) env var is required}"
+    : "${RUNNER_NAME:=runner-$(hostname)}"
+    : "${LABELS:=self-hosted,kyma}"
+
+    cd /home/runner
+
+    repo_path="${REPO_URL#https://github.com/}"
+    api_url="https://api.github.com/repos/${repo_path}/actions/runners"
+
+    mint_token() {
+      # $1 is "registration-token" or "remove-token".
+      curl --fail --silent --show-error \
+        --request POST \
+        --header "Authorization: Bearer ${ACCESS_TOKEN}" \
+        --header "Accept: application/vnd.github+json" \
+        --header "X-GitHub-Api-Version: 2022-11-28" \
+        "${api_url}/$1" \
+      | sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
+    }
+
+    cleanup() {
+      echo "[entrypoint] received signal, deregistering ${RUNNER_NAME}"
+      local remove_token
+      remove_token="$(mint_token 'remove-token' || true)"
+      if [[ -n "${remove_token}" ]]; then
+        ./config.sh remove --token "${remove_token}" || true
+      fi
+      exit 0
+    }
+    trap cleanup SIGTERM SIGINT
+
+    reg_token="$(mint_token 'registration-token')"
+    if [[ -z "${reg_token}" ]]; then
+      echo "[entrypoint] failed to mint registration token from ${api_url}" >&2
+      echo "[entrypoint] check that the PAT has 'repo' + 'workflow' scopes and the repo URL is correct" >&2
+      exit 1
+    fi
+
+    ./config.sh \
+      --url "${REPO_URL}" \
+      --token "${reg_token}" \
+      --name "${RUNNER_NAME}" \
+      --labels "${LABELS}" \
+      --unattended \
+      --replace \
+      --disableupdate \
+      --ephemeral
+
+    # `& wait $!` so SIGTERM reaches the bash trap, not the runner subprocess.
+    ./run.sh &
+    wait $!
