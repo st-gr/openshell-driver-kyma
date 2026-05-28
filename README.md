@@ -52,15 +52,15 @@ All flags also work as `values.yaml` keys in the Helm chart.
 |------|---------|---------|
 | `--socket` | `/var/run/openshell-driver.sock` | UDS path for the gRPC server |
 | `--namespace` | `openshell-system` | Namespace where Sandbox CRs are created |
-| `--supervisor-image` | `ghcr.io/nvidia/openshell-community/supervisor:latest` | Init-container image carrying the supervisor binary |
-| `--supervisor-binary-path` | `/usr/local/bin/openshell-sandbox` | Path to the supervisor inside the image |
+| `--supervisor-image` | `ghcr.io/nvidia/openshell/supervisor:latest` | Init-container image carrying the supervisor binary (distroless; binary self-copies via `copy-self`) |
+| `--supervisor-binary-path` | `/openshell-sandbox` | Path to the supervisor inside the image (matches the distroless image's layout) |
 | `--supervisor-mount-path` | `/opt/openshell/bin` | Mount point in the agent container |
 | `--gateway-endpoint` | `""` | Optional `OPENSHELL_ENDPOINT` env var injected into sandboxes |
 | `--istio-inject-sandboxes` | `false` | When false, stamps `sidecar.istio.io/inject: "false"` on sandbox pods |
 | `--enable-apirule` | `false` | Create one `gateway.kyma-project.io/v2/APIRule` per sandbox |
 | `--cluster-domain` | `""` (auto-discover) | Kyma cluster domain suffix; only used with `--enable-apirule` |
 | `--gpu-support` | `true` | Validate `nvidia.com/gpu` capacity at create time (cluster-scope node read) |
-| `--enable-network-policy` | `false` | Render the optional sandbox `NetworkPolicy` (Helm only) |
+| `--enable-network-policy` | `true` | Render the driver+gateway and sandbox `NetworkPolicy` (default-on as of 2026-05-28) |
 | `--health-port` | `9090` | TCP port for `/healthz`, `/readyz`, `/metrics` |
 | `--log-level` | `info` | Tracing level (`RUST_LOG` overrides) |
 
