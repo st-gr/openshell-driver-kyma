@@ -92,3 +92,50 @@ chart) is mapped to: Kyma's PSA detection (done), Istio injection toggle
 (done), `APIRule` rendering (done), Prometheus metrics (done), Helm
 chart (done). OAuth proxy sidecar injection is not in scope for the Kyma
 driver — Kyma exposes JWT auth directly via the `APIRule` `jwt` handler.
+
+## Sandbox-to-gateway authentication
+
+OpenShift driver: relies on a shared sandbox secret + `Route` for the
+gateway. The supervisor reads the secret from a mounted ConfigMap.
+
+Kyma driver: projected ServiceAccount token (audience-bound to
+`openshell-gateway`, kubelet-rotated) exchanged for a per-sandbox JWT
+via the gateway's `IssueSandboxToken` RPC. The gateway validates the
+projected token via the apiserver's `TokenReview` API, reads the
+sandbox-pod's `openshell.io/sandbox-id` annotation, mints a fresh
+sandbox JWT signed with a key the gateway holds. Mints a fresh JWT
+on supervisor startup and on refresh-near-expiry.
+
+Why the difference: Kyma clusters typically issue OIDC kubeconfigs
+through SAP IAS, the supervisor pod has no shared cluster-wide secret
+to share, and a projected token is rotated automatically by kubelet.
+The Kyma chart's pre-install hook runs `openshell-gateway generate-certs`
+to write the JWT signing-key Secret on first install.
+
+## Network policy posture
+
+OpenShift driver: relies on the cluster's default `NetworkPolicy` or
+the operator's overlay. No NetworkPolicy in the chart.
+
+Kyma driver: NetworkPolicy is **default-on** as of 2026-05-28. The
+chart renders two policies:
+
+- driver+gateway pod: ingress on health/grpc/metrics ports, egress to
+  DNS and 443.
+- sandbox pods (label-selected): no ingress, egress to DNS, the in-pod
+  gateway VIP, and 0.0.0.0/0:443 with RFC1918 excluded — so a
+  compromised sandbox cannot pivot to internal services but the
+  agentic-workflow case (curl GitHub, npm, anthropic.com, pypi)
+  still works.
+
+Operators who need internal-cluster sandbox egress add an overlay
+policy; the chart's defaults stay tight.
+
+## Public APIRule guard
+
+The chart refuses to render `gatewayApirule.yaml` if
+`gatewayApirule.enabled=true` and `gateway.oidc.issuer=""`. Without
+this guard, an operator could combine a public host with
+`allow_unauthenticated_users=true` (set automatically when no
+issuer) and `--disable-tls`, producing a world-writable sandbox
+factory.
