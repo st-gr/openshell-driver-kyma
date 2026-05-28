@@ -255,6 +255,19 @@ impl KymaProvisioner {
             "OPENSHELL_K8S_SA_TOKEN_FILE".into(),
             format!("{SA_TOKEN_MOUNT_PATH}/token"),
         );
+        // Filesystem path of the Unix socket the supervisor's embedded SSH
+        // daemon binds. The supervisor only spawns its long-lived
+        // supervisor_session control stream (which bridges
+        // RelayStream traffic from the gateway -> exec/SSH inside the
+        // sandbox) when this env var is set. Without it the gateway
+        // returns "supervisor session not connected" on every exec call.
+        // Matches the upstream Kubernetes driver's default; the agent
+        // container runs privileged + UID 0 so it can create /run/openshell
+        // itself, no extra mount needed.
+        gw_env.insert(
+            "OPENSHELL_SSH_SOCKET_PATH".into(),
+            "/run/openshell/ssh.sock".into(),
+        );
         if !self.cfg.gateway_endpoint.is_empty() {
             gw_env.insert(
                 "OPENSHELL_ENDPOINT".into(),

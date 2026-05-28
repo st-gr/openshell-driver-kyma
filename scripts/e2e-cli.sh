@@ -34,7 +34,7 @@ NS="${INTEGRATION_TEST_NAMESPACE:?must be set}"
 SVC="${E2E_SVC_NAME:-ods-openshell-driver-kyma}"
 PORT="${E2E_PORT:-8080}"
 TIMEOUT_READY="${E2E_READY_TIMEOUT:-180}"
-SB_IMAGE="${E2E_SANDBOX_IMAGE:-ghcr.io/st-gr/openshell-driver-kyma/e2e-sandbox:latest}"
+SB_IMAGE="${E2E_SANDBOX_IMAGE:-ghcr.io/st-gr/e2e-sandbox:latest}"
 LOG_PREFIX='[e2e-cli]'
 
 log() { printf '%s %s\n' "$LOG_PREFIX" "$*" >&2; }
