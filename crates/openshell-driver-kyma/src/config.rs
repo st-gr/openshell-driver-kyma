@@ -28,12 +28,12 @@ pub struct Config {
     /// OCI image containing the supervisor binary copied into the sandbox.
     #[arg(
         long,
-        default_value = "ghcr.io/nvidia/openshell-community/supervisor:latest"
+        default_value = "ghcr.io/nvidia/openshell/supervisor:latest"
     )]
     pub supervisor_image: String,
 
     /// Path to the supervisor binary inside the supervisor image.
-    #[arg(long, default_value = "/usr/local/bin/openshell-sandbox")]
+    #[arg(long, default_value = "/openshell-sandbox")]
     pub supervisor_binary_path: String,
 
     /// Mount path for the supervisor binary volume in the agent container.
@@ -89,8 +89,8 @@ impl Default for Config {
         Self {
             socket: "/var/run/openshell-driver.sock".to_string(),
             namespace: "openshell-system".to_string(),
-            supervisor_image: "ghcr.io/nvidia/openshell-community/supervisor:latest".to_string(),
-            supervisor_binary_path: "/usr/local/bin/openshell-sandbox".to_string(),
+            supervisor_image: "ghcr.io/nvidia/openshell/supervisor:latest".to_string(),
+            supervisor_binary_path: "/openshell-sandbox".to_string(),
             supervisor_mount_path: "/opt/openshell/bin".to_string(),
             gateway_endpoint: String::new(),
             istio_inject_sandboxes: false,
@@ -124,9 +124,9 @@ mod tests {
         assert_eq!(c.namespace, "openshell-system");
         assert_eq!(
             c.supervisor_image,
-            "ghcr.io/nvidia/openshell-community/supervisor:latest"
+            "ghcr.io/nvidia/openshell/supervisor:latest"
         );
-        assert_eq!(c.supervisor_binary_path, "/usr/local/bin/openshell-sandbox");
+        assert_eq!(c.supervisor_binary_path, "/openshell-sandbox");
         assert_eq!(c.supervisor_mount_path, "/opt/openshell/bin");
         assert_eq!(c.gateway_endpoint, "");
         assert!(!c.istio_inject_sandboxes);

@@ -17,12 +17,22 @@ serviceAccount:
   create: true
   name: openshell-driver
 
+# Sandbox pods (created by the agent-sandbox controller) attach this
+# ServiceAccount via spec.podSpec.serviceAccountName. The name is
+# hard-coded in the driver (provisioner.rs::SANDBOX_SERVICE_ACCOUNT)
+# and changing it requires a code change. The SA has no RBAC and
+# automountServiceAccountToken=false — sandbox code must not reach
+# the K8s API.
+sandboxServiceAccount:
+  create: true
+  name: openshell-sandbox
+
 # CLI flags exposed to operators. Each maps 1:1 to a `--<flag>` on the
 # binary; see openshell-driver-kyma --help for the authoritative list.
 driver:
   socket: /var/run/openshell-driver.sock
-  supervisorImage: ghcr.io/nvidia/openshell-community/supervisor:latest
-  supervisorBinaryPath: /usr/local/bin/openshell-sandbox
+  supervisorImage: ghcr.io/nvidia/openshell/supervisor:latest
+  supervisorBinaryPath: /openshell-sandbox
   supervisorMountPath: /opt/openshell/bin
   gatewayEndpoint: ""
   istioInjectSandboxes: false

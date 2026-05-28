@@ -80,13 +80,24 @@ impl KymaProvisioner {
         let template = spec.and_then(|s| s.template.as_ref());
 
         // ---------- supervisor init container ----------
+        // Upstream NVIDIA OpenShell publishes the supervisor as a distroless
+        // image containing only the `openshell-sandbox` binary at `/`. There
+        // is no `cp`, `sh`, or busybox to invoke, so the binary self-copies
+        // via its `copy-self <dest>` subcommand. This mirrors the argoexec
+        // emissary pattern and matches what the upstream Kubernetes driver
+        // does. See crates/openshell-driver-kubernetes/src/driver.rs in
+        // st-gr/OpenShell for the reference implementation.
+        let installed_path = format!(
+            "{}/openshell-sandbox",
+            self.cfg.supervisor_mount_path
+        );
         let init_container = json!({
             "name": SUPERVISOR_INIT_NAME,
             "image": self.cfg.supervisor_image,
             "command": [
-                "cp",
                 self.cfg.supervisor_binary_path,
-                format!("{}/", self.cfg.supervisor_mount_path),
+                "copy-self",
+                installed_path,
             ],
             "volumeMounts": [
                 {
