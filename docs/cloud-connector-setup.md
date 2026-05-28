@@ -113,12 +113,20 @@ The "Add Service Channel" dialog asks for four required fields:
   the same SCC; reusing the shoot ID makes that natural.
 - **Local Port** — any free TCP port on the SCC host EXCEPT
   `8443` (reserved by SCC's own admin UI) and `8080` (reserved by
-  SCC's HTTPS proxy listener). `6443` is the cleanest choice — it
-  matches the Kubernetes default apiserver port, so `kubectl`
-  users find the resulting kubeconfig URL natural. If `6443` is
-  also taken, try `30443` or `38443`. SCC will reject any port it
-  cannot bind with a "port not available" message, which is the
-  fast feedback loop here.
+  SCC's HTTPS proxy listener). The form rejects any port it can't
+  bind with "port not available" — fast feedback, but in a
+  multi-user SCC every existing Service Channel is already holding
+  one port, and you can't see those bindings from the BTP cockpit.
+  Two practical paths:
+  - **Ask the Basis team** for an allocated port. Any production
+    SCC with more than one Service Channel maintains a
+    per-subaccount port range. This is the operational norm.
+  - **Guess if you must.** SAP's older SCC convention was
+    auto-assigned `30033 + N` for the Nth K8s channel, so anywhere
+    between `30033` and `30099` is a reasonable first guess.
+    `9090`, `9091`, `11443`, `13443`, `15443` are also typically
+    free. Avoid `6443` / `8443` / `8080`. If the first try fails
+    you'll know within seconds, so iterate.
 - **Connections** — TCP connection pool size. `1` is plenty for
   one developer running `kubectl` interactively; raise to `2`-`4`
   if multiple users share the channel or you need parallel
