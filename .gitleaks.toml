@@ -21,7 +21,7 @@ keywords = ["sk-ant-"]
 
 [[rules]]
 id = "anthropic-bearer-key"
-description = "Anthropic-style auth token (sk-... NOT sk-ant-) used by your-llm-gateway"
+description = "Anthropic-style auth token (sk-... NOT sk-ant-) recognised by an in-cluster LLM gateway"
 # 30+ char hex/base64-ish suffix to reduce false positives on short patterns
 # like "sk-1" inside source code, while still catching the real tokens.
 regex = '''(?i)\bsk-[a-zA-Z0-9]{20,}'''

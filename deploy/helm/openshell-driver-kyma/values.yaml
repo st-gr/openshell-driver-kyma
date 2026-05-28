@@ -39,7 +39,7 @@ driver:
   enableApirule: false
   clusterDomain: ""
   gpuSupport: true
-  enableNetworkPolicy: false
+  enableNetworkPolicy: true
   healthPort: 9090
   logLevel: info
 

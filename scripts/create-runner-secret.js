@@ -62,10 +62,10 @@ function promptSecret(label) {
 
 async function main() {
   const pat = await promptSecret('GitHub PAT (classic; repo + workflow scopes)');
-  const token = await promptSecret('ANTHROPIC_AUTH_TOKEN (your-llm-gateway auth token)');
+  const token = await promptSecret('ANTHROPIC_AUTH_TOKEN (in-cluster LLM gateway auth token)');
 
   if (!pat || !token) die('both values are required');
-  // Lightweight format sanity (don't reject — your-llm-gateway tokens vary):
+  // Lightweight format sanity (don't reject — gateway-recognised tokens vary):
   if (!/^ghp_|^github_pat_/.test(pat)) {
     process.stderr.write('warning: PAT does not start with "ghp_" or "github_pat_" — proceeding anyway\n');
   }

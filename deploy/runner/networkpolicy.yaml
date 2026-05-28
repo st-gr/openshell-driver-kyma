@@ -2,8 +2,8 @@
 #
 # Default-deny everything for pods labeled app=gh-runner, then allow:
 #   1. DNS (UDP+TCP/53) to kube-system.
-#   2. In-cluster traffic to the your-llm-gateway namespace on port 8080
-#      (nginx routes /gateway/anthropic to the Claude proxy upstream).
+#   2. In-cluster traffic to your LLM gateway's namespace on port 8080
+#      (matching ANTHROPIC_BASE_URL in configmap.yaml).
 #   3. Egress to 0.0.0.0/0:443 — required for GitHub Actions
 #      (api.github.com, *.githubusercontent.com, ghcr.io). GitHub
 #      runner egress IPs are not statically pinnable in a vanilla
@@ -45,11 +45,13 @@ spec:
           protocol: UDP
         - port: 53
           protocol: TCP
-    # 2. In-cluster your-llm-gateway nginx
+    # 2. In-cluster LLM gateway. Adjust the namespace selector to match
+    #    where your Anthropic-compatible gateway lives (the same one
+    #    referenced by ANTHROPIC_BASE_URL in configmap.yaml).
     - to:
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: your-llm-gateway
+              kubernetes.io/metadata.name: example-ns
       ports:
         - port: 8080
           protocol: TCP

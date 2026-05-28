@@ -11,8 +11,8 @@ OpenShell gateway and provisions agent sandboxes as
 and vanilla Kubernetes, plus a community Go driver for OpenShift. Nothing
 exists for SAP BTP Kyma, so OpenShell can't currently run there. The user
 wants to use OpenShell on their existing Kyma cluster without forking
-NVIDIA's Rust workspace and without disturbing existing workloads in
-sensitive namespaces (`your-llm-gateway`, `<other-namespace>`, etc.).
+NVIDIA's Rust workspace and without disturbing existing in-cluster
+workloads in sensitive namespaces.
 
 **Reference and approach.** Mirror the structure of the Go OpenShift driver
 at `github.com/zanetworker/openshell-driver-openshift` (cloned to
@@ -30,8 +30,9 @@ image build — no cosign / Trivy / SBOM gates).
 **Hard constraints.**
 - **Isolation.** Driver writes/reads stay namespace-scoped. Tier-3 tests
   refuse to run against any system namespace; deny-list is extensible at
-  runtime via `INTEGRATION_TEST_NAMESPACE_DENYLIST` env var so the user can
-  protect `your-llm-gateway`, `<other-namespace>`, etc. without committing those names.
+  runtime via `INTEGRATION_TEST_NAMESPACE_DENYLIST` env var so operators
+  can protect their own pre-existing namespaces without committing those
+  names anywhere in the repo.
 - **Privacy.** No cluster IDs, IPs, OIDC issuers, or namespace names beyond
   generic examples land in any committed file.
 - **Security baseline.** Driver pod fits PSS `restricted`. Sandbox pods need
@@ -643,8 +644,8 @@ Run after Task 41:
 
 ## Reuse from existing code
 
-- **Reference Go driver** at `C:/tmp-bwx/openshell-driver-kyma/reference-openshift/`: every Rust task with TDD steps mirrors a corresponding Go file. Read the Go source side-by-side when implementing — the algorithms are identical, only the language idioms differ. Specifically: `internal/driver/driver.go` ↔ `src/driver.rs`; `provisioner.go` ↔ `src/provisioner.rs`; `helpers.go` ↔ `src/helpers.rs`; `interfaces.go` ↔ `src/interfaces.rs`; `enricher_noop.go` ↔ `src/enricher.rs` (we replace the noop with real Kyma logic); `cmd/driver/main.go` ↔ `src/main.rs`; `internal/grpctest/contract_test.go` ↔ `tests/grpc_contract.rs`; `test/integration/lifecycle_test.go` ↔ `tests/live_cluster.rs`; `Makefile` ↔ `Makefile`.
-- **User's prior Kyma work** at `<local-workspace-path>/<llm-proxy-product>/<llm-proxy-private>/kyma/`: deployment patterns (PeerAuthentication, DestinationRule, sidecar injection toggles) — read for context only; do not import any cluster-specific values.
+- **Reference Go driver** at `reference-openshift/` (cloned from the upstream OpenShift driver and gitignored): every Rust task with TDD steps mirrors a corresponding Go file. Read the Go source side-by-side when implementing — the algorithms are identical, only the language idioms differ. Specifically: `internal/driver/driver.go` ↔ `src/driver.rs`; `provisioner.go` ↔ `src/provisioner.rs`; `helpers.go` ↔ `src/helpers.rs`; `interfaces.go` ↔ `src/interfaces.rs`; `enricher_noop.go` ↔ `src/enricher.rs` (we replace the noop with real Kyma logic); `cmd/driver/main.go` ↔ `src/main.rs`; `internal/grpctest/contract_test.go` ↔ `tests/grpc_contract.rs`; `test/integration/lifecycle_test.go` ↔ `tests/live_cluster.rs`; `Makefile` ↔ `Makefile`.
+- **Operator's prior Kyma work**, if any, at a local-only path: deployment patterns (PeerAuthentication, DestinationRule, sidecar injection toggles) — read for context only; do not import any cluster-specific values into committed files.
 
 ## Notes for the executor
 

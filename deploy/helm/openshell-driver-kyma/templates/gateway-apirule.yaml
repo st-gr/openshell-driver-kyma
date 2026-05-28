@@ -5,6 +5,19 @@
 {{- if not .Values.gatewayApirule.host -}}
 {{- fail "gatewayApirule.enabled requires gatewayApirule.host (e.g. openshell.<your-cluster-id>.kyma.ondemand.com)." -}}
 {{- end -}}
+{{- /*
+   Critical safety check: refuse to render a publicly-exposed gateway
+   without authentication. Without OIDC, the gateway runs --disable-tls
+   AND allow_unauthenticated_users=true (set by gateway-config.yaml when
+   gateway.oidc.issuer is empty). Combining that with a Kyma APIRule
+   would produce a world-writable sandbox factory: anyone reaching the
+   public host could call CreateSandbox and run arbitrary code in
+   privileged sandbox pods (UID 0, SYS_ADMIN/NET_ADMIN/SYS_PTRACE/SYSLOG).
+   The APIRule is intended for OIDC-protected gateways only.
+*/ -}}
+{{- if not .Values.gateway.oidc.issuer -}}
+{{- fail (printf "REFUSING to render APIRule for an unauthenticated gateway. gatewayApirule.enabled is true but gateway.oidc.issuer is empty, which means the gateway runs with --disable-tls and allow_unauthenticated_users=true. Exposing that combination via APIRule would let anyone reach %q create privileged sandboxes. Set gateway.oidc.issuer (and audience) before enabling gatewayApirule, or run the gateway only behind a port-forward / mesh-internal route." .Values.gatewayApirule.host) -}}
+{{- end -}}
 # Kyma APIRule for external access to the gateway. The gateway speaks
 # gRPC; APIRule v2 accepts arbitrary HTTP/2 upstreams. JWT auth is
 # evaluated by the Kyma OAuth gateway before forwarding.

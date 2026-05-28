@@ -7,16 +7,20 @@ metadata:
     app.kubernetes.io/name: gh-runner
     app.kubernetes.io/managed-by: openshell-driver-kyma
 data:
-  # Anthropic-compatible base URL of the in-cluster your-llm-gateway gateway.
-  # Targets the gateway Service directly, NOT the public nginx ingress:
-  # the public path goes through nginx + a VirtualService that matches
-  # the public hostname, so cluster-internal callers using a *.svc.cluster.local
-  # Host header fall through and Istio returns 404. Hitting the gateway
-  # Service directly bypasses both layers, and there is no `/gateway/`
-  # prefix at this layer (nginx adds that prefix on the public path).
-  # Result: no public ingress, no IP allowlist drama, no public APIRule
-  # quota burn.
-  ANTHROPIC_BASE_URL: "http://gateway.your-llm-gateway.svc.cluster.local:8080/anthropic"
+  # Anthropic-compatible base URL of an in-cluster LLM gateway.
+  #
+  # Replace with the URL of YOUR in-cluster Anthropic-compatible upstream.
+  # Common pattern: a gateway Service in a separate namespace, addressed
+  # via cluster DNS (`<svc>.<ns>.svc.cluster.local:<port>`). The runner's
+  # NetworkPolicy must allow egress to whatever namespace+port you choose
+  # (see networkpolicy.yaml).
+  #
+  # NOTE: when targeting an Istio-meshed upstream, prefer the upstream's
+  # internal Service URL over the public nginx + VirtualService path.
+  # VirtualServices keyed on a public hostname don't match cluster-
+  # internal Host headers and return 404; the internal Service URL
+  # bypasses that layer.
+  ANTHROPIC_BASE_URL: "http://example-llm-gateway.example-ns.svc.cluster.local:8080/anthropic"
   # Default model for Claude Code invocations.
   ANTHROPIC_MODEL: "claude-opus-4-7"
   # Disables Anthropic SDK's optional telemetry pings.

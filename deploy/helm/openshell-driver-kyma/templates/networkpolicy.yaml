@@ -1,4 +1,26 @@
 {{- if .Values.driver.enableNetworkPolicy -}}
+# NetworkPolicy for the driver+gateway pod.
+#
+# Default-deny ingress except:
+#   - the driver's /metrics + /healthz port (any pod can scrape; tighten
+#     to a specific Prometheus namespace via your own overlay if needed)
+#   - the gateway's gRPC + health + metrics ports when gateway.enabled
+#     (so port-forward, sidecar mesh, or APIRule reverse proxy can
+#     reach them)
+#
+# Default-deny egress except:
+#   - DNS on 53/UDP+TCP to anywhere — Kyma/Gardener does not always set
+#     the kubernetes.io/metadata.name label on kube-system, so a
+#     namespace-scoped DNS rule silently breaks lookups (we hit this
+#     during runner rollout). Bare 53 to anywhere is the safe choice;
+#     DNS exfil is bandwidth-limited and CNI-logged.
+#   - Kubernetes API server on 443 to anywhere — the apiserver's IP is
+#     a virtual ClusterIP that is *not* in any namespace. Restricting to
+#     a namespaceSelector breaks all kube-rs/client-go calls. Operators
+#     who want a tighter rule can pin the apiserver Service IP via a
+#     custom overlay.
+#
+# Sandbox pods are governed by a separate NetworkPolicy below.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -14,28 +36,99 @@ spec:
     - Ingress
     - Egress
   ingress:
-    # Allow scrape on /metrics from Prometheus pods or anything in the
-    # same namespace. Tightening to a specific scraper namespace is left
-    # to the operator via a custom NetworkPolicy.
     - ports:
         - port: {{ .Values.driver.healthPort }}
           protocol: TCP
+      {{- if .Values.gateway.enabled }}
+        - port: {{ .Values.gateway.grpcPort }}
+          protocol: TCP
+        - port: {{ .Values.gateway.healthPort }}
+          protocol: TCP
+        - port: {{ .Values.gateway.metricsPort }}
+          protocol: TCP
+      {{- end }}
   egress:
-    # DNS to kube-system.
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: kube-system
-      ports:
+    - ports:
         - port: 53
           protocol: UDP
         - port: 53
           protocol: TCP
-    # Kubernetes API server.
+    - ports:
+        - port: 443
+          protocol: TCP
+---
+# NetworkPolicy for sandbox pods.
+#
+# The driver creates Sandbox CRs in `.Values.namespace`; the agent-sandbox
+# controller materializes them into pods carrying the labels we stamp via
+# build_sandbox_spec (provisioner.rs). This selector targets those pods.
+#
+# Sandboxes run user / agent code under privileged + UID 0 + dangerous
+# capabilities (the supervisor needs SYS_ADMIN/NET_ADMIN/SYS_PTRACE/SYSLOG
+# to install Landlock and manage network namespaces). With no
+# NetworkPolicy in place, a compromised sandbox could pivot to internal
+# services (cluster-internal HTTP, kubelet, other pods on the host
+# network). This policy is the cheapest defense against that pivot.
+#
+# Ingress: none. The supervisor's gateway control stream is supervisor-
+# originated (long-lived gRPC stream out to the gateway), so no inbound
+# connections are required.
+#
+# Egress allow-list:
+#   1. DNS (53/UDP+TCP) to anywhere.
+#   2. The driver+gateway pod's gateway-gRPC port. The supervisor needs
+#      this for IssueSandboxToken / supervisor_session / log push.
+#   3. Anywhere on 443/TCP, with RFC1918 explicitly excluded so a
+#      compromised sandbox cannot use this rule to reach internal
+#      services. This is what enables the "agentic workflow" use case
+#      (sandbox curls anthropic.com, github.com, npm, pypi, etc.).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "openshell-driver-kyma.fullname" . }}-sandbox
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      openshell.ai/managed-by: openshell
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress:
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    {{- if .Values.gateway.enabled }}
     - to:
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: default
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+          podSelector:
+            matchLabels:
+              {{- include "openshell-driver-kyma.selectorLabels" . | nindent 14 }}
+      ports:
+        - port: {{ .Values.gateway.grpcPort }}
+          protocol: TCP
+    {{- else if .Values.driver.gatewayEndpoint }}
+    # No in-pod gateway sidecar; the supervisor calls out to whatever
+    # `driver.gatewayEndpoint` points at. We can't statically express
+    # that endpoint as a NetworkPolicy peer, so leave the operator to
+    # add a tightening rule. Public TCP/443 below already covers the
+    # case where the endpoint is HTTPS.
+    {{- end }}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
       ports:
         - port: 443
           protocol: TCP
