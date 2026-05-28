@@ -173,14 +173,7 @@ runner-deploy:
 
 .PHONY: runner-create-secret
 runner-create-secret:
-	@bash -c 'set -eu; \
-	  read -rs -p "GitHub PAT (classic; repo + workflow scopes): " GITHUB_PAT && echo; \
-	  read -rs -p "ANTHROPIC_AUTH_TOKEN (your-llm-gateway auth token): " ANTHROPIC_AUTH_TOKEN && echo; \
-	  kubectl --namespace $(RUNNER_NS) delete secret gh-runner-creds --ignore-not-found=true; \
-	  kubectl --namespace $(RUNNER_NS) create secret generic gh-runner-creds \
-	    --from-literal=GITHUB_PAT="$$GITHUB_PAT" \
-	    --from-literal=ANTHROPIC_AUTH_TOKEN="$$ANTHROPIC_AUTH_TOKEN"; \
-	  unset GITHUB_PAT ANTHROPIC_AUTH_TOKEN'
+	@node scripts/create-runner-secret.js $(RUNNER_NS)
 
 .PHONY: runner-add-repo
 runner-add-repo:
