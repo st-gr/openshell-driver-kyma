@@ -1,0 +1,120 @@
+{{- if and .Values.gateway.enabled .Values.gateway.sandboxJwt.enabled -}}
+# Pre-install / pre-upgrade hook: generates the sandbox-JWT signing keys
+# and writes them as a Secret in this namespace. The gateway pod mounts
+# the Secret read-only and uses it to mint per-sandbox JWTs (the tokens
+# the supervisor receives in exchange for its projected SA token via
+# IssueSandboxToken).
+#
+# Implementation: runs `openshell-gateway generate-certs`, the same
+# subcommand upstream NVIDIA OpenShell exposes for this purpose. It also
+# creates a server-TLS and a client-TLS Secret, both unused here because
+# the chart's gateway has --disable-tls; we just let them sit so the
+# certgen tool's preflight (all-three-Secrets-present) is satisfied.
+#
+# Idempotency: certgen is hook-weight -20 with hook-delete-policy
+# before-hook-creation,hook-succeeded. On reinstall the prior Job is
+# deleted; if the JWT Secret already exists from a prior install, certgen
+# detects that (K8sAction::SkipExists) and does nothing.
+{{- $hookName := printf "%s-jwt-pki-hook" (include "openshell-driver-kyma.fullname" .) }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $hookName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-30"
+    helm.sh/hook-delete-policy: before-hook-creation
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $hookName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-30"
+    helm.sh/hook-delete-policy: before-hook-creation
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $hookName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-30"
+    helm.sh/hook-delete-policy: before-hook-creation
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $hookName }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $hookName }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $hookName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-20"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 120
+  ttlSecondsAfterFinished: 300
+  template:
+    metadata:
+      labels:
+        {{- include "openshell-driver-kyma.selectorLabels" . | nindent 8 }}
+        # Skip Istio sidecar injection on the hook pod (no need to be in
+        # the mesh; it only writes Secrets to the local apiserver).
+        sidecar.istio.io/inject: "false"
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: {{ $hookName }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: certgen
+          image: "{{ .Values.gateway.image.repository }}:{{ .Values.gateway.image.tag }}"
+          imagePullPolicy: {{ .Values.gateway.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          # Note: the gateway image's ENTRYPOINT is the binary itself, so
+          # `args` becomes the subcommand + flags directly (no `command`).
+          args:
+            - generate-certs
+            - --namespace=$(POD_NAMESPACE)
+            - --server-secret-name={{ include "openshell-driver-kyma.serverTlsSecretName" . }}
+            - --client-secret-name={{ include "openshell-driver-kyma.clientTlsSecretName" . }}
+            - --jwt-secret-name={{ include "openshell-driver-kyma.jwtSecretName" . }}
+{{- end }}

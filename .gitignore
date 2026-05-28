@@ -57,3 +57,4 @@ deploy/runner/.env*
 # Node module noise from scripts/ if anyone runs `npm install` ad-hoc
 scripts/node_modules/
 
+.claude/

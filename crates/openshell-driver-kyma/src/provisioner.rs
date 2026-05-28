@@ -35,6 +35,11 @@ const LABEL_SANDBOX_ID: &str = "openshell.ai/sandbox-id";
 const LABEL_MANAGED_BY: &str = "openshell.ai/managed-by";
 const LABEL_KAGENTI: &str = "kagenti.io/type";
 const LABEL_ISTIO_INJECT: &str = "sidecar.istio.io/inject";
+// Pod annotation read by the gateway after a successful TokenReview to
+// resolve a projected SA token's pod identity to a sandbox identity.
+// Note the differing TLD vs LABEL_SANDBOX_ID: that's intentional, the
+// upstream gateway uses `.io/` for annotations and `.ai/` for labels.
+const ANNOTATION_SANDBOX_ID: &str = "openshell.io/sandbox-id";
 const SUPERVISOR_VOLUME: &str = "supervisor-bin";
 const AGENT_CONTAINER_NAME: &str = "agent";
 const SUPERVISOR_INIT_NAME: &str = "supervisor-init";
@@ -212,9 +217,20 @@ impl KymaProvisioner {
         }
         let labels = merge_maps(&user_labels, &driver_labels);
 
+        // Annotations: the gateway's K8s SA bootstrap authenticator
+        // resolves the supervisor's projected SA token to a sandbox-id
+        // by reading this annotation on the pod after TokenReview. It
+        // is set once at pod create and immutable for the lifetime of
+        // the sandbox.
+        let mut annotations: HashMap<String, String> = HashMap::new();
+        annotations.insert(ANNOTATION_SANDBOX_ID.into(), sb.id.clone());
+
         json!({
             "podTemplate": {
-                "metadata": { "labels": labels },
+                "metadata": {
+                    "labels": labels,
+                    "annotations": annotations,
+                },
                 "spec": pod_spec,
             }
         })

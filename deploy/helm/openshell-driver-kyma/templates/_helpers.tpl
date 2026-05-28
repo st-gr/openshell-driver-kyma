@@ -59,3 +59,33 @@ Image reference.
 {{- $tag := default .Chart.AppVersion .Values.image.tag -}}
 {{- printf "%s:%s" .Values.image.repository $tag -}}
 {{- end }}
+
+{{/*
+JWT signing-key Secret name. Defaults to <fullname>-jwt-keys.
+Used by both the certgen pre-install hook (to create the Secret) and the
+gateway container (to mount it at /etc/openshell-jwt).
+*/}}
+{{- define "openshell-driver-kyma.jwtSecretName" -}}
+{{- default (printf "%s-jwt-keys" (include "openshell-driver-kyma.fullname" .)) .Values.gateway.sandboxJwt.jwtSecretName }}
+{{- end }}
+
+{{/*
+Server TLS Secret name (auto-created by `generate-certs`, unused when --disable-tls).
+*/}}
+{{- define "openshell-driver-kyma.serverTlsSecretName" -}}
+{{- default (printf "%s-server-tls" (include "openshell-driver-kyma.fullname" .)) .Values.gateway.sandboxJwt.serverTlsSecretName }}
+{{- end }}
+
+{{/*
+Client TLS Secret name (auto-created by `generate-certs`, unused when --disable-tls).
+*/}}
+{{- define "openshell-driver-kyma.clientTlsSecretName" -}}
+{{- default (printf "%s-client-tls" (include "openshell-driver-kyma.fullname" .)) .Values.gateway.sandboxJwt.clientTlsSecretName }}
+{{- end }}
+
+{{/*
+Stable identifier baked into every gateway-minted sandbox JWT (claim "iss").
+*/}}
+{{- define "openshell-driver-kyma.gatewayId" -}}
+{{- default (include "openshell-driver-kyma.fullname" .) .Values.gateway.sandboxJwt.gatewayId }}
+{{- end }}

@@ -114,6 +114,15 @@ spec:
           # The gateway has no `run` subcommand; the default action is to
           # run the server. Listing flags directly under args is correct.
           args:
+            {{- if .Values.gateway.sandboxJwt.enabled }}
+            # Load gateway TOML when sandbox-JWT is enabled. The TOML
+            # carries [openshell.gateway.gateway_jwt] (signing material
+            # paths) and [openshell.drivers.kubernetes] (sandbox ns + SA
+            # for the K8s SA bootstrap authenticator). CLI flags below
+            # still override anything in the file.
+            - --config
+            - /etc/openshell/gateway.toml
+            {{- end }}
             - --bind-address
             - "0.0.0.0"
             - --port
@@ -187,6 +196,14 @@ spec:
               mountPath: /home/nonroot/.local/state
             - name: gateway-tmp
               mountPath: /tmp
+            {{- if .Values.gateway.sandboxJwt.enabled }}
+            - name: gateway-config
+              mountPath: /etc/openshell
+              readOnly: true
+            - name: sandbox-jwt
+              mountPath: /etc/openshell-jwt
+              readOnly: true
+            {{- end }}
         {{- end }}
       volumes:
         - name: socket-dir
@@ -198,6 +215,15 @@ spec:
           emptyDir: {}
         - name: gateway-tmp
           emptyDir: {}
+        {{- if .Values.gateway.sandboxJwt.enabled }}
+        - name: gateway-config
+          configMap:
+            name: {{ include "openshell-driver-kyma.fullname" . }}-gateway-config
+        - name: sandbox-jwt
+          secret:
+            secretName: {{ include "openshell-driver-kyma.jwtSecretName" . }}
+            defaultMode: 0o400
+        {{- end }}
         {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

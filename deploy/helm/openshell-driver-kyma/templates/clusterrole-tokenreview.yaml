@@ -1,0 +1,35 @@
+{{- if and .Values.gateway.enabled .Values.gateway.sandboxJwt.enabled -}}
+# TokenReview is a cluster-scoped subresource (apiserver-side only — it
+# is not stored). The gateway calls TokenReview during the
+# IssueSandboxToken bootstrap to validate the audience-bound projected
+# token presented by the supervisor inside each sandbox pod.
+#
+# Scope: create-only. The gateway does not list, get, or watch
+# tokenreviews. This is the minimum permission the upstream K8s SA
+# bootstrap authenticator needs.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "openshell-driver-kyma.fullname" . }}-tokenreview
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "openshell-driver-kyma.fullname" . }}-tokenreview
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "openshell-driver-kyma.fullname" . }}-tokenreview
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "openshell-driver-kyma.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

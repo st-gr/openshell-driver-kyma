@@ -1,0 +1,70 @@
+{{- if and .Values.gateway.enabled .Values.gateway.sandboxJwt.enabled -}}
+# Gateway TOML configuration. Mounted at /etc/openshell/gateway.toml.
+# Required when sandboxJwt is enabled — the gateway needs:
+#
+#   [openshell.gateway.gateway_jwt]   — paths to the signing material
+#                                       (mounted from the JWT Secret)
+#                                       so it can mint per-sandbox JWTs
+#                                       in IssueSandboxToken.
+#
+#   [openshell.drivers.kubernetes]    — namespace + service_account_name
+#                                       so the K8s SA bootstrap
+#                                       authenticator knows which
+#                                       audience-bound projected token
+#                                       to expect from each sandbox pod.
+#                                       The gateway is *not* using the
+#                                       in-tree kubernetes driver (we run
+#                                       --compute-driver-socket pointing
+#                                       at our own driver), but the
+#                                       upstream code requires this table
+#                                       to be present whenever the JWT
+#                                       issuer is configured in-cluster.
+#
+# CLI flags on the gateway container still override these values, so the
+# operational ports + log level continue to come from `args:` on the
+# Deployment.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "openshell-driver-kyma.fullname" . }}-gateway-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+data:
+  gateway.toml: |
+    [openshell]
+    version = 1
+
+    [openshell.gateway]
+    log_level = {{ .Values.driver.logLevel | quote }}
+    sandbox_namespace = {{ .Values.namespace | quote }}
+
+    [openshell.gateway.auth]
+    # When OIDC is not configured, every gRPC request would otherwise be
+    # rejected with Unauthenticated/missing-authorization-header — including
+    # `openshell sandbox create` from the CLI. Allow unauthenticated user
+    # calls in that case so the chart is usable in-cluster behind a port-
+    # forward or a Service-mesh-controlled APIRule. The supervisor->gateway
+    # path is still gated by the sandbox-JWT issuer (configured below).
+    {{- if .Values.gateway.oidc.issuer }}
+    allow_unauthenticated_users = false
+    {{- else }}
+    allow_unauthenticated_users = true
+    {{- end }}
+
+    [openshell.gateway.gateway_jwt]
+    signing_key_path = "/etc/openshell-jwt/signing.pem"
+    public_key_path  = "/etc/openshell-jwt/public.pem"
+    kid_path         = "/etc/openshell-jwt/kid"
+    gateway_id       = {{ include "openshell-driver-kyma.gatewayId" . | quote }}
+    ttl_secs         = {{ .Values.gateway.sandboxJwt.ttlSecs }}
+
+    [openshell.drivers.kubernetes]
+    # The gateway never *invokes* this driver (we route through
+    # --compute-driver-socket to openshell-driver-kyma). These two fields
+    # tell the K8s SA bootstrap authenticator which namespace + SA the
+    # sandbox pods live under, so its TokenReview audience check passes.
+    namespace            = {{ .Values.namespace | quote }}
+    service_account_name = {{ .Values.sandboxServiceAccount.name | quote }}
+    sa_token_ttl_secs    = {{ .Values.gateway.sandboxJwt.saTokenTtlSecs }}
+{{- end }}

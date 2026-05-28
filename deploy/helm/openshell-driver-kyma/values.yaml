@@ -116,6 +116,28 @@ gateway:
     limits:
       cpu: 500m
       memory: 1Gi
+  # Sandbox-JWT signing & validation. Required for the supervisor inside
+  # each sandbox to complete its IssueSandboxToken bootstrap (without it,
+  # phase=Ready and `openshell sandbox exec` never succeed). When enabled,
+  # the chart provisions:
+  #   - a pre-install Helm hook Job that runs `openshell-gateway
+  #     generate-certs` to create the signing-key Secret in this namespace
+  #   - a ConfigMap with the gateway TOML (`[openshell.gateway.gateway_jwt]`
+  #     + `[openshell.drivers.kubernetes]` tables)
+  #   - extra RBAC: `tokenreviews:create` (cluster) + `pods:get` (sandbox ns)
+  #   - mounts on the gateway container (Secret at /etc/openshell-jwt,
+  #     ConfigMap at /etc/openshell)
+  sandboxJwt:
+    enabled: false
+    # Names below default to auto-derived values; override only if you have
+    # a reason (e.g. multi-release coexistence in one namespace).
+    jwtSecretName: ""           # default: <fullname>-jwt-keys
+    serverTlsSecretName: ""     # default: <fullname>-server-tls (created
+                                # by certgen even when --disable-tls is on)
+    clientTlsSecretName: ""     # default: <fullname>-client-tls
+    gatewayId: ""               # default: <fullname>
+    ttlSecs: 3600               # gateway-minted sandbox JWT lifetime
+    saTokenTtlSecs: 3600        # projected SA token lifetime (sandbox pod)
 
 # ClusterIP Service exposing the gateway's gRPC + metrics ports.
 # Requires .Values.gateway.enabled. When false, only the driver's

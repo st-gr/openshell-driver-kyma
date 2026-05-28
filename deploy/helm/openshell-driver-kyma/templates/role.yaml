@@ -24,3 +24,11 @@ rules:
     resources: ["services"]
     verbs: ["get", "list", "create", "delete", "patch"]
 {{- end }}
+{{- if and .Values.gateway.enabled .Values.gateway.sandboxJwt.enabled }}
+  # Per-sandbox identity resolution: after TokenReview validates the
+  # supervisor's projected SA token, the gateway looks up the bound pod
+  # to read its `openshell.io/sandbox-id` annotation. Read-only.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get"]
+{{- end }}
