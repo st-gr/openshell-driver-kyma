@@ -145,3 +145,73 @@ helm-template:
 clean:
 	$(DOCKER_RUN) $(DEV_IMAGE) cargo clean
 	rm -rf dist coverage
+
+# ---------------------------------------------------------------------------
+# Self-hosted runner (Kyma-hosted GitHub Actions runner)
+# ---------------------------------------------------------------------------
+# All targets here assume kubectl on PATH and authenticated against the
+# target cluster. Tokens never reach Make variables; the secret is created
+# interactively via `make runner-create-secret`.
+
+RUNNER_NS ?= gh-runner
+OWNER ?=
+REPO ?=
+
+.PHONY: runner-deploy
+runner-deploy:
+	kubectl apply -f deploy/runner/namespace.yaml
+	kubectl apply -f deploy/runner/serviceaccount.yaml
+	kubectl apply -f deploy/runner/configmap.yaml
+	kubectl apply -f deploy/runner/configmap-entrypoint.yaml
+	kubectl apply -f deploy/runner/networkpolicy.yaml
+	@echo ""
+	@echo "Namespace, SA, ConfigMaps, and NetworkPolicy applied."
+	@echo "Next: create the credentials Secret with"
+	@echo "    make runner-create-secret"
+	@echo "Then add a runner per repo with"
+	@echo "    make runner-add-repo OWNER=<owner> REPO=<repo>"
+
+.PHONY: runner-create-secret
+runner-create-secret:
+	@bash -c '\
+	  read -rs -p "GitHub PAT (classic; repo + workflow scopes): " GITHUB_PAT && echo; \
+	  read -rs -p "ANTHROPIC_AUTH_TOKEN (your-llm-gateway auth token): " ANTHROPIC_AUTH_TOKEN && echo; \
+	  kubectl create secret generic gh-runner-creds --namespace $(RUNNER_NS) \
+	    --from-literal=GITHUB_PAT="$$GITHUB_PAT" \
+	    --from-literal=ANTHROPIC_AUTH_TOKEN="$$ANTHROPIC_AUTH_TOKEN" \
+	    --dry-run=client -o yaml | kubectl apply -f -; \
+	  unset GITHUB_PAT ANTHROPIC_AUTH_TOKEN'
+
+.PHONY: runner-add-repo
+runner-add-repo:
+ifeq ($(strip $(OWNER)),)
+	$(error OWNER is required, e.g. OWNER=st-gr REPO=OpenShell)
+endif
+ifeq ($(strip $(REPO)),)
+	$(error REPO is required, e.g. OWNER=st-gr REPO=OpenShell)
+endif
+	node scripts/add-runner-repo.js --owner $(OWNER) --repo $(REPO) --namespace $(RUNNER_NS) --apply
+
+.PHONY: runner-remove-repo
+runner-remove-repo:
+ifeq ($(strip $(OWNER)),)
+	$(error OWNER is required)
+endif
+ifeq ($(strip $(REPO)),)
+	$(error REPO is required)
+endif
+	node scripts/remove-runner-repo.js --owner $(OWNER) --repo $(REPO) --namespace $(RUNNER_NS)
+
+.PHONY: runner-status
+runner-status:
+	@kubectl -n $(RUNNER_NS) get pods -L runner-repo
+
+.PHONY: runner-logs
+runner-logs:
+ifeq ($(strip $(OWNER)),)
+	$(error OWNER is required)
+endif
+ifeq ($(strip $(REPO)),)
+	$(error REPO is required)
+endif
+	kubectl -n $(RUNNER_NS) logs -f deployment/runner-$(shell echo $(OWNER) | tr '[:upper:]' '[:lower:]')-$(shell echo $(REPO) | tr '[:upper:]' '[:lower:]')
