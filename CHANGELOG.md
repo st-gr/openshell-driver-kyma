@@ -135,3 +135,42 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   (`git filter-repo --path-rename`). The driver and the runner had
   no shared dependencies. Live cluster runners keep running off the
   in-cluster ConfigMaps and Deployments.
+
+### Follow-ups (deliberately deferred)
+
+The following are **not** in this release. Each is a stand-alone
+unit of work and should ship in its own PR/release.
+
+- **Phase 2b T1: unprivileged sandboxes via Linux user namespaces.**
+  Drop `privileged: true` + `runAsUser: 0` from the agent container
+  by configuring the supervisor to run inside a user namespace.
+  Supervisor support exists upstream; the driver needs a
+  `--enable-user-namespaces` flag and a corresponding pod-template
+  branch.
+- **Phase 2b T3: optional PVC workspace persistence.** Per-sandbox
+  PVC mounted at `/sandbox`; survives pod rescheduling. Requires a
+  `volumeClaimTemplates` block and a `--sandbox-storage-size` flag.
+- **Phase 2b T4: mTLS client-cert volume mount on the gateway.** For
+  deployments that run the gateway behind an mTLS-enforcing
+  reverse proxy. Chart wiring + values overlay.
+- **Phase 2b T5: Kubernetes Event correlation in `Watch`.** Stream
+  pod-scheduling failures and policy-fetch errors as `WatchSandboxes`
+  status updates so the gateway / CLI surface them to the user
+  promptly.
+- **Native digest-pinning in the chart's image helper.** Today the
+  helper always emits `<repo>:<tag>`. Update `_helpers.tpl` so a
+  `tag` value of the form `sha256:...` (or starting with `@`) emits
+  `<repo>@sha256:<digest>` instead. Lets `image.tag` and
+  `gateway.image.tag` accept digests directly without a Kustomize
+  overlay.
+- **CI-driven `make e2e-cli`.** Run the full e2e on every push using
+  the self-hosted Kyma runner at `st-gr/gha-runner-kyma`.
+- **Upstream PR for `feat/external-compute-driver-socket`.** Submit
+  the gateway patch in `st-gr/OpenShell` to NVIDIA/OpenShell.
+- **Initial commit + branch protection for `st-gr/sail-proxy`.**
+- **Replace `:latest` with a digest in `e2e/sandbox/Dockerfile`'s
+  `FROM ubuntu:24.04`.** Production hygiene; not a security gap
+  because this image is e2e-only.
+- **Bump dev-image Node from 18 to 20+** so `markdownlint-cli2`
+  works inside the dev container (current versions of
+  `string-width` use the `/v` regex flag which Node 18 lacks).
