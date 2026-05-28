@@ -187,3 +187,19 @@ port-forward → OpenShell gateway.
 - [SAP Help Portal — Adding and Managing Subaccounts (Location ID)](https://help.sap.com/docs/connectivity/sap-btp-connectivity-cf/managing-subaccounts)
 - [SAP Learning — Setting and Configuring Kubectl for Kyma](https://learning.sap.com/courses/developing-applications-in-sap-btp-kyma-runtime/setting-and-configuring-kubectl-for-kyma_b3d25bea-0ef5-498e-bd15-10ef0c23ed06)
 - [SAP-samples/kyma-runtime-samples — DSAGTT22 step 2](https://github.com/SAP-samples/kyma-runtime-samples/blob/main/dsagtt22/tutorial/step2.md)
+
+## What this runbook actually gives you with this chart
+
+After SCC routes your laptop's `kubectl` to the Kyma apiserver, the
+recommended pattern with this chart is:
+
+1. `kubectl -n <release-ns> port-forward svc/<release>-openshell-driver-kyma 8080:8080`
+2. `openshell --gateway-endpoint http://localhost:8080 sandbox …`
+
+The port-forward goes through the same SCC tunnel `kubectl` uses —
+no second tunnel, no second VPN. The CLI talks to localhost; SCC
+forwards through to the gateway sidecar's Service VIP.
+
+For an Always-On / no-VPN production path, see
+[`production-deployment.md`](production-deployment.md) (uses an
+OIDC-protected Kyma APIRule instead of port-forward).
