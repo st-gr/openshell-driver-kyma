@@ -1,0 +1,30 @@
+{{- if .Values.gatewayApirule.enabled -}}
+{{- if not .Values.gatewayService.enabled -}}
+{{- fail "gatewayApirule.enabled requires gatewayService.enabled (the APIRule needs a Service to forward to)." -}}
+{{- end -}}
+{{- if not .Values.gatewayApirule.host -}}
+{{- fail "gatewayApirule.enabled requires gatewayApirule.host (e.g. openshell.<your-cluster-id>.kyma.ondemand.com)." -}}
+{{- end -}}
+# Kyma APIRule for external access to the gateway. The gateway speaks
+# gRPC; APIRule v2 accepts arbitrary HTTP/2 upstreams. JWT auth is
+# evaluated by the Kyma OAuth gateway before forwarding.
+#
+# Cluster-specific values (host, JWT issuer/JWKS) are NEVER committed
+# to the chart — the operator passes them at deploy time via
+# `helm install --set gatewayApirule.host=… --set-json gatewayApirule.rules=…`.
+apiVersion: gateway.kyma-project.io/v2
+kind: APIRule
+metadata:
+  name: {{ include "openshell-driver-kyma.fullname" . }}-gateway
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+spec:
+  gateway: {{ .Values.gatewayApirule.gateway }}
+  hosts: [{{ .Values.gatewayApirule.host | quote }}]
+  service:
+    name: {{ include "openshell-driver-kyma.fullname" . }}
+    port: {{ .Values.gateway.grpcPort }}
+  rules:
+    {{- toYaml .Values.gatewayApirule.rules | nindent 4 }}
+{{- end }}

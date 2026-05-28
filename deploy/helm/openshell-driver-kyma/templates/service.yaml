@@ -14,3 +14,13 @@ spec:
       port: {{ .Values.driver.healthPort }}
       targetPort: health
       protocol: TCP
+    {{- if .Values.gatewayService.enabled }}
+    - name: grpc
+      port: {{ .Values.gateway.grpcPort }}
+      targetPort: grpc
+      protocol: TCP
+    - name: gw-metrics
+      port: {{ .Values.gateway.metricsPort }}
+      targetPort: gw-metrics
+      protocol: TCP
+    {{- end }}

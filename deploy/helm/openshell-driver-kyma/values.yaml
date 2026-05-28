@@ -73,3 +73,62 @@ affinity: {}
 # Pod-level annotations (leave Istio alone for the driver pod).
 podAnnotations: {}
 podLabels: {}
+
+# Gateway sidecar configuration. When enabled, the chart deploys an
+# openshell-server (NVIDIA OpenShell gateway, st-gr/OpenShell fork)
+# container alongside the driver in the same pod. They share the socket-dir
+# emptyDir; the driver writes the UDS at .Values.driver.socket, the gateway
+# reads it via --compute-driver-socket. No separate socketPath value — the
+# driver.socket is the single source of truth.
+gateway:
+  enabled: false
+  image:
+    repository: ghcr.io/st-gr/openshell-gateway
+    tag: latest
+    pullPolicy: IfNotPresent
+  grpcPort: 8080
+  metricsPort: 9091
+  healthPort: 9092
+  extraArgs: []      # extra flags passed to `openshell-gateway run`
+  # OIDC for client auth (the openshell CLI authenticates via OIDC).
+  # When `issuer` is unset, --disable-tls is added — suitable only for
+  # in-cluster gateways behind a service mesh, NOT for public exposure.
+  oidc:
+    issuer: ""
+    audience: ""
+    adminRole: ""
+    userRole: ""
+  # Gateway pod-level resources, separate from the driver's.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+
+# ClusterIP Service exposing the gateway's gRPC + metrics ports.
+# Requires .Values.gateway.enabled. When false, only the driver's
+# health port is exposed (existing behavior).
+gatewayService:
+  enabled: false
+
+# Kyma APIRule for external access. Requires .Values.gatewayService.enabled.
+# Set host to a hostname your cluster's gateway routes (e.g.
+# openshell.<cluster-id>.kyma.ondemand.com). Cluster ID never goes in the
+# chart — set it at deploy time.
+gatewayApirule:
+  enabled: false
+  host: ""
+  gateway: kyma-system/kyma-gateway
+  rules:
+    - path: /*
+      methods: [POST]
+      jwt:
+        # Filled in at deploy time. The CLI authenticates via OIDC; the
+        # APIRule validates the JWT before forwarding to the gateway.
+        # Example value (not committed; pass via `helm install --set-json`):
+        #   authentications:
+        #     - issuer: https://my-tenant.accounts.ondemand.com
+        #       jwksUri: https://my-tenant.accounts.ondemand.com/oauth2/certs
+        authentications: []

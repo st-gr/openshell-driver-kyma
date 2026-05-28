@@ -95,6 +95,82 @@ spec:
               mountPath: {{ dir .Values.driver.socket | quote }}
             - name: tmp
               mountPath: /tmp
+        {{- if .Values.gateway.enabled }}
+        # Gateway sidecar. Shares the socket-dir emptyDir with the driver
+        # container; reads the UDS at .Values.driver.socket. The image
+        # comes from the st-gr/OpenShell fork which adds the
+        # --compute-driver-socket flag to upstream NVIDIA/OpenShell.
+        - name: gateway
+          image: "{{ .Values.gateway.image.repository }}:{{ .Values.gateway.image.tag }}"
+          imagePullPolicy: {{ .Values.gateway.image.pullPolicy }}
+          args:
+            - run
+            - --bind-address
+            - "0.0.0.0"
+            - --port
+            - {{ .Values.gateway.grpcPort | quote }}
+            - --health-port
+            - {{ .Values.gateway.healthPort | quote }}
+            - --metrics-port
+            - {{ .Values.gateway.metricsPort | quote }}
+            - --compute-driver-socket
+            - {{ .Values.driver.socket | quote }}
+            {{- if not .Values.gateway.oidc.issuer }}
+            - --disable-tls
+            {{- else }}
+            - --oidc-issuer
+            - {{ .Values.gateway.oidc.issuer | quote }}
+            - --oidc-audience
+            - {{ .Values.gateway.oidc.audience | quote }}
+            {{- with .Values.gateway.oidc.adminRole }}
+            - --oidc-admin-role
+            - {{ . | quote }}
+            {{- end }}
+            {{- with .Values.gateway.oidc.userRole }}
+            - --oidc-user-role
+            - {{ . | quote }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.gateway.extraArgs }}
+              {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: grpc
+              containerPort: {{ .Values.gateway.grpcPort }}
+              protocol: TCP
+            - name: gw-health
+              containerPort: {{ .Values.gateway.healthPort }}
+              protocol: TCP
+            - name: gw-metrics
+              containerPort: {{ .Values.gateway.metricsPort }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: gw-health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: gw-health
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.gateway.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+            runAsNonRoot: true
+            runAsUser: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: socket-dir
+              mountPath: {{ dir .Values.driver.socket | quote }}
+        {{- end }}
       volumes:
         - name: socket-dir
           emptyDir: {}
