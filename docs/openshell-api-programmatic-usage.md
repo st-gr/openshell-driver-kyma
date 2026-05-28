@@ -65,6 +65,25 @@ you won't touch from a programmatic caller.
 
 ## Reaching the gateway
 
+### Where the gateway lives in the openshell-driver-kyma chart
+
+When this chart is installed with `gateway.enabled=true` (the
+recommended default for any caller of this API), the gateway runs as
+a sidecar in the same pod as the driver. They share a Unix domain
+socket via emptyDir; nothing reaches the gateway via Service except
+clients you deliberately route through the chart's optional
+`gatewayService.enabled=true` ClusterIP Service.
+
+| Reaching the gateway from … | URL |
+|---|---|
+| Inside the cluster, same namespace | `<release>-openshell-driver-kyma:8080` |
+| Inside the cluster, other namespace | `<release>-openshell-driver-kyma.<release-ns>.svc.cluster.local:8080` |
+| Public (only with `gatewayApirule.enabled` + OIDC) | `https://<gatewayApirule.host>` |
+| Laptop port-forward | `kubectl -n <release-ns> port-forward svc/<release>-openshell-driver-kyma 8080:8080`, then `http://localhost:8080` |
+
+Pick the URL appropriate to your deployment topology — the rest of
+this guide treats the gateway as a generic gRPC endpoint.
+
 Pick one of the two patterns based on whether you want public ingress
 or VPN-only routing:
 
