@@ -85,6 +85,15 @@ containerSecurityContext:
   runAsNonRoot: true
   runAsUser: 65532
 
+# Optional list of imagePullSecret references applied to the
+# driver+gateway pod. Use only when one of the configured images lives
+# in a private registry. Each entry is a Kubernetes
+# LocalObjectReference: { name: <secret-name> }. The Secret must exist
+# in the release namespace before install — the chart does NOT create
+# it (chart isolation guarantee #10: never inject pull-secrets into
+# other namespaces' ServiceAccounts).
+imagePullSecrets: []
+
 # Optional pre-install CRD pre-flight Job that aborts the install if the
 # kubernetes-sigs/agent-sandbox CRD is missing.
 crdPreInstallCheck:
