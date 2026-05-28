@@ -12,7 +12,14 @@ image:
   tag: ""        # defaults to .Chart.AppVersion when empty
   pullPolicy: IfNotPresent
 
-# Service account (created by this chart unless overridden).
+# ServiceAccount the driver+gateway pod runs as. Defaults to chart-owned
+# (`create: true`). Set `serviceAccount.create=false` and
+# `serviceAccount.name=<existing>` to attach to a SA you manage outside
+# this chart — useful when an external RBAC overlay owns the
+# Role/RoleBinding wiring. The chart still renders its own
+# Role/RoleBinding (and the ClusterRole/Binding when sandboxJwt.enabled)
+# pointing at whatever SA name `serviceAccount.name` resolves to, so
+# the existing SA gets the same scoped permissions.
 serviceAccount:
   create: true
   name: openshell-driver
