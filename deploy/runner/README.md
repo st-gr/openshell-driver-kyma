@@ -159,15 +159,24 @@ LABELS env var is `self-hosted,kyma`.
 
 ### your-llm-gateway unreachable from within the runner
 
+The runner targets the **gateway Service directly**, not the public nginx
+ingress. The public path uses an Istio VirtualService keyed on the public
+hostname, so cluster-internal callers using a `*.svc.cluster.local` Host
+header fall through and istio-envoy returns 404. Bypass that layer:
+
 ```bash
 kubectl -n gh-runner exec deployment/<name> -- \
   curl -sS -o /dev/null -w '%{http_code}\n' \
-  http://nginx.your-llm-gateway.svc.cluster.local:8080/healthz
+  http://gateway.your-llm-gateway.svc.cluster.local:8080/openrouter/api/v1/models
 ```
 
-200 means OK. Network errors point at the NetworkPolicy or an Istio
-sidecar issue (the `gh-runner` namespace is labeled `istio-injection:
-disabled` precisely to avoid this).
+200 means OK (this endpoint requires no auth). Network errors point at
+the NetworkPolicy or an Istio sidecar issue (the `gh-runner` namespace
+is labeled `istio-injection: disabled` precisely to avoid the latter).
+A 404 from `server: istio-envoy` means the runner is reaching nginx but
+the VirtualService is not matching — usually because the URL points at
+`nginx.your-llm-gateway.svc.cluster.local` instead of
+`gateway.your-llm-gateway.svc.cluster.local`.
 
 ## Security model
 
