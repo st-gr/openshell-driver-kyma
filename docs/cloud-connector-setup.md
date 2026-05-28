@@ -96,18 +96,31 @@ It is only required when *multiple SCCs* serve the *same* subaccount
 
 ### 2. Add a Kubernetes Service Channel for each cluster
 
-Select the subaccount → *Cloud To On-Premise* → *Service Channels* →
-**Add** → choose type **Kubernetes**:
+Select the subaccount → *On-Premise To Cloud* → *Service Channels* →
+**Add** → choose type **Kubernetes API server**.
 
-- Kubernetes cluster: pick the Kyma cluster from the dropdown (BTP
-  exposes only the cluster registered to this subaccount).
-- Local instance number: `0` for the first cluster on this SCC, `1`
-  for the second, etc. The resulting local port is `30033 + N`. (SCC
-  2.18+ also offers an explicit "Port" field — pick any free port that
-  is not `8443`, `8080`, or already in use by another channel.)
-- Connections: `2` is enough for a single user; raise if multiple
-  developers share the channel.
-- Enabled: ✅
+The "Add Service Channel" dialog asks for four required fields:
+
+- **K8s Cluster Host** — the FQDN of the Kyma apiserver, taken
+  from the cluster's existing kubeconfig (`server:` field, minus
+  `https://` and minus the trailing `:443`). For BTP Kyma it's of
+  the form `api.<shoot-id>.kyma.ondemand.com`. Enter ONLY the
+  hostname, not a URL.
+- **K8s Service ID** — a unique label that identifies this channel
+  within the SCC instance. Convention: the cluster's shoot ID (the
+  segment between `api.` and `.kyma.ondemand.com`, e.g.
+  `c-abc1234`). It must be unique across all Service Channels on
+  the same SCC; reusing the shoot ID makes that natural.
+- **Local Port** — any free TCP port on the SCC host. `8443`,
+  `6443`, or `30443` are conventional for Kubernetes apiservers;
+  avoid ports already in use by another channel or by a service
+  on the SCC host.
+- **Connections** — TCP connection pool size. `1` is plenty for
+  one developer running `kubectl` interactively; raise to `2`-`4`
+  if multiple users share the channel or you need parallel
+  port-forwards (the openshell-driver-kyma chart's port-forward
+  to the gateway sidecar adds one more connection).
+- **Enabled** — leave checked.
 
 Repeat once per cluster. Channels for different subaccounts on the same
 SCC are entirely independent — they only need unique local ports.
@@ -117,6 +130,13 @@ SCC are entirely independent — they only need unique local ports.
 - Each channel reports **Connected** in the SCC UI.
 - BTP cockpit → subaccount → *Connectivity* → *Cloud Connectors* shows
   the SCC.
+- The SCC subaccount overview ("Initiated By", "Tunnel ID", "Region
+  Host", "Subaccount") and the Service Channel detail page both
+  display operator-environment identifiers. Treat the whole SCC UI as
+  containing potential PII and **never paste screenshots into a
+  committed file or public ticket** — the repo's `.gitignore` blocks
+  `sensitive-*`, `*PII*`, and image extensions specifically because
+  this is the most common way these values escape.
 - Hand the requesting user, per cluster:
   - SCC reachable hostname / IP.
   - The channel's local port.
