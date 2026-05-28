@@ -38,15 +38,22 @@ copying a single binary at pod start.
 
 ## Our approach
 
-We use an init container that copies the supervisor binary from a
-container image into an `emptyDir` volume shared with the agent
-container.
+We use an init container, but the upstream supervisor image is
+**distroless** — only `/openshell-sandbox` exists, no `cp`, no `sh`,
+no busybox. So the init container invokes the supervisor binary's own
+`copy-self` subcommand (the same approach argoexec's emissary uses):
+the binary writes itself into an `emptyDir` volume shared with the
+agent container, which then mounts it read-only and execs the binary
+from there.
 
 ```yaml
 initContainers:
   - name: supervisor-init
-    image: ghcr.io/nvidia/openshell-community/supervisor:latest
-    command: ["cp", "/usr/local/bin/openshell-sandbox", "/opt/openshell/bin/"]
+    image: ghcr.io/nvidia/openshell/supervisor:latest
+    command:
+      - "/openshell-sandbox"
+      - "copy-self"
+      - "/opt/openshell/bin/openshell-sandbox"
     volumeMounts:
       - name: supervisor-bin
         mountPath: /opt/openshell/bin
@@ -70,7 +77,7 @@ volumes:
 |---|---|---|
 | Works under PSA `restricted` / `baseline` | No | N/A — sandbox ns is `privileged`, but we still avoid hostPath |
 | Node pre-staging required | Yes (DaemonSet or node image) | No |
-| Cold start cost | None (binary already on node) | One `cp` (~15 MB, well under one second) |
+| Cold start cost | None (binary already on node) | One `copy-self` (~15 MB, well under one second) |
 | Image pull | None | One pull per node, cached after first |
 | Supervisor version | Tied to node-image build | Tied to init container tag (rolling change is `kubectl set image`) |
 | BYOC compatibility | Works with any agent image | Works with any agent image |
