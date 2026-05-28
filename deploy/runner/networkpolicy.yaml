@@ -1,0 +1,68 @@
+# NetworkPolicy for the gh-runner pods.
+#
+# Default-deny everything for pods labeled app=gh-runner, then allow:
+#   1. DNS (UDP+TCP/53) to kube-system.
+#   2. In-cluster traffic to the your-llm-gateway namespace on port 8080
+#      (nginx routes /gateway/anthropic to the Claude proxy upstream).
+#   3. Egress to 0.0.0.0/0:443 — required for GitHub Actions
+#      (api.github.com, *.githubusercontent.com, ghcr.io). GitHub
+#      runner egress IPs are not statically pinnable in a vanilla
+#      NetworkPolicy. If the underlying CNI is Cilium, swap this for a
+#      CiliumNetworkPolicy with `toFQDNs:` on api.github.com,
+#      *.actions.githubusercontent.com, ghcr.io for tighter scope.
+#   4. NTP egress to kube-system (some node images ship with chrony
+#      that the runner image hits at startup).
+#
+# No ingress is required — GitHub Actions runners long-poll the GitHub
+# API and never accept inbound connections.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gh-runner-egress
+  namespace: gh-runner
+  labels:
+    app.kubernetes.io/name: gh-runner
+    app.kubernetes.io/managed-by: openshell-driver-kyma
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: gh-runner
+  policyTypes:
+    - Ingress
+    - Egress
+  # Empty ingress block = default-deny ingress.
+  ingress: []
+  egress:
+    # 1. DNS to kube-system
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # 2. In-cluster your-llm-gateway nginx
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: your-llm-gateway
+      ports:
+        - port: 8080
+          protocol: TCP
+    # 3. GitHub API + GHCR (TLS, port 443) over public internet
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              # Block traffic to internal RFC1918 / link-local on this
+              # rule so an attacker who compromises the runner cannot
+              # use this open egress to reach private services.
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+      ports:
+        - port: 443
+          protocol: TCP
