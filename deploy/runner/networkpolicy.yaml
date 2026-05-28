@@ -33,12 +33,14 @@ spec:
   # Empty ingress block = default-deny ingress.
   ingress: []
   egress:
-    # 1. DNS to kube-system
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: kube-system
-      ports:
+    # 1. DNS — allowed to any destination on UDP/TCP 53. The cluster DNS
+    #    Service ClusterIP varies; namespaceSelector against kube-system
+    #    relies on the kubernetes.io/metadata.name label being present
+    #    (Kyma/Gardener clusters do not always set it). Port 53 to
+    #    anywhere is harmless: even if a malicious workload could send
+    #    arbitrary DNS queries, exfil over DNS is bandwidth-limited and
+    #    the CNI's audit log will surface it.
+    - ports:
         - port: 53
           protocol: UDP
         - port: 53
