@@ -111,6 +111,22 @@ endif
 .PHONY: test-all
 test-all: test test-integration
 
+# End-to-end test: drives the upstream openshell CLI against a deployed
+# driver+gateway pod and asserts a sandbox reaches Ready. Requires the
+# chart to be installed in INTEGRATION_TEST_NAMESPACE with
+# gateway.enabled=true and gatewayService.enabled=true.
+.PHONY: e2e-cli
+e2e-cli:
+ifeq ($(strip $(INTEGRATION_TEST_NAMESPACE)),)
+	$(error INTEGRATION_TEST_NAMESPACE must be set, e.g. INTEGRATION_TEST_NAMESPACE=openshell-driver-test)
+endif
+	mkdir -p .tmp
+	node scripts/render-static-kubeconfig.js > .tmp/kubeconfig
+	$(DOCKER_RUN) -v "$(CURDIR)/.tmp/kubeconfig:/root/.kube/config:ro" \
+		-e INTEGRATION_TEST_NAMESPACE=$(INTEGRATION_TEST_NAMESPACE) \
+		$(DEV_IMAGE) \
+		bash scripts/e2e-cli.sh
+
 .PHONY: coverage
 coverage:
 	$(DOCKER_RUN) $(DEV_IMAGE) cargo llvm-cov --workspace --html --output-dir coverage
