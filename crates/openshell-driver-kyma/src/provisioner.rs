@@ -41,6 +41,16 @@ const SUPERVISOR_INIT_NAME: &str = "supervisor-init";
 const SANDBOX_SERVICE_ACCOUNT: &str = "openshell-sandbox";
 const GPU_RESOURCE: &str = "nvidia.com/gpu";
 
+// Projected ServiceAccount token. The supervisor exchanges this short-
+// lived audience-bound JWT for a gateway-minted sandbox token via
+// IssueSandboxToken at startup, then uses the gateway token for all
+// subsequent gRPC calls. Without this volume the supervisor refuses to
+// start with "no sandbox token source available".
+const SA_TOKEN_VOLUME: &str = "openshell-sa-token";
+const SA_TOKEN_MOUNT_PATH: &str = "/var/run/secrets/openshell";
+const SA_TOKEN_AUDIENCE: &str = "openshell-gateway";
+const SA_TOKEN_TTL_SECS: i64 = 3600;
+
 /// `KymaProvisioner` implements `SandboxProvisioner` for SAP BTP Kyma.
 pub struct KymaProvisioner {
     client: Client,
@@ -87,10 +97,7 @@ impl KymaProvisioner {
         // emissary pattern and matches what the upstream Kubernetes driver
         // does. See crates/openshell-driver-kubernetes/src/driver.rs in
         // st-gr/OpenShell for the reference implementation.
-        let installed_path = format!(
-            "{}/openshell-sandbox",
-            self.cfg.supervisor_mount_path
-        );
+        let installed_path = format!("{}/openshell-sandbox", self.cfg.supervisor_mount_path);
         let init_container = json!({
             "name": SUPERVISOR_INIT_NAME,
             "image": self.cfg.supervisor_image,
@@ -143,6 +150,20 @@ impl KymaProvisioner {
         };
         agent_container["resources"] = resources;
 
+        // Projected ServiceAccount token volume mount on the agent
+        // container. The supervisor reads this file and exchanges it
+        // for a gateway-minted JWT via IssueSandboxToken at startup.
+        // Without this, the supervisor refuses to start with
+        // "no sandbox token source available".
+        let agent_mounts = agent_container["volumeMounts"]
+            .as_array_mut()
+            .expect("volumeMounts initialized above");
+        agent_mounts.push(json!({
+            "name": SA_TOKEN_VOLUME,
+            "mountPath": SA_TOKEN_MOUNT_PATH,
+            "readOnly": true,
+        }));
+
         // ---------- pod spec ----------
         let mut pod_spec = json!({
             "initContainers": [init_container],
@@ -152,6 +173,21 @@ impl KymaProvisioner {
                 {
                     "name": SUPERVISOR_VOLUME,
                     "emptyDir": {}
+                },
+                // kubelet writes a short-lived audience-bound JWT into
+                // <SA_TOKEN_MOUNT_PATH>/token and rotates it automatically.
+                {
+                    "name": SA_TOKEN_VOLUME,
+                    "projected": {
+                        "sources": [{
+                            "serviceAccountToken": {
+                                "audience": SA_TOKEN_AUDIENCE,
+                                "expirationSeconds": SA_TOKEN_TTL_SECS,
+                                "path": "token"
+                            }
+                        }],
+                        "defaultMode": 256
+                    }
                 }
             ],
         });
@@ -197,6 +233,12 @@ impl KymaProvisioner {
         gw_env.insert("OPENSHELL_SANDBOX_ID".into(), sb.id.clone());
         gw_env.insert("OPENSHELL_SANDBOX".into(), sb.name.clone());
         gw_env.insert("OPENSHELL_SANDBOX_COMMAND".into(), "sleep infinity".into());
+        // Path to the projected ServiceAccount token written by kubelet.
+        // Pairs with the SA_TOKEN_VOLUME we mount in build_sandbox_spec.
+        gw_env.insert(
+            "OPENSHELL_K8S_SA_TOKEN_FILE".into(),
+            format!("{SA_TOKEN_MOUNT_PATH}/token"),
+        );
         if !self.cfg.gateway_endpoint.is_empty() {
             gw_env.insert(
                 "OPENSHELL_ENDPOINT".into(),
@@ -454,11 +496,13 @@ mod tests {
         let init = &spec["podTemplate"]["spec"]["initContainers"][0];
         assert_eq!(init["name"], "supervisor-init");
         assert_eq!(init["image"], p.cfg.supervisor_image);
-        assert_eq!(init["command"][0], "cp");
-        assert_eq!(init["command"][1], p.cfg.supervisor_binary_path);
+        // The distroless supervisor image has no `cp`; the binary self-
+        // copies via its `copy-self <dest>` subcommand.
+        assert_eq!(init["command"][0], p.cfg.supervisor_binary_path);
+        assert_eq!(init["command"][1], "copy-self");
         assert_eq!(
             init["command"][2],
-            format!("{}/", p.cfg.supervisor_mount_path)
+            format!("{}/openshell-sandbox", p.cfg.supervisor_mount_path)
         );
     }
 
