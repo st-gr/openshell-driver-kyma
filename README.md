@@ -119,6 +119,14 @@ make test-integration INTEGRATION_TEST_NAMESPACE=openshell-driver-test
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow, including DCO
 sign-off requirements (`git commit -s` on every commit).
 
+## Related
+
+- [`st-gr/gha-runner-kyma`](https://github.com/st-gr/gha-runner-kyma) —
+  a self-hosted GitHub Actions runner that lives in the same Kyma
+  cluster, useful when CI workflows need to call the in-cluster
+  gateway (originally bundled here under `deploy/runner/`; extracted
+  on 2026-05-28).
+
 ## Reference and credits
 
 - The reference Go implementation for OpenShift is
