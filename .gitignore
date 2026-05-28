@@ -38,3 +38,19 @@ dist/
 *.tgz
 
 # Note: Cargo.lock IS committed for binary crates (we ship binaries).
+
+# Self-hosted runner: secret hygiene safety net. The real Secret is
+# created via `kubectl create secret` — never via a YAML file. These
+# patterns prevent accidental commits if anyone ignores the README.
+deploy/runner/secret.yaml
+deploy/runner/secrets.yaml
+deploy/runner/.env*
+**/runner-token-*.txt
+**/registration-token-*.txt
+**/*.pat
+**/*-pat.txt
+**/anthropic-token-*.txt
+
+# Node module noise from scripts/ if anyone runs `npm install` ad-hoc
+scripts/node_modules/
+
