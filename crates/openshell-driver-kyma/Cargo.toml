@@ -51,6 +51,12 @@ clap = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 
+# TLS provider. rustls 0.23 requires the binary to call
+# CryptoProvider::install_default() explicitly before any TLS use; the
+# library version of this crate does not do that to avoid global side
+# effects in tests, so the binary main installs it.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+
 # Serde
 serde = { workspace = true }
 serde_json = { workspace = true }

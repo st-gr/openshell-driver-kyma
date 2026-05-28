@@ -171,12 +171,26 @@ spec:
           volumeMounts:
             - name: socket-dir
               mountPath: {{ dir .Values.driver.socket | quote }}
+            # The gateway image has readOnlyRootFilesystem and writes its
+            # XDG state under /home/nonroot/.local/state/openshell/gateway.
+            # Mount a writable emptyDir there (and also at /tmp for any
+            # other transient writes the gateway might do).
+            - name: gateway-state
+              mountPath: /home/nonroot/.local/state
+            - name: gateway-tmp
+              mountPath: /tmp
         {{- end }}
       volumes:
         - name: socket-dir
           emptyDir: {}
         - name: tmp
           emptyDir: {}
+        {{- if .Values.gateway.enabled }}
+        - name: gateway-state
+          emptyDir: {}
+        - name: gateway-tmp
+          emptyDir: {}
+        {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

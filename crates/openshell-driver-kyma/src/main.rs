@@ -35,6 +35,15 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // rustls 0.23 requires the binary to install a default CryptoProvider
+    // before any TLS code runs. kube-rs (-> hyper-rustls -> rustls) panics
+    // at runtime otherwise: "Could not automatically determine the
+    // process-level CryptoProvider from Rustls crate features." We use
+    // ring (no aws-lc-rs dep tree, no C compiler at build).
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("install rustls ring crypto provider");
+
     let cfg = Config::parse();
     init_tracing(&cfg.log_level);
 
