@@ -26,10 +26,7 @@ pub struct Config {
     pub namespace: String,
 
     /// OCI image containing the supervisor binary copied into the sandbox.
-    #[arg(
-        long,
-        default_value = "ghcr.io/nvidia/openshell/supervisor:latest"
-    )]
+    #[arg(long, default_value = "ghcr.io/nvidia/openshell/supervisor:latest")]
     pub supervisor_image: String,
 
     /// Path to the supervisor binary inside the supervisor image.

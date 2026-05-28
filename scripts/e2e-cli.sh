@@ -98,7 +98,7 @@ log "gateway responded: $(head -1 /tmp/status.txt)"
 SB_NAME="e2e-$(date +%s)"
 log "creating sandbox '$SB_NAME'..."
 osh sandbox create --name "$SB_NAME" \
-  --from ghcr.io/nvidia/openshell-community/sandboxes/ubuntu:latest \
+  --from docker.io/library/ubuntu:24.04 \
   -- sleep infinity \
   >/tmp/create.log 2>&1 \
   || { cat /tmp/create.log >&2; die "openshell sandbox create failed"; }

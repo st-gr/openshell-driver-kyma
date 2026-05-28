@@ -50,6 +50,14 @@ spec:
             {{- if .Values.driver.gatewayEndpoint }}
             - --gateway-endpoint
             - {{ .Values.driver.gatewayEndpoint | quote }}
+            {{- else if .Values.gateway.enabled }}
+            # When the gateway sidecar runs in this pod, default the
+            # endpoint the driver injects into sandboxes to the chart's
+            # Service VIP. Sandboxes use this to fetch their policy
+            # from the gateway via OPENSHELL_ENDPOINT — without it the
+            # supervisor refuses to start with "Sandbox policy required."
+            - --gateway-endpoint
+            - "http://{{ include "openshell-driver-kyma.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.gateway.grpcPort }}"
             {{- end }}
             - --istio-inject-sandboxes={{ .Values.driver.istioInjectSandboxes }}
             - --enable-apirule={{ .Values.driver.enableApirule }}

@@ -1467,6 +1467,7 @@ dependencies = [
  "prost",
  "prost-types",
  "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "serde_yaml",
