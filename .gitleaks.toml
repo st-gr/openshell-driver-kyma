@@ -1,0 +1,71 @@
+# gitleaks configuration for openshell-driver-kyma.
+#
+# Scans every PR and every push to main via .github/workflows/secrets-scan.yml.
+# We rely on the gitleaks default rule set (covers GitHub PATs, AWS keys,
+# generic high-entropy strings, JWTs, etc.) and add explicit allowlists
+# below for known false positives.
+
+title = "openshell-driver-kyma gitleaks config"
+
+[extend]
+# Inherit all default rules from upstream gitleaks. Don't override unless
+# the default produces a real false-positive in this repo.
+useDefault = true
+
+[[rules]]
+id = "anthropic-api-key"
+description = "Anthropic API key (sk-ant-...) — high-confidence pattern"
+regex = '''sk-ant-[a-zA-Z0-9_-]{40,}'''
+secretGroup = 0
+keywords = ["sk-ant-"]
+
+[[rules]]
+id = "anthropic-bearer-key"
+description = "Anthropic-style auth token (sk-... NOT sk-ant-) used by your-llm-gateway"
+# 30+ char hex/base64-ish suffix to reduce false positives on short patterns
+# like "sk-1" inside source code, while still catching the real tokens.
+regex = '''(?i)\bsk-[a-zA-Z0-9]{20,}'''
+secretGroup = 0
+keywords = ["sk-"]
+
+[[rules]]
+id = "github-pat-classic"
+description = "Classic GitHub PAT (ghp_...)"
+regex = '''ghp_[A-Za-z0-9]{36,}'''
+secretGroup = 0
+keywords = ["ghp_"]
+
+[[rules]]
+id = "github-pat-finegrained"
+description = "Fine-grained GitHub PAT (github_pat_...)"
+regex = '''github_pat_[A-Za-z0-9_]{80,}'''
+secretGroup = 0
+keywords = ["github_pat_"]
+
+[allowlist]
+description = "Allowlist for known-safe placeholder strings."
+# Files we never want to scan. The Cargo.lock can carry crate-name strings
+# that match high-entropy heuristics; the placeholder template carries
+# obviously-fake values that satisfy the regex but contain the marker
+# string DO_NOT_COMMIT.
+paths = [
+    '''^Cargo\.lock$''',
+    '''^reference-openshift/''',
+    '''^docs/superpowers/plans/''',
+]
+# Per-string regexes to drop (these tokens are deliberately non-credentials):
+regexes = [
+    '''ghp_REPLACE_ME_DO_NOT_COMMIT_THIS_VALUE''',
+    '''sk-REPLACE_ME_DO_NOT_COMMIT_THIS_VALUE''',
+    '''sk-ant-FAKE0000''',
+]
+# Stop tokens — substrings indicating "this is documentation, not a real
+# credential":
+stopwords = [
+    "REPLACE_ME",
+    "DO_NOT_COMMIT",
+    "<paste-",
+    "<your-",
+    "EXAMPLE",
+    "PLACEHOLDER",
+]
