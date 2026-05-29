@@ -75,6 +75,46 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   (`serviceAccount.create=false` + `serviceAccount.name=<existing>`).
   Documented supervisor-image digest-pinning policy in `values.yaml`
   comments.
+- Optional in-cluster LLM-gateway routing for sandbox model traffic.
+  Three new chart blocks turn this into a declarative one-`helm install`
+  flow without ever leaking the upstream URL or API key into the sandbox:
+  - `gateway.dbPersistence` — PVC-backed SQLite (or external Postgres
+    via `dbUrl`) for the gateway's provider/inference DB so configs
+    survive pod restarts.
+  - `inferenceProvider` — post-install,post-upgrade Helm Hook Job that
+    calls `openshell provider create` + `openshell inference set`
+    against the in-pod gateway. The Anthropic API key is mounted into
+    the Job from a Secret the operator manages — the chart never sees
+    the key. Mirrors the existing gateway-jwt-pki-hook pattern.
+  - `gatewayUpstreamEgress` — NetworkPolicy egress rule on the
+    **driver+gateway pod** (NOT the sandbox-pod policy) allowing the
+    gateway sidecar to reach the operator's in-cluster LLM upstream.
+    The sandbox NetworkPolicy is unchanged — sandbox traffic always
+    terminates at the in-pod gateway.
+- Driver `--disable-claude-telemetry` flag (default false). When true,
+  the driver injects `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` into
+  every sandbox pod's env. Useful when the in-cluster LLM gateway
+  cannot service Anthropic's optional telemetry endpoints. Independent
+  of inference routing — flip on its own when you want to silence
+  telemetry without rerouting model calls.
+- Pre-flight `{{- fail -}}` guards (in
+  `templates/_inference-provider-guards.tpl`) that refuse to render
+  when `inferenceProvider.enabled=true` is missing any of `type`,
+  `baseUrl`, `modelId`, `credentialSecret.name`, or
+  `credentialSecret.key`, and similarly for `gatewayUpstreamEgress`
+  enabled with empty `namespace` or `port`. Mirrors the
+  `gateway-apirule.yaml` `{{- fail -}}` style.
+- Documented architecture preservation rationale in
+  `docs/production-deployment.md` and a new "Gateway-mediated
+  inference routing" section in `docs/kyma-vs-openshift.md`. The
+  hardcoded `ANTHROPIC_BASE_URL=https://inference.local/v1` and
+  `OPENAI_BASE_URL=https://inference.local/v1` env injections
+  (`provisioner.rs:277-284`) are explicitly preserved — they are
+  upstream NVIDIA OpenShell's pseudo-endpoint that the gateway sidecar
+  intercepts and rewrites.
+- `docs/getting-started.md` Step 5b walking through the opt-in flow
+  end-to-end: Secret create + namespace label + `helm install --set`
+  with the three new blocks.
 
 ### Changed
 
@@ -174,3 +214,9 @@ unit of work and should ship in its own PR/release.
 - **Bump dev-image Node from 18 to 20+** so `markdownlint-cli2`
   works inside the dev container (current versions of
   `string-width` use the `/v` regex flag which Node 18 lacks).
+- **Live-cluster smoke for the in-cluster LLM-gateway routing.**
+  The chart-side wiring is complete + helm-template-verified across 6
+  scenarios, but a true end-to-end smoke (operator's actual sail-proxy
+  + Anthropic API key, sandbox running `claude "say hi"`) is a manual
+  step the operator runs once after install. To be moved into CI when
+  the self-hosted Kyma runner picks it up.
