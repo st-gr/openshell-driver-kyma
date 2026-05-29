@@ -217,3 +217,42 @@ gatewayApirule:
         #     - issuer: https://my-tenant.accounts.ondemand.com
         #       jwksUri: https://my-tenant.accounts.ondemand.com/oauth2/certs
         authentications: []
+
+# Optional: declaratively configure the gateway's inference provider via
+# a post-install Job. The Job runs `openshell provider create` and
+# `openshell inference set` against the in-pod gateway, configuring the
+# gateway-side override of the upstream URL.
+#
+# Architecture preservation: sandboxes still talk only to the upstream
+# pseudo-endpoint `inference.local`; the gateway sidecar (not the
+# sandbox) holds the real URL + key and rewrites traffic. The chart
+# never sees the API key — supply it via a Secret you manage in
+# .Release.Namespace before install.
+inferenceProvider:
+  enabled: false
+  type: ""                # e.g. "anthropic"
+  name: ""                # provider name visible to `openshell provider list`. Defaults to <release>-<type> when empty.
+  baseUrl: ""             # e.g. http://gateway.your-llm-ns.svc.cluster.local:8080/anthropic
+  modelId: ""             # e.g. claude-opus-4-7
+  # Operator-managed Secret carrying the API key. Must already exist
+  # in .Release.Namespace before install. The chart does NOT create it
+  # (chart isolation guarantee #10: never inject pull-secrets into
+  # other namespaces' SAs).
+  credentialSecret:
+    name: ""              # e.g. "my-anthropic-creds"
+    key: ""               # e.g. "api-key"
+
+# Optional: NetworkPolicy egress rule allowing the driver+gateway pod's
+# gateway sidecar to reach an in-cluster LLM upstream. Required when
+# inferenceProvider.baseUrl points at a *.svc.cluster.local address —
+# the gateway sidecar (not the sandbox) is the process that dials the
+# upstream after rewriting `inference.local` traffic. Today's
+# driver+gateway-pod NetworkPolicy denies all in-cluster egress except
+# DNS and TCP/443.
+gatewayUpstreamEgress:
+  enabled: false
+  namespace: ""           # e.g. "your-llm-ns"
+  port: 8080
+  # Optional pod-label selector to tighten the rule to only the gateway
+  # pods within `namespace`. Empty = whole namespace allowed.
+  podSelector: {}

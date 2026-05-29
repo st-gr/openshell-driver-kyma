@@ -1,3 +1,6 @@
+{{/* Pre-flight validation: check required fields when opt-in features are enabled. */ -}}
+{{- include "openshell-driver-kyma.inferenceProviderGuards" . -}}
+{{- include "openshell-driver-kyma.gatewayUpstreamEgressGuards" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
