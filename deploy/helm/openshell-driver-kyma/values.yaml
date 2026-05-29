@@ -62,6 +62,12 @@ driver:
   clusterDomain: ""
   gpuSupport: true
   enableNetworkPolicy: true
+  # When true, the driver injects `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`
+  # into every sandbox pod's env. Pair with an in-cluster LLM gateway that
+  # cannot service Anthropic's optional telemetry endpoints. Independent
+  # of inferenceProvider/gatewayUpstreamEgress — flip on its own when
+  # you want to silence telemetry without rerouting model calls.
+  disableClaudeTelemetry: false
   healthPort: 9090
   logLevel: info
 
