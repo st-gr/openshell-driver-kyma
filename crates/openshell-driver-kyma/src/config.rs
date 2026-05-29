@@ -71,6 +71,13 @@ pub struct Config {
     #[arg(long, default_value_t = false, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
     pub enable_network_policy: bool,
 
+    /// When true, the driver injects `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`
+    /// into every sandbox pod's env. Useful when sandboxes are routed through
+    /// an in-cluster LLM gateway that can't service Anthropic's optional
+    /// telemetry endpoints.
+    #[arg(long, default_value_t = false, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
+    pub disable_claude_telemetry: bool,
+
     /// HTTP port for the sidecar `/healthz`, `/readyz`, and `/metrics`
     /// endpoints. The gRPC server still listens on the UDS only.
     #[arg(long, default_value_t = 9090)]
@@ -95,6 +102,7 @@ impl Default for Config {
             cluster_domain: String::new(),
             gpu_support: true,
             enable_network_policy: false,
+            disable_claude_telemetry: false,
             health_port: 9090,
             log_level: "info".to_string(),
         }
@@ -131,6 +139,7 @@ mod tests {
         assert_eq!(c.cluster_domain, "");
         assert!(c.gpu_support);
         assert!(!c.enable_network_policy);
+        assert!(!c.disable_claude_telemetry);
         assert_eq!(c.health_port, 9090);
         assert_eq!(c.log_level, "info");
     }

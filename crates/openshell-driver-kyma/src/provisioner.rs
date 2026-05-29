@@ -282,6 +282,12 @@ impl KymaProvisioner {
             "OPENAI_BASE_URL".into(),
             "https://inference.local/v1".into(),
         );
+        if self.cfg.disable_claude_telemetry {
+            gw_env.insert(
+                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".into(),
+                "1".into(),
+            );
+        }
 
         for (k, v) in gw_env {
             envs.push(json!({ "name": k, "value": v }));
@@ -695,6 +701,41 @@ mod tests {
         assert!(names.contains(&"OPENSHELL_SANDBOX"));
         assert!(names.contains(&"ANTHROPIC_BASE_URL"));
         assert!(names.contains(&"OPENAI_BASE_URL"));
+    }
+
+    #[tokio::test]
+    async fn driver_injected_env_with_telemetry_disabled() {
+        let cfg = Config {
+            disable_claude_telemetry: true,
+            ..Config::default()
+        };
+        let svc = tower::service_fn(|_req: http::Request<kube::client::Body>| async move {
+            Ok::<_, std::convert::Infallible>(http::Response::new(kube::client::Body::empty()))
+        });
+        let client = Client::new(svc, "test-ns");
+        let p = KymaProvisioner::new(client, cfg);
+        let sb = make_sandbox("sb-1", "tel-test", "img");
+        let spec = p.build_sandbox_spec(&sb);
+        let env = spec["podTemplate"]["spec"]["containers"][0]["env"]
+            .as_array()
+            .unwrap();
+        let names: Vec<&str> = env.iter().map(|e| e["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"));
+        // Sanity: existing pseudo-endpoint env vars still present.
+        assert!(names.contains(&"ANTHROPIC_BASE_URL"));
+        assert!(names.contains(&"OPENAI_BASE_URL"));
+    }
+
+    #[tokio::test]
+    async fn driver_injected_env_telemetry_disabled_off_by_default() {
+        let p = make_provisioner();
+        let sb = make_sandbox("sb-1", "tel-default", "img");
+        let spec = p.build_sandbox_spec(&sb);
+        let env = spec["podTemplate"]["spec"]["containers"][0]["env"]
+            .as_array()
+            .unwrap();
+        let names: Vec<&str> = env.iter().map(|e| e["name"].as_str().unwrap()).collect();
+        assert!(!names.contains(&"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"));
     }
 
     #[tokio::test]
