@@ -56,6 +56,28 @@ spec:
     - ports:
         - port: 443
           protocol: TCP
+    {{- if .Values.gatewayUpstreamEgress.enabled }}
+    # Opt-in: gateway sidecar -> operator's in-cluster LLM upstream.
+    # The gateway is the process that rewrites `inference.local` and
+    # dials the real upstream after looking up provider config in its
+    # DB. The sandbox NetworkPolicy is NOT extended for this — sandbox
+    # traffic terminates at the in-pod gateway via the existing rule.
+    # Prerequisite (Kyma/Gardener): operators must label their LLM
+    # upstream namespace with kubernetes.io/metadata.name=<value> at
+    # install time, as Kyma/Gardener does not auto-apply this label.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.gatewayUpstreamEgress.namespace }}
+          {{- with .Values.gatewayUpstreamEgress.podSelector }}
+          podSelector:
+            matchLabels:
+              {{- toYaml . | nindent 14 }}
+          {{- end }}
+      ports:
+        - port: {{ .Values.gatewayUpstreamEgress.port }}
+          protocol: TCP
+    {{- end }}
 ---
 # NetworkPolicy for sandbox pods.
 #
