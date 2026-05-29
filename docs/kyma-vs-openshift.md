@@ -139,3 +139,35 @@ this guard, an operator could combine a public host with
 `allow_unauthenticated_users=true` (set automatically when no
 issuer) and `--disable-tls`, producing a world-writable sandbox
 factory.
+
+## Gateway-mediated inference routing
+
+OpenShift driver: relies on direct sandbox-side env (`ANTHROPIC_BASE_URL`,
+`ANTHROPIC_API_KEY`) for routing. Operators who want to route through
+an in-cluster proxy patch each sandbox's CR.
+
+Kyma driver: preserves NVIDIA OpenShell's `inference.local` pseudo-
+endpoint design verbatim. The driver injects
+`ANTHROPIC_BASE_URL=https://inference.local/v1` into every sandbox pod
+(at `provisioner.rs:277-284`); the supervisor's netns redirects that
+traffic to the in-pod gateway sidecar; the gateway sidecar holds the
+real upstream URL + API key (in its DB, set via gRPC RPC by
+`openshell provider create`) and rewrites + forwards.
+
+Three new chart blocks turn this into a one-`helm install` declarative
+flow:
+
+| Block | What it adds |
+|---|---|
+| `gateway.dbPersistence` | PVC-backed SQLite (or external Postgres `dbUrl`) for the gateway's provider/inference DB so configs survive pod restarts. |
+| `inferenceProvider` | Post-install,post-upgrade Helm Hook Job that calls `openshell provider create` + `openshell inference set` against the in-pod gateway. The Anthropic API key is mounted from a Secret the operator manages — the chart never sees it. |
+| `gatewayUpstreamEgress` | NetworkPolicy egress rule on the **driver+gateway pod** (not the sandbox) allowing the gateway sidecar to reach the operator's in-cluster LLM upstream. |
+
+The sandbox NetworkPolicy is unchanged — sandbox traffic terminates at
+the in-pod gateway. The hardcoded `inference.local` env injections at
+`provisioner.rs:277-284` are NOT modified; they're the upstream-defined
+pseudo-endpoint that the architecture relies on.
+
+See [`getting-started.md`](getting-started.md) Step 5b for the
+end-to-end install command, and [`production-deployment.md`](production-deployment.md)
+for the values overlay equivalent.

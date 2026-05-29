@@ -164,6 +164,61 @@ the chart removes everything else. The JWT Secret survives in `$NS`
 until the namespace deletion (intentional — it survives `helm upgrade`
 so the sandbox-Ready promise holds across releases).
 
+## 5b. (Optional) Route model calls through your in-cluster LLM gateway
+
+If you run an in-cluster Anthropic-compatible gateway (typical example:
+an SAP-IAS-fronted Claude proxy in a separate namespace) and want every
+sandbox's model traffic to flow through it instead of `api.anthropic.com`,
+flip on the chart's `inferenceProvider`, `gatewayUpstreamEgress`, and
+`gateway.dbPersistence` blocks.
+
+Architecture: the **gateway sidecar** (in the driver+gateway pod) is the
+process that rewrites `inference.local` and dials the real upstream. The
+sandbox itself never sees the upstream URL or API key — both are owned
+by the gateway pod. So this is purely a gateway-side configuration; no
+sandbox env var is touched.
+
+```bash
+# 1. Operator-managed Secret with the API key. Must exist BEFORE install.
+kubectl -n "$NS" create secret generic my-anthropic-creds \
+  --from-literal=api-key=sk-ant-…
+
+# 2. Label the upstream LLM gateway's namespace so the NetworkPolicy
+#    can match it (Kyma/Gardener doesn't auto-apply this).
+kubectl label namespace your-llm-ns kubernetes.io/metadata.name=your-llm-ns
+
+# 3. Helm install with the new options.
+helm upgrade --install ods deploy/helm/openshell-driver-kyma \
+  --namespace "$NS" \
+  --set namespace="$NS" \
+  --set gateway.enabled=true --set gateway.sandboxJwt.enabled=true \
+  --set gatewayService.enabled=true \
+  --set gateway.dbPersistence.enabled=true \
+  --set inferenceProvider.enabled=true \
+  --set inferenceProvider.type=anthropic \
+  --set inferenceProvider.baseUrl=http://gateway.your-llm-ns.svc.cluster.local:8080/anthropic \
+  --set inferenceProvider.modelId=claude-opus-4-7 \
+  --set inferenceProvider.credentialSecret.name=my-anthropic-creds \
+  --set inferenceProvider.credentialSecret.key=api-key \
+  --set gatewayUpstreamEgress.enabled=true \
+  --set gatewayUpstreamEgress.namespace=your-llm-ns \
+  --set gatewayUpstreamEgress.port=8080 \
+  --set driver.disableClaudeTelemetry=true
+```
+
+After install, a `post-install,post-upgrade` Job runs the upstream
+`openshell` CLI to do `provider create` + `inference set` against the
+in-pod gateway. Verify:
+
+```bash
+kubectl -n "$NS" get jobs | grep inference-provider-hook
+kubectl -n "$NS" logs job/<release>-inference-provider-hook
+```
+
+The Job is idempotent (re-runs cleanly on `helm upgrade`). The chart
+never sees the API key — it's mounted into the Job pod from your
+Secret via `secretKeyRef`.
+
 ## Troubleshooting
 
 **`Sandbox CR is not installed` from the chart's pre-install hook.**

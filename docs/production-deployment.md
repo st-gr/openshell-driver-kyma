@@ -77,6 +77,15 @@ gateway:
     ttlSecs: 3600
     saTokenTtlSecs: 3600
 
+  # Persist the gateway's DB across pod restarts. Without this, every
+  # gateway pod restart wipes the provider/inference DB set by the
+  # post-install Job, breaking every sandbox's bundle fetch.
+  dbPersistence:
+    enabled: true
+    dbUrl: ""               # empty = chart renders a PVC; set to postgres URL for external DB
+    storageSize: 1Gi
+    storageClassName: ""
+
 gatewayService:
   enabled: true
 
@@ -94,9 +103,66 @@ gatewayApirule:
         authorizations:
           - requiredScopes: []   # rely on OIDC roles in the gateway
 
+# Gateway-side inference provider config. The chart runs a post-install
+# Job that calls `openshell provider create` + `openshell inference set`
+# against the in-pod gateway. The chart never sees the API key — it's
+# mounted into the Job from a Secret you create separately:
+#   kubectl -n openshell-system create secret generic my-anthropic-creds \
+#     --from-literal=api-key=sk-ant-…
+inferenceProvider:
+  enabled: true
+  type: anthropic
+  baseUrl: "http://gateway.your-llm-ns.svc.cluster.local:8080/anthropic"
+  modelId: "claude-opus-4-7"
+  credentialSecret:
+    name: my-anthropic-creds
+    key: api-key
+
+# NetworkPolicy egress rule for the driver+gateway pod (NOT sandbox)
+# to reach the in-cluster LLM upstream. Required when
+# inferenceProvider.baseUrl points at a *.svc.cluster.local address.
+# Operators must label their upstream namespace at install time:
+#   kubectl label namespace your-llm-ns \
+#     kubernetes.io/metadata.name=your-llm-ns
+gatewayUpstreamEgress:
+  enabled: true
+  namespace: your-llm-ns
+  port: 8080
+
 driver:
   enableNetworkPolicy: true   # default-on as of 2026-05-28
+  # Silence Claude's optional telemetry endpoints when the in-cluster
+  # gateway can't service them.
+  disableClaudeTelemetry: true
 ```
+
+## Why these settings keep the sandbox isolated
+
+The chart preserves NVIDIA OpenShell's gateway-mediated architecture:
+all inference rewriting happens on the **gateway sidecar**, not inside
+the sandbox.
+
+```text
+sandbox app  ─https://inference.local/v1/messages──▶  supervisor's netns redirect
+                                                            │
+                                                            ▼
+                                            openshell gateway sidecar (driver+gateway pod)
+                                                            │
+                                                            │  rewrites destination URL,
+                                                            │  injects real API key from
+                                                            │  its provider/inference DB
+                                                            ▼
+                                               your in-cluster LLM upstream
+```
+
+The sandbox never sees the upstream URL or the real key. Both are owned
+by the gateway pod's DB (persisted by `gateway.dbPersistence.enabled`)
+and supplied to the sandbox-local router on demand via the per-sandbox
+JWT-authenticated `GetInferenceBundle` RPC.
+
+The `gatewayUpstreamEgress` NetworkPolicy rule is on the **driver+gateway
+pod**, not the sandbox-pod policy. Sandbox-side traffic always
+terminates at the in-pod gateway.
 
 ## 3. Install
 
