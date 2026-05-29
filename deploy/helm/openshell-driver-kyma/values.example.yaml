@@ -1,0 +1,193 @@
+# values.example.yaml — copy-paste-edit reference overlay for openshell-driver-kyma.
+#
+# Use this file as your starting point. Every block below is OPT-IN; chart
+# defaults are off (see values.yaml). Trim what you don't need.
+#
+#   helm install ods deploy/helm/openshell-driver-kyma \
+#     --namespace openshell-system --create-namespace \
+#     -f my-values.yaml
+#
+# Or, when this chart is published as an OCI artifact:
+#
+#   helm install ods oci://ghcr.io/st-gr/openshell-driver-kyma/helm-chart \
+#     --version <chart-version> \
+#     --namespace openshell-system --create-namespace \
+#     -f my-values.yaml
+#
+# Pre-flight checklist (the chart's own pre-install hook fails fast on these):
+#   1. agent-sandbox controller installed cluster-wide:
+#        kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.4.6/manifest.yaml
+#   2. Sandbox namespace exists with PSA=privileged:
+#        kubectl create namespace openshell-system
+#        kubectl label namespace openshell-system \
+#          pod-security.kubernetes.io/enforce=privileged \
+#          pod-security.kubernetes.io/audit=privileged \
+#          pod-security.kubernetes.io/warn=privileged --overwrite
+#   3. (Only if inferenceProvider.enabled below) Anthropic-key Secret pre-created:
+#        kubectl -n openshell-system create secret generic my-anthropic-creds \
+#          --from-literal=api-key=sk-ant-…
+#   4. (Only if gatewayUpstreamEgress.enabled below) Upstream LLM-gateway namespace
+#      labelled with kubernetes.io/metadata.name (Kyma/Gardener doesn't auto-apply):
+#        kubectl label namespace your-llm-ns kubernetes.io/metadata.name=your-llm-ns
+
+# ─── Sandbox namespace ────────────────────────────────────────────────────
+# Where the driver creates Sandbox CRs. Must carry PSA=privileged.
+namespace: openshell-system
+
+# ─── Driver image ─────────────────────────────────────────────────────────
+# Both image.tag and gateway.image.tag should be PINNED BY DIGEST in
+# production. Tag examples below are illustrative.
+image:
+  repository: ghcr.io/st-gr/openshell-driver-kyma
+  tag: ""                # "" = .Chart.AppVersion. Override with v0.x.y or @sha256:…
+  pullPolicy: IfNotPresent
+
+# ─── Driver flags ─────────────────────────────────────────────────────────
+driver:
+  # Pin the supervisor image for production. To resolve the digest:
+  #   docker buildx imagetools inspect \
+  #     ghcr.io/nvidia/openshell/supervisor:latest \
+  #     --format '{{json .Manifest.Digest}}'
+  supervisorImage: ghcr.io/nvidia/openshell/supervisor:latest
+
+  # Default-on. Renders two NetworkPolicies (driver+gateway pod, sandbox pod).
+  enableNetworkPolicy: true
+
+  # Set true when your in-cluster LLM gateway can't service Anthropic's
+  # optional telemetry endpoints. Independent of inference routing.
+  disableClaudeTelemetry: true
+
+# ─── Driver pod resources ─────────────────────────────────────────────────
+# Defaults are intentionally modest; raise for hot paths.
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 256Mi
+
+# ─── Image pull secrets ───────────────────────────────────────────────────
+# Only set when one of the configured images lives in a private registry.
+# The Secret must exist in .Release.Namespace before install — the chart
+# does NOT create it.
+imagePullSecrets: []
+# imagePullSecrets:
+#   - name: my-ghcr-pull-secret
+
+# ─── Gateway sidecar ──────────────────────────────────────────────────────
+# Recommended for any real workflow. Without it, the supervisor inside each
+# sandbox can't complete IssueSandboxToken and `openshell sandbox exec`
+# never reaches Ready.
+gateway:
+  enabled: true
+  image:
+    repository: ghcr.io/st-gr/openshell-gateway
+    tag: latest          # PIN BY DIGEST for production
+    pullPolicy: IfNotPresent
+
+  # OIDC for client auth (the openshell CLI authenticates via OIDC).
+  # Leave issuer empty for in-cluster-only deployments behind a service mesh.
+  # When set, the chart drops --disable-tls and renders the OIDC flags.
+  oidc:
+    issuer: ""           # e.g. https://my-tenant.accounts.ondemand.com
+    audience: ""         # e.g. openshell
+    adminRole: ""        # e.g. openshell.admin
+    userRole: ""         # e.g. openshell.user
+
+  # Sandbox-JWT auth — REQUIRED for sandbox readiness.
+  sandboxJwt:
+    enabled: true
+    ttlSecs: 3600
+    saTokenTtlSecs: 3600
+
+  # Gateway DB persistence. Without this, every gateway pod restart wipes
+  # provider/inference configs and breaks every sandbox's bundle fetch.
+  # Two modes:
+  #   - PVC-SQLite (dbUrl=""): chart renders a PVC at /var/lib/openshell.
+  #   - External DB: set dbUrl, no PVC rendered.
+  dbPersistence:
+    enabled: true
+    dbUrl: ""            # e.g. postgresql://user:pass@host:5432/openshell
+    storageSize: 1Gi
+    storageClassName: "" # "" = cluster default StorageClass
+
+# ─── Gateway Service ──────────────────────────────────────────────────────
+# ClusterIP Service exposing gateway gRPC + metrics. Required for in-cluster
+# CLI access (port-forward) and for the inferenceProvider post-install Job.
+gatewayService:
+  enabled: true
+
+# ─── Gateway APIRule (Kyma) ───────────────────────────────────────────────
+# Public exposure of the gateway via the Kyma API gateway. Refused unless
+# gateway.oidc.issuer is set (chart guards against accidentally publishing
+# an unauthenticated gateway).
+gatewayApirule:
+  enabled: false
+  host: ""               # e.g. openshell.your-cluster-id.kyma.ondemand.com
+  gateway: kyma-system/kyma-gateway
+  rules:
+    - path: /*
+      methods: [POST]
+      jwt:
+        authentications: []
+        # authentications:
+        #   - issuer: https://my-tenant.accounts.ondemand.com
+        #     jwksUri: https://my-tenant.accounts.ondemand.com/oauth2/certs
+
+# ─── In-cluster LLM gateway routing (sandbox model traffic) ──────────────
+# Architecture: the gateway sidecar (in the driver+gateway pod) is the SOLE
+# process that rewrites `inference.local` → real upstream URL and injects
+# the API key. The sandbox itself NEVER sees the upstream URL or key.
+#
+# When this block is enabled, a post-install Job runs `openshell provider
+# create` + `openshell inference set` against the in-pod gateway. The
+# Anthropic API key is mounted into the Job from the Secret you created in
+# the pre-flight checklist — the chart never sees it.
+inferenceProvider:
+  enabled: true
+  type: anthropic
+  name: ""               # "" = <release>-<type>; override only for multi-provider setups
+  # Replace with your actual in-cluster LLM gateway endpoint.
+  baseUrl: http://gateway.your-llm-ns.svc.cluster.local:8080/anthropic
+  modelId: claude-opus-4-7
+  credentialSecret:
+    name: my-anthropic-creds   # Secret you pre-created with the API key
+    key: api-key
+
+# ─── NetworkPolicy egress for the gateway sidecar → LLM upstream ─────────
+# Required when inferenceProvider.baseUrl points at a *.svc.cluster.local
+# address. The driver+gateway pod's NetworkPolicy denies all in-cluster
+# egress by default; this rule punches a hole for the gateway sidecar
+# (NOT the sandbox — the sandbox NetworkPolicy is unchanged).
+#
+# Prerequisite: the upstream LLM gateway's namespace must carry the
+# `kubernetes.io/metadata.name=<value>` label (Kyma/Gardener doesn't
+# auto-apply this — see pre-flight checklist).
+gatewayUpstreamEgress:
+  enabled: true
+  namespace: your-llm-ns
+  port: 8080
+  # Optional: tighten the rule to specific pods within the namespace.
+  podSelector: {}
+  # podSelector:
+  #   app.kubernetes.io/name: gateway
+
+# ─── ServiceAccount & sandbox SA ──────────────────────────────────────────
+# Defaults are sensible; override only when an external RBAC overlay owns
+# the SA wiring (chart still renders Role/Binding pointing at the name
+# you supply).
+serviceAccount:
+  create: true
+  name: openshell-driver
+
+sandboxServiceAccount:
+  create: true
+  name: openshell-sandbox
+
+# ─── Pod placement ────────────────────────────────────────────────────────
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}
+podLabels: {}
