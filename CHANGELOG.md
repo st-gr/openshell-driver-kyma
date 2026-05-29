@@ -216,7 +216,8 @@ unit of work and should ship in its own PR/release.
   `string-width` use the `/v` regex flag which Node 18 lacks).
 - **Live-cluster smoke for the in-cluster LLM-gateway routing.**
   The chart-side wiring is complete + helm-template-verified across 6
-  scenarios, but a true end-to-end smoke (operator's actual sail-proxy
-  + Anthropic API key, sandbox running `claude "say hi"`) is a manual
+  scenarios, but a true end-to-end smoke (operator's actual upstream
+  LLM gateway + Anthropic API key, sandbox running `claude "say hi"`)
+  is a manual
   step the operator runs once after install. To be moved into CI when
   the self-hosted Kyma runner picks it up.

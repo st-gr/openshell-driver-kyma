@@ -167,7 +167,7 @@ so the sandbox-Ready promise holds across releases).
 ## 5b. (Optional) Route model calls through your in-cluster LLM gateway
 
 If you run an in-cluster Anthropic-compatible gateway (typical example:
-an SAP-IAS-fronted Claude proxy in a separate namespace) and want every
+an OIDC-fronted Claude proxy in a separate namespace) and want every
 sandbox's model traffic to flow through it instead of `api.anthropic.com`,
 flip on the chart's `inferenceProvider`, `gatewayUpstreamEgress`, and
 `gateway.dbPersistence` blocks.
