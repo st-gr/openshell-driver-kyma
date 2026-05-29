@@ -1,0 +1,24 @@
+{{- if and .Values.gateway.enabled .Values.gateway.dbPersistence.enabled (not .Values.gateway.dbPersistence.dbUrl) -}}
+# PVC for the gateway's SQLite DB. The gateway writes
+# /var/lib/openshell/openshell.db; without this PVC, every pod restart
+# wipes the provider/inference configs.
+#
+# Skipped when gateway.dbPersistence.dbUrl is set (external DB path —
+# Postgres or similar; the gateway pod doesn't write to local disk).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "openshell-driver-kyma.fullname" . }}-gateway-db
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.gateway.dbPersistence.storageSize | quote }}
+  {{- with .Values.gateway.dbPersistence.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+{{- end }}

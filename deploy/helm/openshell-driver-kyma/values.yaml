@@ -153,6 +153,22 @@ gateway:
     limits:
       cpu: 500m
       memory: 1Gi
+  # Gateway DB persistence. The gateway stores provider/inference configs
+  # in its DB (set via gRPC RPC by the post-install Job, not via TOML).
+  # Without persistence, every gateway pod restart wipes the configs and
+  # every sandbox's bundle fetch fails until reconfigured.
+  #
+  # Default: disabled (ephemeral) — safe for the e2e harness, NOT safe
+  # for production. Two persistence modes:
+  #   - PVC-backed SQLite (enabled=true, dbUrl=""): chart renders a PVC,
+  #     gateway uses sqlite:///var/lib/openshell/openshell.db.
+  #   - External database (enabled=true, dbUrl=postgres://…): no PVC,
+  #     gateway uses the operator-supplied URL.
+  dbPersistence:
+    enabled: false
+    dbUrl: ""               # e.g. postgresql://user:pass@host:5432/openshell — when empty AND enabled, use PVC-SQLite
+    storageSize: 1Gi
+    storageClassName: ""    # "" = cluster default StorageClass
   # Sandbox-JWT signing & validation. Required for the supervisor inside
   # each sandbox to complete its IssueSandboxToken bootstrap (without it,
   # phase=Ready and `openshell sandbox exec` never succeed). When enabled,

@@ -128,6 +128,13 @@ spec:
             - --config
             - /etc/openshell/gateway.toml
             {{- end }}
+            {{- if and .Values.gateway.dbPersistence.enabled .Values.gateway.dbPersistence.dbUrl }}
+            - --db-url
+            - {{ .Values.gateway.dbPersistence.dbUrl | quote }}
+            {{- else if .Values.gateway.dbPersistence.enabled }}
+            - --db-url
+            - "sqlite:///var/lib/openshell/openshell.db"
+            {{- end }}
             - --bind-address
             - "0.0.0.0"
             - --port
@@ -201,6 +208,10 @@ spec:
               mountPath: /home/nonroot/.local/state
             - name: gateway-tmp
               mountPath: /tmp
+            {{- if and .Values.gateway.dbPersistence.enabled (not .Values.gateway.dbPersistence.dbUrl) }}
+            - name: gateway-db
+              mountPath: /var/lib/openshell
+            {{- end }}
             {{- if .Values.gateway.sandboxJwt.enabled }}
             - name: gateway-config
               mountPath: /etc/openshell
@@ -220,6 +231,11 @@ spec:
           emptyDir: {}
         - name: gateway-tmp
           emptyDir: {}
+        {{- if and .Values.gateway.dbPersistence.enabled (not .Values.gateway.dbPersistence.dbUrl) }}
+        - name: gateway-db
+          persistentVolumeClaim:
+            claimName: {{ include "openshell-driver-kyma.fullname" . }}-gateway-db
+        {{- end }}
         {{- if .Values.gateway.sandboxJwt.enabled }}
         - name: gateway-config
           configMap:
