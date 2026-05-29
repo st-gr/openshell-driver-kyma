@@ -1,0 +1,183 @@
+{{- if .Values.inferenceProvider.enabled -}}
+{{- include "openshell-driver-kyma.inferenceProviderGuards" . -}}
+# Post-install / post-upgrade hook: configures the gateway's inference
+# provider + inference route via the openshell CLI.
+#
+# Runs AFTER the gateway pod is up (hook-weight -5, after gateway's
+# pre-install certgen at -20/-30). Calls:
+#   1. openshell provider create / provider update  — idempotent
+#   2. openshell inference set                      — idempotent (overwrites)
+#
+# Auth note: this script assumes the gateway runs with
+# --disable-tls + allow_unauthenticated_users=true (the default when
+# gateway.oidc.issuer is unset). When the gateway has OIDC enabled,
+# the Job's CLI calls would require a valid admin token — that case is
+# out of scope here (Tasks 8/9). In an OIDC-enabled cluster the operator
+# must run the provider/inference setup manually via an authenticated
+# CLI session.
+#
+# The chart never touches the API key — it stays inside the Secret
+# named by .Values.inferenceProvider.credentialSecret.{name,key}.
+# The Secret must exist in .Release.Namespace before `helm install`.
+{{- $hookName := printf "%s-inference-provider-hook" (include "openshell-driver-kyma.fullname" .) }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $hookName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $hookName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ .Values.inferenceProvider.credentialSecret.name | quote }}]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $hookName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $hookName }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $hookName }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $hookName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 300
+  ttlSecondsAfterFinished: 300
+  template:
+    metadata:
+      labels:
+        {{- include "openshell-driver-kyma.selectorLabels" . | nindent 8 }}
+        # Skip Istio sidecar injection — the hook only dials the in-cluster
+        # gateway Service and the GitHub release URL; no need to be in the mesh.
+        sidecar.istio.io/inject: "false"
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: {{ $hookName }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: inference-provider-hook
+          image: "debian:stable-slim"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          env:
+            - name: GATEWAY_URL
+              value: "http://{{ include "openshell-driver-kyma.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.gateway.grpcPort }}"
+            - name: PROVIDER_NAME
+              value: {{ default (printf "%s-%s" (include "openshell-driver-kyma.fullname" .) .Values.inferenceProvider.type) .Values.inferenceProvider.name | quote }}
+            - name: PROVIDER_TYPE
+              value: {{ .Values.inferenceProvider.type | quote }}
+            - name: PROVIDER_BASE_URL
+              value: {{ .Values.inferenceProvider.baseUrl | quote }}
+            - name: MODEL_ID
+              value: {{ .Values.inferenceProvider.modelId | quote }}
+            - name: CLI_VERSION
+              value: "v0.0.50"
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.inferenceProvider.credentialSecret.name | quote }}
+                  key: {{ .Values.inferenceProvider.credentialSecret.key | quote }}
+          command:
+            - /bin/bash
+            - -eu
+            - -o
+            - pipefail
+            - -c
+            - |
+              # Install curl + ca-certificates
+              apt-get update -qq && apt-get install -y --no-install-recommends curl ca-certificates >/dev/null 2>&1
+
+              # 1. Download the openshell CLI musl tarball
+              curl -fsSL "https://github.com/NVIDIA/OpenShell/releases/download/${CLI_VERSION}/openshell-x86_64-unknown-linux-musl.tar.gz" \
+                | tar -xz -C /usr/local/bin
+              chmod +x /usr/local/bin/openshell
+
+              # 2. Wait for the gateway to be reachable
+              echo "[hook] waiting for gateway at ${GATEWAY_URL}..."
+              for i in $(seq 1 60); do
+                if curl -fsS -o /dev/null --connect-timeout 2 "${GATEWAY_URL}/healthz" 2>/dev/null; then
+                  echo "[hook] gateway is up after ${i} attempts"
+                  break
+                fi
+                if [ "$i" = 60 ]; then
+                  echo "[hook] gateway never became reachable" >&2
+                  exit 1
+                fi
+                sleep 2
+              done
+
+              # 3. provider create — idempotent: tolerate already-exists by
+              # falling through to provider update with the same fields
+              echo "[hook] configuring provider '${PROVIDER_NAME}'..."
+              if openshell --gateway-endpoint "${GATEWAY_URL}" provider get --name "${PROVIDER_NAME}" >/dev/null 2>&1; then
+                echo "[hook] provider exists; updating credentials and config"
+                openshell --gateway-endpoint "${GATEWAY_URL}" provider update \
+                  --name "${PROVIDER_NAME}" \
+                  --credential "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" \
+                  --config "ANTHROPIC_BASE_URL=${PROVIDER_BASE_URL}"
+              else
+                echo "[hook] provider does not exist; creating"
+                openshell --gateway-endpoint "${GATEWAY_URL}" provider create \
+                  --name "${PROVIDER_NAME}" \
+                  --type "${PROVIDER_TYPE}" \
+                  --credential "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" \
+                  --config "ANTHROPIC_BASE_URL=${PROVIDER_BASE_URL}"
+              fi
+
+              # 4. inference set — idempotent (overwrites existing)
+              echo "[hook] setting inference route to provider=${PROVIDER_NAME} model=${MODEL_ID}..."
+              openshell --gateway-endpoint "${GATEWAY_URL}" inference set \
+                --provider "${PROVIDER_NAME}" \
+                --model "${MODEL_ID}"
+
+              echo "[hook] DONE"
+{{- end }}
