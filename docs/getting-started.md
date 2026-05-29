@@ -72,11 +72,11 @@ helm install ods deploy/helm/openshell-driver-kyma \
   --wait --timeout=180s
 ```
 
-Once the chart is published as an OCI artifact (tracked follow-up), the
-clone-free path is:
+Or, clone-free, against the OCI-published chart (every `v*` tag pushes
+to `ghcr.io/st-gr/charts/openshell-driver-kyma`):
 
 ```bash
-helm install ods oci://ghcr.io/st-gr/openshell-driver-kyma/helm-chart \
+helm install ods oci://ghcr.io/st-gr/charts/openshell-driver-kyma \
   --version <chart-version> \
   --namespace "$NS" -f my-values.yaml \
   --wait --timeout=180s

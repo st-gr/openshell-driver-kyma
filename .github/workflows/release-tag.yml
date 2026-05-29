@@ -49,6 +49,21 @@ jobs:
           helm package deploy/helm/openshell-driver-kyma --destination dist
           ls -la dist/
 
+      # Push the chart to GHCR as an OCI artifact so operators can do
+      #   helm install ods oci://ghcr.io/st-gr/charts/openshell-driver-kyma --version <ver>
+      # without cloning. `helm push` appends the chart name, so the
+      # destination ref becomes <repo-owner>/charts/openshell-driver-kyma.
+      # The dedicated `/charts` namespace avoids name collision with the
+      # container image at ghcr.io/<repo-owner>/openshell-driver-kyma.
+      - name: Push Helm chart to GHCR (OCI)
+        run: |
+          OWNER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
+          echo '${{ secrets.GITHUB_TOKEN }}' | helm registry login ghcr.io \
+            --username '${{ github.actor }}' --password-stdin
+          for tgz in dist/*.tgz; do
+            helm push "$tgz" "oci://ghcr.io/${OWNER}/charts"
+          done
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:

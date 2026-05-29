@@ -7,9 +7,9 @@
 #     --namespace openshell-system --create-namespace \
 #     -f my-values.yaml
 #
-# Or, when this chart is published as an OCI artifact:
+# Or, clone-free, against the OCI-published chart:
 #
-#   helm install ods oci://ghcr.io/st-gr/openshell-driver-kyma/helm-chart \
+#   helm install ods oci://ghcr.io/st-gr/charts/openshell-driver-kyma \
 #     --version <chart-version> \
 #     --namespace openshell-system --create-namespace \
 #     -f my-values.yaml

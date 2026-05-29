@@ -115,8 +115,27 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 - `docs/getting-started.md` Step 5b walking through the opt-in flow
   end-to-end: Secret create + namespace label + `helm install --set`
   with the three new blocks.
+- `deploy/helm/openshell-driver-kyma/values.example.yaml` — single-file
+  copy-paste-edit reference overlay covering every opt-in (gateway,
+  sandboxJwt, dbPersistence, inferenceProvider, gatewayUpstreamEgress,
+  APIRule, OIDC) with placeholder values and a pre-flight checklist.
+  Trims the multi-step `--set` chain down to `helm install -f my-values.yaml`,
+  in line with NVIDIA's CLI-first install vision.
+- Helm chart published as an OCI artifact on every `v*` tag. The
+  `release-tag` workflow now runs `helm push` against
+  `oci://ghcr.io/st-gr/charts`, so operators can do
+  `helm install ods oci://ghcr.io/st-gr/charts/openshell-driver-kyma
+  --version <ver>` without cloning the repo. The dedicated `/charts`
+  OCI namespace avoids collision with the driver container image at
+  `ghcr.io/st-gr/openshell-driver-kyma`.
 
 ### Changed
+
+- `docs/getting-started.md` rewritten from a 9-step tour with a Step 5b
+  for in-cluster LLM routing into a 4-step NVIDIA-aligned flow:
+  prerequisites → bootstrap namespace → copy-edit-install
+  `values.example.yaml` → verify + exec. The legacy `--set` chain moved
+  to Appendix A; APIRule public exposure moved to Appendix B.
 
 - NetworkPolicy is now default-on (`driver.enableNetworkPolicy: true`).
   Renders two policies: driver/gateway pod (ingress on health/grpc/
