@@ -137,6 +137,43 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   `:v<tag>` and `:<v-stripped-tag>` so the chart's image helper
   default (which falls through to `Chart.AppVersion`, with no leading
   `v`) resolves cleanly without `--set image.tag=...`.
+- Driver `--enable-user-namespaces` flag (default false) and chart
+  `driver.enableUserNamespaces` value. When true, sandbox pods get
+  `hostUsers: false` and the agent container's `privileged: true` is
+  dropped — UID 0 inside the pod's user namespace remaps to a non-root
+  host UID via the kubelet. SYS_ADMIN/NET_ADMIN/SYS_PTRACE/SYSLOG
+  capabilities are namespaced and remain effective. Requires K8s 1.30+
+  with the `UserNamespacesSupport` feature gate enabled. Closes the
+  Phase 2b T1 follow-up.
+- Driver `--sandbox-storage-size` and `--sandbox-storage-class` flags;
+  chart `driver.sandboxStorageSize` and `driver.sandboxStorageClass`
+  values. When `sandbox-storage-size` is non-empty, the driver
+  provisions a `<sandbox-name>-workspace` PVC alongside each Sandbox
+  CR, mounts it at `/sandbox`, and cleans it up on sandbox delete.
+  Workspace data survives pod rescheduling. Chart's namespace-scoped
+  Role gains `persistentvolumeclaims: get/create/delete` only when the
+  feature is on. Closes the Phase 2b T3 follow-up.
+- Gateway TLS opt-in (`gateway.tls.enabled`) + mTLS opt-in
+  (`gateway.tls.clientCa.enabled`). The chart's existing cert-gen Job
+  already creates server-tls and client-tls Secrets; the deployment
+  template now mounts the server-tls Secret on the gateway container
+  and passes `--tls-cert` / `--tls-key` (and `--tls-client-ca` for
+  mTLS) when the new values are on. TLS and OIDC are now independent —
+  any combination of {TLS off, TLS on, mTLS on} × {OIDC off, OIDC on}
+  is valid. Pre-flight guard: `gateway.tls.enabled=true` requires
+  `gateway.sandboxJwt.enabled=true`. Closes the Phase 2b T4 follow-up.
+- K8s Event correlation in `WatchSandboxes`. The driver now spawns a
+  second informer on `core.v1.Event` (filtered to `type=Warning`) and
+  emits matching Events as `WatchSandboxesPlatformEvent` payloads
+  alongside the existing Updated/Deleted streams. Surfaces
+  pod-scheduling failures, image-pull errors, mount failures, etc. to
+  the gateway / CLI promptly. The chart's namespace-scoped Role gains
+  `events: get/list/watch`. Closes the Phase 2b T5 follow-up.
+- Dev-image Node bumped from 18 to 22 LTS via NodeSource so
+  `markdownlint-cli2` (and any future Node 20+ tooling) works inside
+  the dev container.
+- `e2e/sandbox/Dockerfile` pins `ubuntu:24.04` by digest so a future
+  retag can't silently change what `make e2e-cli` builds.
 
 ### Changed
 
@@ -236,33 +273,11 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 The following are **not** in this release. Each is a stand-alone
 unit of work and should ship in its own PR/release.
 
-- **Phase 2b T1: unprivileged sandboxes via Linux user namespaces.**
-  Drop `privileged: true` + `runAsUser: 0` from the agent container
-  by configuring the supervisor to run inside a user namespace.
-  Supervisor support exists upstream; the driver needs a
-  `--enable-user-namespaces` flag and a corresponding pod-template
-  branch.
-- **Phase 2b T3: optional PVC workspace persistence.** Per-sandbox
-  PVC mounted at `/sandbox`; survives pod rescheduling. Requires a
-  `volumeClaimTemplates` block and a `--sandbox-storage-size` flag.
-- **Phase 2b T4: mTLS client-cert volume mount on the gateway.** For
-  deployments that run the gateway behind an mTLS-enforcing
-  reverse proxy. Chart wiring + values overlay.
-- **Phase 2b T5: Kubernetes Event correlation in `Watch`.** Stream
-  pod-scheduling failures and policy-fetch errors as `WatchSandboxes`
-  status updates so the gateway / CLI surface them to the user
-  promptly.
 - **CI-driven `make e2e-cli`.** Run the full e2e on every push using
   the self-hosted Kyma runner at `st-gr/gha-runner-kyma`.
 - **Upstream PR for `feat/external-compute-driver-socket`.** Submit
   the gateway patch in `st-gr/OpenShell` to NVIDIA/OpenShell.
 - **Initial commit + branch protection for `st-gr/sail-proxy`.**
-- **Replace `:latest` with a digest in `e2e/sandbox/Dockerfile`'s
-  `FROM ubuntu:24.04`.** Production hygiene; not a security gap
-  because this image is e2e-only.
-- **Bump dev-image Node from 18 to 20+** so `markdownlint-cli2`
-  works inside the dev container (current versions of
-  `string-width` use the `/v` regex flag which Node 18 lacks).
 - **CI-driven live-cluster smoke for in-cluster LLM-gateway routing.**
   The smoke itself was completed manually (2026-05-30, a real Kyma
   cluster + an in-cluster Anthropic-compatible upstream — sandbox
