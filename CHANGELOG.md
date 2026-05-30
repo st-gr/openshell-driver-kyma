@@ -131,6 +131,33 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **`gatewayUpstreamEgress` NetworkPolicy rule moved from the
+  driver+gateway pod to the sandbox pod.** Discovered during T8 live
+  smoke against an in-cluster LLM upstream: the original placement was
+  a no-op because the gateway sidecar is bundle/config plane only and
+  never forwards inference request bytes. Per NVIDIA's documented
+  architecture (https://docs.nvidia.com/openshell/about/how-it-works
+  and the in-process-router decision in NVIDIA/OpenShell#998 — "No
+  subprocess, no loopback hop"), the supervisor inside the sandbox pod
+  is what dials the upstream: it terminates `inference.local` TLS using
+  the sandbox CA at `/etc/openshell-tls/`, fetches the bundle via
+  `GetInferenceBundle`, strips caller creds, and connects out from the
+  sandbox pod's eth0. The egress rule now lives where it's actually
+  needed. Same `gatewayUpstreamEgress` values block — name kept for
+  backwards compatibility with deployed values overlays.
+- **Architecture wording corrected across docs.** Earlier phrasing
+  ("the sandbox itself never sees either", "the gateway sidecar
+  rewrites and forwards") was overstated. The accurate model is
+  agent-vs-supervisor isolation within the sandbox pod: the agent
+  application's env shows only `inference.local` and it cannot read
+  the real URL or API key, but the supervisor process (same pod,
+  separate process namespace, runs privileged) holds the bundle and
+  is the actual dialer. Updated `docs/getting-started.md` Step 5b,
+  `docs/production-deployment.md` "Why these settings keep the agent
+  isolated", `docs/kyma-vs-openshift.md` "Gateway-mediated inference
+  routing", and the comments on `gatewayUpstreamEgress` in `values.yaml`
+  + `values.example.yaml` to reflect this.
+
 - `docs/getting-started.md` rewritten from a 9-step tour with a Step 5b
   for in-cluster LLM routing into a 4-step NVIDIA-aligned flow:
   prerequisites → bootstrap namespace → copy-edit-install
