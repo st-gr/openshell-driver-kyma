@@ -170,6 +170,34 @@ that final outbound hop on the sandbox-pod NetworkPolicy. Without it,
 the supervisor can't reach the in-cluster upstream and `inference.local`
 requests time out.
 
+### Two operational notes from the live E2E
+
+**Upload/download needs `rsync` + `openssh-client` on the host.**
+`openshell sandbox upload` and `openshell sandbox download` shell out
+to `rsync` over `ssh` under the hood. If either is missing on the
+machine running the CLI, the command fails with the unhelpful
+`Error: No such file or directory (os error 2)`. Install both:
+
+```bash
+# Debian/Ubuntu
+sudo apt-get install -y rsync openssh-client
+
+# Alpine (in-cluster CLI pod)
+apk add --no-cache rsync openssh-client
+```
+
+**The `claude` CLI inside a sandbox needs a permissive policy.**
+The supervisor's default sandbox policy allows `inference.local` and a
+small set of upstream LLM hosts, but `claude-code` makes auxiliary
+requests (config probes, telemetry endpoints) that the default policy
+denies with `403 connection not allowed by policy`. The architectural
+inference path itself works — `curl https://inference.local/v1/messages`
+from inside the sandbox returns a real Anthropic response. To make
+`claude` itself work end-to-end, pass `openshell sandbox create
+--policy <path-to-yaml>` with claude's full host set allowed. Sandbox-
+policy authoring is upstream OpenShell territory and out of scope for
+this chart.
+
 ## Inspect
 
 ```bash
