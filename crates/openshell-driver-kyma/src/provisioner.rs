@@ -167,13 +167,18 @@ impl KymaProvisioner {
         let image = template.map(|t| t.image.as_str()).unwrap_or("");
         let env_list = self.build_full_env_list(sb);
 
+        // With user namespaces enabled, drop `privileged: true` — the
+        // capabilities below remain (they're namespaced) and the
+        // container's UID 0 maps to a non-root host UID via the kubelet's
+        // user-namespace remap. Without user namespaces, `privileged: true`
+        // is required for the supervisor's Landlock + netns setup.
         let mut agent_container = json!({
             "name": AGENT_CONTAINER_NAME,
             "image": image,
             "command": [format!("{}/openshell-sandbox", self.cfg.supervisor_mount_path)],
             "env": env_list,
             "securityContext": {
-                "privileged": true,
+                "privileged": !self.cfg.enable_user_namespaces,
                 "runAsUser": 0,
                 "capabilities": {
                     "add": ["SYS_ADMIN", "NET_ADMIN", "SYS_PTRACE", "SYSLOG"]
@@ -261,6 +266,13 @@ impl KymaProvisioner {
                 "name": "workspace",
                 "mountPath": "/sandbox",
             }));
+        }
+
+        // Linux user-namespace remap. K8s 1.30+ kubelet-managed UID/GID
+        // mapping; container UID 0 lands on a non-root host UID. Pod
+        // remains rootful from its own POV but loses host-root.
+        if self.cfg.enable_user_namespaces {
+            pod_spec["hostUsers"] = Value::Bool(false);
         }
 
         // Optional `runtimeClassName` passthrough from `platform_config`.
@@ -746,6 +758,43 @@ mod tests {
             .map(|v| v.as_str().unwrap())
             .collect();
         assert_eq!(caps, vec!["SYS_ADMIN", "NET_ADMIN", "SYS_PTRACE", "SYSLOG"]);
+        // Pod-level hostUsers is unset (i.e., default — host UID namespace).
+        assert!(spec["podTemplate"]["spec"].get("hostUsers").is_none());
+    }
+
+    #[tokio::test]
+    async fn build_sandbox_spec_user_namespaces_drops_privileged() {
+        let cfg = Config {
+            namespace: "test-ns".into(),
+            enable_user_namespaces: true,
+            ..Config::default()
+        };
+        let svc = tower::service_fn(|_req: http::Request<kube::client::Body>| async move {
+            Ok::<_, std::convert::Infallible>(http::Response::new(kube::client::Body::empty()))
+        });
+        let p = KymaProvisioner::new(Client::new(svc, "test-ns"), cfg);
+        let sb = make_sandbox("sb-1", "x", "img");
+        let spec = p.build_sandbox_spec(&sb);
+
+        let sc = &spec["podTemplate"]["spec"]["containers"][0]["securityContext"];
+        assert_eq!(
+            sc["privileged"], false,
+            "privileged should be dropped when user namespaces are enabled"
+        );
+        // runAsUser stays at 0 — UID 0 inside the namespace remaps to a
+        // non-root host UID via kubelet, which is the whole point.
+        assert_eq!(sc["runAsUser"], 0);
+        // The capabilities-add set is unchanged (they're namespaced).
+        let caps: Vec<&str> = sc["capabilities"]["add"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(caps, vec!["SYS_ADMIN", "NET_ADMIN", "SYS_PTRACE", "SYSLOG"]);
+        // Pod-level hostUsers: false signals the kubelet to set up a UID/
+        // GID remap for this pod.
+        assert_eq!(spec["podTemplate"]["spec"]["hostUsers"], false);
     }
 
     #[tokio::test]

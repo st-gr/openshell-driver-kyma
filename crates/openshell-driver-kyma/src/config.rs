@@ -78,6 +78,20 @@ pub struct Config {
     #[arg(long, default_value_t = false, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
     pub disable_claude_telemetry: bool,
 
+    /// When true, sandbox pods run with `hostUsers: false` so the
+    /// container's UID 0 is remapped to a non-root host UID via a Linux
+    /// user namespace. The agent container's `privileged: true` is also
+    /// dropped — the SYS_ADMIN/NET_ADMIN/SYS_PTRACE/SYSLOG capabilities
+    /// remain (they're namespaced) so the supervisor's Landlock and
+    /// network-namespace setup still work, but the container can no
+    /// longer escape to host root.
+    ///
+    /// Requires Kubernetes 1.30+ with `UserNamespacesSupport` feature
+    /// gate enabled (default-on in K8s 1.33+, alpha in 1.30-1.32).
+    /// Kyma/Gardener clusters expose this on recent shoot versions.
+    #[arg(long, default_value_t = false, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
+    pub enable_user_namespaces: bool,
+
     /// Per-sandbox PVC size for the `/sandbox` workspace mount. Empty
     /// string disables persistent workspaces (default — workspace is
     /// pod-local emptyDir managed by the supervisor). Any non-empty value
@@ -117,6 +131,7 @@ impl Default for Config {
             gpu_support: true,
             enable_network_policy: false,
             disable_claude_telemetry: false,
+            enable_user_namespaces: false,
             sandbox_storage_size: String::new(),
             sandbox_storage_class: String::new(),
             health_port: 9090,
@@ -156,6 +171,7 @@ mod tests {
         assert!(c.gpu_support);
         assert!(!c.enable_network_policy);
         assert!(!c.disable_claude_telemetry);
+        assert!(!c.enable_user_namespaces);
         assert_eq!(c.sandbox_storage_size, "");
         assert_eq!(c.sandbox_storage_class, "");
         assert_eq!(c.health_port, 9090);

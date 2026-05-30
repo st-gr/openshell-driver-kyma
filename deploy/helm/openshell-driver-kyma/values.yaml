@@ -72,6 +72,18 @@ driver:
   # of inferenceProvider/gatewayUpstreamEgress — flip on its own when
   # you want to silence telemetry without rerouting model calls.
   disableClaudeTelemetry: false
+  # Drop `privileged: true` from sandbox agent containers by enabling
+  # Linux user namespaces (Kubernetes `hostUsers: false`). The pod's
+  # UID 0 is then remapped to a non-root host UID by the kubelet, so
+  # the supervisor keeps its inside-the-container root privileges
+  # (Landlock + netns setup) without holding actual host root.
+  #
+  # Requires K8s 1.30+ with the `UserNamespacesSupport` feature gate
+  # enabled (default-on in 1.33+; alpha in 1.30-1.32). Confirm with
+  # `kubectl get nodes -o jsonpath='{.items[*].status.nodeInfo.kubeletVersion}'`
+  # and that your CRI (containerd >= 1.7, cri-o >= 1.30) has user-ns
+  # support enabled.
+  enableUserNamespaces: false
   # Per-sandbox workspace PVC mounted at `/sandbox`. Empty string (default)
   # disables persistent workspaces — sandbox /sandbox is pod-local and
   # erased on pod restart. Any non-empty value enables PVC creation; the
