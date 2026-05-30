@@ -11,8 +11,13 @@
 #
 # Use a high UID/GID matching the upstream `bring-your-own-container`
 # example — avoids host-UID collisions when user namespaces are off.
+#
+# Pin the base by digest so a future ubuntu:24.04 retag can't silently
+# change what `make e2e-cli` builds. Resolve a fresh digest with:
+#   docker buildx imagetools inspect ubuntu:24.04 \
+#     --format '{{json .Manifest.Digest}}'
 
-FROM ubuntu:24.04
+FROM ubuntu:24.04@sha256:c4a8d5503dfb2a3eb8ab5f807da5bc69a85730fb49b5cfca2330194ebcc41c7b
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
