@@ -186,11 +186,18 @@ spec:
                   --config "ANTHROPIC_BASE_URL=${PROVIDER_BASE_URL}"
               fi
 
-              # 4. inference set — idempotent (overwrites existing)
+              # 4. inference set — idempotent (overwrites existing).
+              # `--no-verify` skips the gateway's endpoint verification: that
+              # check would have the gateway sidecar dial the upstream once,
+              # which the chart's driver+gateway-pod NetworkPolicy doesn't
+              # allow (egress to in-cluster RFC1918:8080 is reserved for the
+              # sandbox-pod NP, where real inference traffic originates).
+              # The first sandbox round-trip is the real verification.
               echo "[hook] setting inference route to provider=${PROVIDER_NAME} model=${MODEL_ID}..."
               openshell --gateway-endpoint "${GATEWAY_URL}" inference set \
                 --provider "${PROVIDER_NAME}" \
-                --model "${MODEL_ID}"
+                --model "${MODEL_ID}" \
+                --no-verify
 
               echo "[hook] DONE"
 {{- end }}
