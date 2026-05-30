@@ -56,28 +56,6 @@ spec:
     - ports:
         - port: 443
           protocol: TCP
-    {{- if .Values.gatewayUpstreamEgress.enabled }}
-    # Opt-in: gateway sidecar -> operator's in-cluster LLM upstream.
-    # The gateway is the process that rewrites `inference.local` and
-    # dials the real upstream after looking up provider config in its
-    # DB. The sandbox NetworkPolicy is NOT extended for this — sandbox
-    # traffic terminates at the in-pod gateway via the existing rule.
-    # Prerequisite (Kyma/Gardener): operators must label their LLM
-    # upstream namespace with kubernetes.io/metadata.name=<value> at
-    # install time, as Kyma/Gardener does not auto-apply this label.
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: {{ .Values.gatewayUpstreamEgress.namespace }}
-          {{- with .Values.gatewayUpstreamEgress.podSelector }}
-          podSelector:
-            matchLabels:
-              {{- toYaml . | nindent 14 }}
-          {{- end }}
-      ports:
-        - port: {{ .Values.gatewayUpstreamEgress.port }}
-          protocol: TCP
-    {{- end }}
 ---
 # NetworkPolicy for sandbox pods.
 #
@@ -104,6 +82,19 @@ spec:
 #      compromised sandbox cannot use this rule to reach internal
 #      services. This is what enables the "agentic workflow" use case
 #      (sandbox curls anthropic.com, github.com, npm, pypi, etc.).
+#   4. (Opt-in via gatewayUpstreamEgress) the operator's in-cluster LLM
+#      upstream. The supervisor's in-process inference router (NVIDIA's
+#      design — see https://docs.nvidia.com/openshell/about/how-it-works
+#      and issue #998 "No subprocess, no loopback hop") terminates
+#      `inference.local` TLS using the sandbox CA at /etc/openshell-tls/,
+#      strips caller-supplied creds, injects the real upstream URL + key
+#      from GetInferenceBundle, and dials the upstream from this pod's
+#      eth0. So the egress hole has to live HERE on the sandbox NP, not
+#      on the driver+gateway pod NP — the gateway sidecar is bundle/config
+#      plane only and never forwards inference request bytes.
+#      Prerequisite (Kyma/Gardener): operators must label their LLM
+#      upstream namespace with kubernetes.io/metadata.name=<value> at
+#      install time, as Kyma/Gardener does not auto-apply this label.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -154,4 +145,18 @@ spec:
       ports:
         - port: 443
           protocol: TCP
+    {{- if .Values.gatewayUpstreamEgress.enabled }}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.gatewayUpstreamEgress.namespace }}
+          {{- with .Values.gatewayUpstreamEgress.podSelector }}
+          podSelector:
+            matchLabels:
+              {{- toYaml . | nindent 14 }}
+          {{- end }}
+      ports:
+        - port: {{ .Values.gatewayUpstreamEgress.port }}
+          protocol: TCP
+    {{- end }}
 {{- end }}
