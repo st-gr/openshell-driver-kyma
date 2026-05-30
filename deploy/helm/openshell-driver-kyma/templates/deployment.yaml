@@ -76,6 +76,14 @@ spec:
             - --gpu-support={{ .Values.driver.gpuSupport }}
             - --enable-network-policy={{ .Values.driver.enableNetworkPolicy }}
             - --disable-claude-telemetry={{ .Values.driver.disableClaudeTelemetry }}
+            {{- with .Values.driver.sandboxStorageSize }}
+            - --sandbox-storage-size
+            - {{ . | quote }}
+            {{- end }}
+            {{- with .Values.driver.sandboxStorageClass }}
+            - --sandbox-storage-class
+            - {{ . | quote }}
+            {{- end }}
             - --health-port
             - {{ .Values.driver.healthPort | quote }}
             - --log-level

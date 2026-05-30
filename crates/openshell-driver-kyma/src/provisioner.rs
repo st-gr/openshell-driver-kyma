@@ -85,6 +85,49 @@ impl KymaProvisioner {
         Api::namespaced_with(self.client.clone(), &self.cfg.namespace, &self.sandbox_ar)
     }
 
+    /// Idempotent PVC create for a sandbox's workspace mount.
+    ///
+    /// Tolerates AlreadyExists (a previous create attempt succeeded but
+    /// the Sandbox CR create or a follow-up step failed; second attempt
+    /// finds the PVC waiting). All other API errors propagate.
+    async fn ensure_workspace_pvc(&self, sandbox_name: &str) -> Result<(), DriverError> {
+        let pvc_api: Api<k8s_openapi::api::core::v1::PersistentVolumeClaim> =
+            Api::namespaced(self.client.clone(), &self.cfg.namespace);
+        let claim_name = format!("{sandbox_name}-workspace");
+
+        let mut spec = json!({
+            "accessModes": ["ReadWriteOnce"],
+            "resources": { "requests": { "storage": self.cfg.sandbox_storage_size } },
+        });
+        if !self.cfg.sandbox_storage_class.is_empty() {
+            spec["storageClassName"] = Value::String(self.cfg.sandbox_storage_class.clone());
+        }
+
+        let pvc: k8s_openapi::api::core::v1::PersistentVolumeClaim =
+            serde_json::from_value(json!({
+                "apiVersion": "v1",
+                "kind": "PersistentVolumeClaim",
+                "metadata": {
+                    "name": claim_name,
+                    "namespace": self.cfg.namespace,
+                    "labels": {
+                        LABEL_MANAGED_BY: "openshell",
+                        "openshell.ai/sandbox-name": sandbox_name,
+                    },
+                },
+                "spec": spec,
+            }))
+            .map_err(|e| {
+                DriverError::Internal(anyhow::anyhow!("workspace PVC manifest build failed: {e}"))
+            })?;
+
+        match pvc_api.create(&PostParams::default(), &pvc).await {
+            Ok(_) => Ok(()),
+            Err(kube::Error::Api(s)) if s.code == 409 => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// Build the Sandbox CR's `spec` JSON value. Pure function; no I/O.
     /// Mirrors the Go reference's `buildSandboxSpec` but adds Kyma-specific
     /// behavior: when `cfg.istio_inject_sandboxes` is false, stamps the
@@ -197,6 +240,28 @@ impl KymaProvisioner {
                 }
             ],
         });
+
+        // Optional per-sandbox workspace PVC mount. The PVC itself is
+        // created (and deleted) by the create()/delete() methods; here
+        // we just thread its name into the pod's `volumes` and the
+        // agent container's `volumeMounts`.
+        if !self.cfg.sandbox_storage_size.is_empty() {
+            let claim_name = format!("{}-workspace", sb.name);
+            let volumes = pod_spec["volumes"]
+                .as_array_mut()
+                .expect("volumes initialized above");
+            volumes.push(json!({
+                "name": "workspace",
+                "persistentVolumeClaim": { "claimName": claim_name },
+            }));
+            let mounts = pod_spec["containers"][0]["volumeMounts"]
+                .as_array_mut()
+                .expect("agent volumeMounts initialized above");
+            mounts.push(json!({
+                "name": "workspace",
+                "mountPath": "/sandbox",
+            }));
+        }
 
         // Optional `runtimeClassName` passthrough from `platform_config`.
         if let Some(pc) = template.and_then(|t| t.platform_config.as_ref()) {
@@ -339,6 +404,15 @@ fn string_from_value_kind(kind: &prost_types::value::Kind) -> Option<String> {
 #[async_trait]
 impl SandboxProvisioner for KymaProvisioner {
     async fn create(&self, sb: &DriverSandbox) -> Result<(), DriverError> {
+        // When workspace persistence is configured, provision the PVC
+        // before the Sandbox CR. The CR's pod template references the
+        // PVC by claim name; if the PVC isn't there yet the agent-sandbox
+        // controller's pod stays Pending until it appears. Failing here
+        // is preferable to that visible-but-broken state.
+        if !self.cfg.sandbox_storage_size.is_empty() {
+            self.ensure_workspace_pvc(&sb.name).await?;
+        }
+
         let obj = self.build_dynamic_object(sb);
         self.sandboxes_api()
             .create(&PostParams::default(), &obj)
@@ -353,7 +427,7 @@ impl SandboxProvisioner for KymaProvisioner {
     }
 
     async fn delete(&self, name: &str) -> Result<(), DriverError> {
-        match self
+        let result = match self
             .sandboxes_api()
             .delete(name, &DeleteParams::default())
             .await
@@ -363,7 +437,27 @@ impl SandboxProvisioner for KymaProvisioner {
                 Err(DriverError::NotFound(name.to_string()))
             }
             Err(e) => Err(e.into()),
+        };
+
+        // Best-effort PVC cleanup. We tolerate 404 (PVC was never
+        // created or already gone) and propagate other errors only when
+        // the Sandbox CR delete itself succeeded — if both fail, the
+        // Sandbox-CR error is the more actionable one.
+        if !self.cfg.sandbox_storage_size.is_empty() {
+            let pvc_api: Api<k8s_openapi::api::core::v1::PersistentVolumeClaim> =
+                Api::namespaced(self.client.clone(), &self.cfg.namespace);
+            let claim_name = format!("{name}-workspace");
+            match pvc_api.delete(&claim_name, &DeleteParams::default()).await {
+                Ok(_) => {}
+                Err(kube::Error::Api(s)) if s.code == 404 => {}
+                Err(e) if result.is_ok() => return Err(e.into()),
+                Err(e) => {
+                    tracing::warn!(error = %e, sandbox_name = %name, "PVC cleanup failed; sandbox-CR delete error takes precedence");
+                }
+            }
         }
+
+        result
     }
 
     async fn get(&self, name: &str) -> Result<DriverSandbox, DriverError> {
@@ -666,6 +760,47 @@ mod tests {
         let mount = &spec["podTemplate"]["spec"]["containers"][0]["volumeMounts"][0];
         assert_eq!(mount["name"], "supervisor-bin");
         assert_eq!(mount["readOnly"], true);
+    }
+
+    #[tokio::test]
+    async fn build_sandbox_spec_no_workspace_volume_when_storage_disabled() {
+        let p = make_provisioner();
+        let sb = make_sandbox("sb-1", "x", "img");
+        let spec = p.build_sandbox_spec(&sb);
+
+        let vols = spec["podTemplate"]["spec"]["volumes"].as_array().unwrap();
+        assert!(
+            !vols.iter().any(|v| v["name"] == "workspace"),
+            "workspace volume should not appear when sandbox_storage_size is empty"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_sandbox_spec_workspace_volume_when_storage_set() {
+        let cfg = Config {
+            namespace: "test-ns".into(),
+            sandbox_storage_size: "5Gi".to_string(),
+            ..Config::default()
+        };
+        let svc = tower::service_fn(|_req: http::Request<kube::client::Body>| async move {
+            Ok::<_, std::convert::Infallible>(http::Response::new(kube::client::Body::empty()))
+        });
+        let p = KymaProvisioner::new(Client::new(svc, "test-ns"), cfg);
+        let sb = make_sandbox("sb-1", "my-sandbox", "img");
+        let spec = p.build_sandbox_spec(&sb);
+
+        let vols = spec["podTemplate"]["spec"]["volumes"].as_array().unwrap();
+        let ws = vols.iter().find(|v| v["name"] == "workspace").unwrap();
+        assert_eq!(
+            ws["persistentVolumeClaim"]["claimName"],
+            "my-sandbox-workspace"
+        );
+
+        let mounts = spec["podTemplate"]["spec"]["containers"][0]["volumeMounts"]
+            .as_array()
+            .unwrap();
+        let m = mounts.iter().find(|m| m["name"] == "workspace").unwrap();
+        assert_eq!(m["mountPath"], "/sandbox");
     }
 
     #[tokio::test]

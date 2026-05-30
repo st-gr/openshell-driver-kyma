@@ -32,3 +32,17 @@ rules:
     resources: ["pods"]
     verbs: ["get"]
 {{- end }}
+  # K8s Event correlation in WatchSandboxes (Phase 2b T5): the driver
+  # surfaces type=Warning Events on sandbox CRs and pods as
+  # WatchSandboxesPlatformEvent payloads.
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+{{- if .Values.driver.sandboxStorageSize }}
+  # Per-sandbox workspace PVC management (Phase 2b T3). The driver
+  # creates a PVC alongside each Sandbox CR and deletes it on sandbox
+  # delete. Lives only when --sandbox-storage-size is non-empty.
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "create", "delete"]
+{{- end }}

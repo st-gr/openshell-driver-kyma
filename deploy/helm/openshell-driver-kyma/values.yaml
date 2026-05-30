@@ -72,6 +72,16 @@ driver:
   # of inferenceProvider/gatewayUpstreamEgress — flip on its own when
   # you want to silence telemetry without rerouting model calls.
   disableClaudeTelemetry: false
+  # Per-sandbox workspace PVC mounted at `/sandbox`. Empty string (default)
+  # disables persistent workspaces — sandbox /sandbox is pod-local and
+  # erased on pod restart. Any non-empty value enables PVC creation; the
+  # value is passed through to the rendered PVC's
+  # `resources.requests.storage` (e.g. `5Gi`, `200Mi`).
+  # Survives pod rescheduling. Cleaned up by the driver on sandbox delete.
+  sandboxStorageSize: ""
+  # StorageClassName for the workspace PVC. Empty = cluster default.
+  # Only consulted when sandboxStorageSize is non-empty.
+  sandboxStorageClass: ""
   healthPort: 9090
   logLevel: info
 

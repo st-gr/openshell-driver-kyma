@@ -78,6 +78,20 @@ pub struct Config {
     #[arg(long, default_value_t = false, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
     pub disable_claude_telemetry: bool,
 
+    /// Per-sandbox PVC size for the `/sandbox` workspace mount. Empty
+    /// string disables persistent workspaces (default — workspace is
+    /// pod-local emptyDir managed by the supervisor). Any non-empty value
+    /// is passed through to the rendered PVC's `resources.requests.storage`
+    /// (e.g. `5Gi`, `200Mi`).
+    #[arg(long, default_value = "")]
+    pub sandbox_storage_size: String,
+
+    /// StorageClassName for per-sandbox workspace PVCs. Empty string lets
+    /// Kubernetes pick the cluster's default StorageClass. Only consulted
+    /// when `--sandbox-storage-size` is non-empty.
+    #[arg(long, default_value = "")]
+    pub sandbox_storage_class: String,
+
     /// HTTP port for the sidecar `/healthz`, `/readyz`, and `/metrics`
     /// endpoints. The gRPC server still listens on the UDS only.
     #[arg(long, default_value_t = 9090)]
@@ -103,6 +117,8 @@ impl Default for Config {
             gpu_support: true,
             enable_network_policy: false,
             disable_claude_telemetry: false,
+            sandbox_storage_size: String::new(),
+            sandbox_storage_class: String::new(),
             health_port: 9090,
             log_level: "info".to_string(),
         }
@@ -140,6 +156,8 @@ mod tests {
         assert!(c.gpu_support);
         assert!(!c.enable_network_policy);
         assert!(!c.disable_claude_telemetry);
+        assert_eq!(c.sandbox_storage_size, "");
+        assert_eq!(c.sandbox_storage_class, "");
         assert_eq!(c.health_port, 9090);
         assert_eq!(c.log_level, "info");
     }
