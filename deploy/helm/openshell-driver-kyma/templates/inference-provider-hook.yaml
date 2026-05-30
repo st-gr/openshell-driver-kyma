@@ -87,7 +87,13 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "openshell-driver-kyma.selectorLabels" . | nindent 8 }}
+        # IMPORTANT: do NOT use the chart's selectorLabels here — they would
+        # cause the driver+gateway pod's NetworkPolicy podSelector to match
+        # this hook pod, restricting its egress to DNS + 443 only and breaking
+        # the Service:9092/healthz wait loop. Use a distinct name label so
+        # the NP does not match.
+        app.kubernetes.io/name: openshell-driver-kyma-inference-provider-hook
+        app.kubernetes.io/instance: {{ .Release.Name }}
         # Skip Istio sidecar injection — the hook only dials the in-cluster
         # gateway Service and the GitHub release URL; no need to be in the mesh.
         sidecar.istio.io/inject: "false"
@@ -95,14 +101,18 @@ spec:
       restartPolicy: OnFailure
       serviceAccountName: {{ $hookName }}
       securityContext:
-        runAsNonRoot: true
-        runAsUser: 65532
-        runAsGroup: 65532
+        # Runs as root because `apk add` writes to /var/cache/apk + /lib/apk/db.
+        # Acceptable here: short-lived install hook in a PSA=privileged
+        # namespace, dropped Linux caps, RuntimeDefault seccomp.
         seccompProfile:
           type: RuntimeDefault
       containers:
         - name: inference-provider-hook
-          image: "debian:stable-slim"
+          # Alpine instead of debian:stable-slim because debian's apt-get drops
+          # privileges to user `_apt` for fetches, which needs SETUID/SETGID —
+          # both dropped here. `apk` does NOT drop privileges and works under
+          # capabilities: drop=[ALL].
+          image: "alpine:3.20"
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false
@@ -111,6 +121,10 @@ spec:
           env:
             - name: GATEWAY_URL
               value: "http://{{ include "openshell-driver-kyma.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.gateway.grpcPort }}"
+            - name: GATEWAY_HEALTH_URL
+              # Gateway HTTP healthz lives on a different port from the gRPC
+              # port. Requires `gw-health` to be in the chart's Service.
+              value: "http://{{ include "openshell-driver-kyma.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.gateway.healthPort }}"
             - name: PROVIDER_NAME
               value: {{ default (printf "%s-%s" (include "openshell-driver-kyma.fullname" .) .Values.inferenceProvider.type) .Values.inferenceProvider.name | quote }}
             - name: PROVIDER_TYPE
@@ -127,24 +141,22 @@ spec:
                   name: {{ .Values.inferenceProvider.credentialSecret.name | quote }}
                   key: {{ .Values.inferenceProvider.credentialSecret.key | quote }}
           command:
-            - /bin/bash
+            - /bin/sh
             - -eu
-            - -o
-            - pipefail
             - -c
             - |
-              # Install curl + ca-certificates
-              apt-get update -qq && apt-get install -y --no-install-recommends curl ca-certificates >/dev/null 2>&1
+              # 1. Install curl + ca-certificates (apk does not drop privileges)
+              apk add --no-cache curl ca-certificates >/dev/null
 
-              # 1. Download the openshell CLI musl tarball
+              # 2. Download the openshell CLI musl tarball
               curl -fsSL "https://github.com/NVIDIA/OpenShell/releases/download/${CLI_VERSION}/openshell-x86_64-unknown-linux-musl.tar.gz" \
                 | tar -xz -C /usr/local/bin
               chmod +x /usr/local/bin/openshell
 
-              # 2. Wait for the gateway to be reachable
-              echo "[hook] waiting for gateway at ${GATEWAY_URL}..."
+              # 3. Wait for the gateway to be reachable on its HTTP healthz port.
+              echo "[hook] waiting for gateway at ${GATEWAY_HEALTH_URL}..."
               for i in $(seq 1 60); do
-                if curl -fsS -o /dev/null --connect-timeout 2 "${GATEWAY_URL}/healthz" 2>/dev/null; then
+                if curl -fsS -o /dev/null --connect-timeout 2 "${GATEWAY_HEALTH_URL}/healthz" 2>/dev/null; then
                   echo "[hook] gateway is up after ${i} attempts"
                   break
                 fi
@@ -155,20 +167,21 @@ spec:
                 sleep 2
               done
 
-              # 3. provider create — idempotent: tolerate already-exists by
-              # falling through to provider update with the same fields
+              # 4. Configure the provider. Idempotent: try create first,
+              # on AlreadyExists fall back to update. Both converge on the
+              # same desired state (credentials + ANTHROPIC_BASE_URL set).
+              # NOTE: `provider update` and `provider get` take a positional
+              # <NAME>, not `--name <NAME>`. `provider create` uses --name.
               echo "[hook] configuring provider '${PROVIDER_NAME}'..."
-              if openshell --gateway-endpoint "${GATEWAY_URL}" provider get --name "${PROVIDER_NAME}" >/dev/null 2>&1; then
-                echo "[hook] provider exists; updating credentials and config"
-                openshell --gateway-endpoint "${GATEWAY_URL}" provider update \
-                  --name "${PROVIDER_NAME}" \
-                  --credential "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" \
-                  --config "ANTHROPIC_BASE_URL=${PROVIDER_BASE_URL}"
-              else
-                echo "[hook] provider does not exist; creating"
-                openshell --gateway-endpoint "${GATEWAY_URL}" provider create \
+              if openshell --gateway-endpoint "${GATEWAY_URL}" provider create \
                   --name "${PROVIDER_NAME}" \
                   --type "${PROVIDER_TYPE}" \
+                  --credential "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" \
+                  --config "ANTHROPIC_BASE_URL=${PROVIDER_BASE_URL}"; then
+                echo "[hook] provider created"
+              else
+                echo "[hook] provider create failed (likely AlreadyExists); updating"
+                openshell --gateway-endpoint "${GATEWAY_URL}" provider update "${PROVIDER_NAME}" \
                   --credential "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" \
                   --config "ANTHROPIC_BASE_URL=${PROVIDER_BASE_URL}"
               fi

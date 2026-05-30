@@ -19,6 +19,10 @@ spec:
       port: {{ .Values.gateway.grpcPort }}
       targetPort: grpc
       protocol: TCP
+    - name: gw-health
+      port: {{ .Values.gateway.healthPort }}
+      targetPort: gw-health
+      protocol: TCP
     - name: gw-metrics
       port: {{ .Values.gateway.metricsPort }}
       targetPort: gw-metrics
