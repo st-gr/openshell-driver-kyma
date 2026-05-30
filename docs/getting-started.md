@@ -147,10 +147,28 @@ openshell --gateway-endpoint http://localhost:8080 sandbox exec \
   --name claude-demo -- claude "say hi"
 ```
 
-The sandbox's outbound `https://inference.local/v1` traffic terminates
-on the gateway sidecar, which rewrites it to your configured upstream and
-injects the API key from the Secret you pre-created. The sandbox itself
-never sees either.
+How the routing works (per
+[NVIDIA's docs](https://docs.nvidia.com/openshell/about/how-it-works) —
+"No subprocess, no loopback hop"):
+
+- The agent application (your Claude code in the agent container) sees
+  only `ANTHROPIC_BASE_URL=https://inference.local/v1` in its env. It
+  cannot read the real upstream URL or the API key.
+- The supervisor (same pod, separate process namespace, runs privileged)
+  fetches a bundle from the gateway via `GetInferenceBundle`. The
+  bundle carries the resolved upstream URL + API key the chart's
+  post-install Job loaded into the gateway DB from your Secret.
+- The supervisor terminates `inference.local` TLS using a per-SNI cert
+  from the sandbox CA at `/etc/openshell-tls/`, strips the agent's
+  placeholder credentials, injects the real ones, and dials the
+  upstream itself from the sandbox pod's eth0.
+- The gateway sidecar's role is bundle/config plane only — it never
+  forwards inference request bytes.
+
+The `gatewayUpstreamEgress` block in your values file is what unblocks
+that final outbound hop on the sandbox-pod NetworkPolicy. Without it,
+the supervisor can't reach the in-cluster upstream and `inference.local`
+requests time out.
 
 ## Inspect
 

@@ -136,33 +136,41 @@ driver:
   disableClaudeTelemetry: true
 ```
 
-## Why these settings keep the sandbox isolated
+## Why these settings keep the agent isolated
 
-The chart preserves NVIDIA OpenShell's gateway-mediated architecture:
-all inference rewriting happens on the **gateway sidecar**, not inside
-the sandbox.
+The chart matches NVIDIA OpenShell's documented architecture
+([docs.nvidia.com/openshell/about/how-it-works](https://docs.nvidia.com/openshell/about/how-it-works);
+the "in-process inference router" choice was made deliberately in
+[NVIDIA/OpenShell#998](https://github.com/NVIDIA/OpenShell/issues/998) —
+"No subprocess, no loopback hop"). The data flow:
 
 ```text
-sandbox app  ─https://inference.local/v1/messages──▶  supervisor's netns redirect
-                                                            │
-                                                            ▼
-                                            openshell gateway sidecar (driver+gateway pod)
-                                                            │
-                                                            │  rewrites destination URL,
-                                                            │  injects real API key from
-                                                            │  its provider/inference DB
-                                                            ▼
-                                               your in-cluster LLM upstream
+agent process    ─https://inference.local/v1/messages─▶  supervisor's policy proxy
+(user code in                                                 │  TLS terminates with sandbox-CA-signed
+ agent container)                                             │  per-SNI cert from /etc/openshell-tls/
+                                                              ▼
+                                                  in-process inference router
+                                                              │  strips caller creds,
+                                                              │  injects real URL+key
+                                                              │  from GetInferenceBundle
+                                                              ▼
+                                                  your in-cluster LLM upstream
 ```
 
-The sandbox never sees the upstream URL or the real key. Both are owned
-by the gateway pod's DB (persisted by `gateway.dbPersistence.enabled`)
-and supplied to the sandbox-local router on demand via the per-sandbox
-JWT-authenticated `GetInferenceBundle` RPC.
+Two distinct processes inside the sandbox pod, with different visibility:
 
-The `gatewayUpstreamEgress` NetworkPolicy rule is on the **driver+gateway
-pod**, not the sandbox-pod policy. Sandbox-side traffic always
-terminates at the in-pod gateway.
+| Component | Sees `inference.local`? | Sees real URL? | Sees API key? | Can dial upstream? |
+|---|---|---|---|---|
+| **Agent** (user code, agent container) | yes (env) | no | no | no — doesn't know URL/key |
+| **Supervisor** (privileged, separate process ns) | yes | yes (from bundle) | yes (from bundle) | yes — this is the actual dialer |
+| **Gateway sidecar** (driver+gateway pod) | no | yes (DB) | yes (DB) | no — it serves bundles, doesn't forward bytes |
+
+Bundle persistence is what `gateway.dbPersistence.enabled` provides — without it, every gateway pod restart wipes the provider config and breaks every sandbox's `GetInferenceBundle` until reconfigured.
+
+The `gatewayUpstreamEgress` NetworkPolicy rule lands on the **sandbox-pod**
+policy because that's where the supervisor's outbound HTTPS originates.
+The driver+gateway pod's NP is unaffected — the gateway sidecar never
+makes outbound LLM requests itself.
 
 ## 3. Install
 
