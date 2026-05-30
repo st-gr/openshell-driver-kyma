@@ -7,9 +7,11 @@
 #
 # Implementation: runs `openshell-gateway generate-certs`, the same
 # subcommand upstream NVIDIA OpenShell exposes for this purpose. It also
-# creates a server-TLS and a client-TLS Secret, both unused here because
-# the chart's gateway has --disable-tls; we just let them sit so the
-# certgen tool's preflight (all-three-Secrets-present) is satisfied.
+# creates a server-TLS and a client-TLS Secret. The server-TLS Secret is
+# mounted on the gateway pod when `gateway.tls.enabled` (so the gateway
+# can terminate HTTPS itself + optionally enforce mTLS via
+# gateway.tls.clientCa.enabled). The client-TLS Secret is left available
+# for operators to distribute to admins as an mTLS client identity.
 #
 # Idempotency: certgen is hook-weight -20 with hook-delete-policy
 # before-hook-creation,hook-succeeded. On reinstall the prior Job is

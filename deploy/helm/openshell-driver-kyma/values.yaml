@@ -142,13 +142,37 @@ gateway:
   healthPort: 9092
   extraArgs: []      # extra flags passed to `openshell-gateway run`
   # OIDC for client auth (the openshell CLI authenticates via OIDC).
-  # When `issuer` is unset, --disable-tls is added — suitable only for
-  # in-cluster gateways behind a service mesh, NOT for public exposure.
+  # Independent of TLS: configure both, neither, or either alone.
   oidc:
     issuer: ""
     audience: ""
     adminRole: ""
     userRole: ""
+  # Inbound TLS at the gateway pod.
+  #
+  # When `enabled: false` (default), the chart passes `--disable-tls` to
+  # the gateway and it serves plaintext HTTP — suitable only for
+  # in-cluster deployments behind a TLS-terminating reverse proxy
+  # (e.g. Kyma APIRule + kyma-gateway), or for fully-trusted local dev.
+  # NOT safe for direct public exposure.
+  #
+  # When `enabled: true`, the chart mounts the self-signed server-tls
+  # Secret created by the gateway-jwt-pki-hook (requires
+  # `gateway.sandboxJwt.enabled: true`) and passes
+  #   --tls-cert /etc/openshell-tls/server/tls.crt
+  #   --tls-key  /etc/openshell-tls/server/tls.key
+  # so the gateway terminates HTTPS itself.
+  #
+  # When `tls.clientCa.enabled: true` (mTLS), the chart additionally
+  # passes `--tls-client-ca /etc/openshell-tls/server/ca.crt` so the
+  # gateway requires + verifies a client cert signed by the same self-
+  # signed CA. Use this when fronting the gateway with an mTLS-enforcing
+  # reverse proxy, OR when distributing the chart's client-tls Secret to
+  # a small set of admins as a simple SPIFFE-ish auth model.
+  tls:
+    enabled: false
+    clientCa:
+      enabled: false
   # Gateway pod-level resources, separate from the driver's.
   resources:
     requests:

@@ -1,6 +1,7 @@
 {{/* Pre-flight validation: check required fields when opt-in features are enabled. */ -}}
 {{- include "openshell-driver-kyma.inferenceProviderGuards" . -}}
 {{- include "openshell-driver-kyma.gatewayUpstreamEgressGuards" . -}}
+{{- include "openshell-driver-kyma.gatewayTlsGuards" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -148,18 +149,28 @@ spec:
             - {{ .Values.gateway.metricsPort | quote }}
             - --compute-driver-socket
             - {{ .Values.driver.socket | quote }}
-            {{- if not .Values.gateway.oidc.issuer }}
-            - --disable-tls
+            {{- if .Values.gateway.tls.enabled }}
+            - --tls-cert
+            - /etc/openshell-tls/server/tls.crt
+            - --tls-key
+            - /etc/openshell-tls/server/tls.key
+            {{- if .Values.gateway.tls.clientCa.enabled }}
+            - --tls-client-ca
+            - /etc/openshell-tls/server/ca.crt
+            {{- end }}
             {{- else }}
+            - --disable-tls
+            {{- end }}
+            {{- with .Values.gateway.oidc.issuer }}
             - --oidc-issuer
-            - {{ .Values.gateway.oidc.issuer | quote }}
+            - {{ . | quote }}
             - --oidc-audience
-            - {{ .Values.gateway.oidc.audience | quote }}
-            {{- with .Values.gateway.oidc.adminRole }}
+            - {{ $.Values.gateway.oidc.audience | quote }}
+            {{- with $.Values.gateway.oidc.adminRole }}
             - --oidc-admin-role
             - {{ . | quote }}
             {{- end }}
-            {{- with .Values.gateway.oidc.userRole }}
+            {{- with $.Values.gateway.oidc.userRole }}
             - --oidc-user-role
             - {{ . | quote }}
             {{- end }}
@@ -223,6 +234,11 @@ spec:
               mountPath: /etc/openshell-jwt
               readOnly: true
             {{- end }}
+            {{- if .Values.gateway.tls.enabled }}
+            - name: gateway-tls
+              mountPath: /etc/openshell-tls/server
+              readOnly: true
+            {{- end }}
         {{- end }}
       volumes:
         - name: socket-dir
@@ -246,6 +262,12 @@ spec:
         - name: sandbox-jwt
           secret:
             secretName: {{ include "openshell-driver-kyma.jwtSecretName" . }}
+            defaultMode: 0o400
+        {{- end }}
+        {{- if .Values.gateway.tls.enabled }}
+        - name: gateway-tls
+          secret:
+            secretName: {{ include "openshell-driver-kyma.serverTlsSecretName" . }}
             defaultMode: 0o400
         {{- end }}
         {{- end }}

@@ -42,3 +42,14 @@ Tasks 5/6 land. */}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
+
+{{- define "openshell-driver-kyma.gatewayTlsGuards" -}}
+{{- if .Values.gateway.tls.enabled -}}
+{{- if not .Values.gateway.enabled -}}
+{{- fail "gateway.tls.enabled=true requires gateway.enabled=true (no in-pod gateway sidecar to terminate TLS on)." -}}
+{{- end -}}
+{{- if not .Values.gateway.sandboxJwt.enabled -}}
+{{- fail "gateway.tls.enabled=true requires gateway.sandboxJwt.enabled=true — the chart's gateway-jwt-pki-hook is what creates the server-tls Secret. Either flip sandboxJwt on, or pre-create a kubernetes.io/tls Secret named per gateway.sandboxJwt.serverTlsSecretName and disable the hook." -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
