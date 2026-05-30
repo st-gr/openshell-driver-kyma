@@ -50,7 +50,14 @@ RUN curl -fsSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" \
     && rm -rf /tmp/linux-amd64
 
 # markdownlint-cli2 for repo-hygiene checks.
-RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm \
+# Node 22 LTS via NodeSource — Bookworm's default nodejs is Node 18 which
+# is too old: recent string-width versions (a markdownlint-cli2 transitive
+# dep) use the `/v` regex flag, which Node 18 doesn't support and crashes
+# at require-time.
+ARG NODE_MAJOR=22
+RUN apt-get update && apt-get install -y --no-install-recommends gnupg \
+    && curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
     && npm install -g markdownlint-cli2 \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
