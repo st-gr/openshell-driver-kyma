@@ -40,19 +40,23 @@ driver:
   socket: /var/run/openshell-driver.sock
   # Supervisor OCI image. The chart default tracks `:latest` upstream so
   # `make e2e-cli` keeps working without a values change every time NVIDIA
-  # bumps the supervisor. PRODUCTION DEPLOYMENTS MUST PIN BY DIGEST. To
-  # resolve the current digest:
+  # bumps the supervisor. PRODUCTION DEPLOYMENTS MUST PIN BY DIGEST: the
+  # supervisor runs as root with SYS_ADMIN inside every sandbox, so a
+  # rolling `:latest` is unsafe. The driver passes `--supervisor-image`
+  # straight through to the Sandbox CR, so any reference (`:tag` or
+  # `@sha256:...`) the kubelet accepts works here. To resolve the current
+  # digest:
   #   docker buildx imagetools inspect \
   #     ghcr.io/nvidia/openshell/supervisor:latest \
   #     --format '{{json .Manifest.Digest}}'
-  # Then in your values overlay (note: native digest-pin via tag is a
-  # tracked follow-up; today, override `supervisorImage` to the full
-  # `<repo>@sha256:<digest>` reference and accept that the helper appends
-  # `:latest` — most kubelets accept the digest and ignore the trailing
-  # tag, but the cleanest path is a Kustomize overlay that patches
-  # spec.template.spec.containers[*].image directly):
+  # Then:
   #   driver:
   #     supervisorImage: ghcr.io/nvidia/openshell/supervisor@sha256:<the-digest>
+  #
+  # The chart's own driver and gateway images (image.tag and
+  # gateway.image.tag) also accept digests directly — set tag to a value
+  # starting with `sha256:` and the helper emits `<repo>@sha256:<digest>`
+  # automatically.
   supervisorImage: ghcr.io/nvidia/openshell/supervisor:latest
   supervisorBinaryPath: /openshell-sandbox
   supervisorMountPath: /opt/openshell/bin

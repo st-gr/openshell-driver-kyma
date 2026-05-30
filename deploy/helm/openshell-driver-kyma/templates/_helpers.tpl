@@ -54,10 +54,33 @@ Service account name.
 
 {{/*
 Image reference.
+
+If `image.tag` begins with `sha256:`, emit `<repo>@<digest>` (the OCI
+canonical digest-pin form). Otherwise emit `<repo>:<tag>`. This lets
+operators pin by digest in production with a one-line value:
+
+  image:
+    tag: sha256:abc123…
 */}}
 {{- define "openshell-driver-kyma.image" -}}
 {{- $tag := default .Chart.AppVersion .Values.image.tag -}}
+{{- if hasPrefix "sha256:" $tag -}}
+{{- printf "%s@%s" .Values.image.repository $tag -}}
+{{- else -}}
 {{- printf "%s:%s" .Values.image.repository $tag -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Gateway image reference. Same digest-pin convention as the driver image.
+*/}}
+{{- define "openshell-driver-kyma.gatewayImage" -}}
+{{- $tag := .Values.gateway.image.tag -}}
+{{- if hasPrefix "sha256:" $tag -}}
+{{- printf "%s@%s" .Values.gateway.image.repository $tag -}}
+{{- else -}}
+{{- printf "%s:%s" .Values.gateway.image.repository $tag -}}
+{{- end -}}
 {{- end }}
 
 {{/*
