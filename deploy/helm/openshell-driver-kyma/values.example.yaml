@@ -136,14 +136,21 @@ gatewayApirule:
         #     jwksUri: https://my-tenant.accounts.ondemand.com/oauth2/certs
 
 # ─── In-cluster LLM gateway routing (sandbox model traffic) ──────────────
-# Architecture: the gateway sidecar (in the driver+gateway pod) is the SOLE
-# process that rewrites `inference.local` → real upstream URL and injects
-# the API key. The sandbox itself NEVER sees the upstream URL or key.
+# Architecture (per https://docs.nvidia.com/openshell/about/how-it-works
+# and NVIDIA/OpenShell#998 — "No subprocess, no loopback hop"):
+#   - The agent application (user code in the agent container) sees only
+#     `ANTHROPIC_BASE_URL=https://inference.local/v1`. It cannot read the
+#     real upstream URL or API key.
+#   - The supervisor process (same pod, separate process ns) holds the
+#     bundle in memory, terminates `inference.local` TLS using the
+#     sandbox CA, strips caller creds, and dials the upstream itself.
+#   - The gateway sidecar serves `GetInferenceBundle` (config plane only).
+#     It does NOT forward inference request bytes.
 #
 # When this block is enabled, a post-install Job runs `openshell provider
 # create` + `openshell inference set` against the in-pod gateway. The
-# Anthropic API key is mounted into the Job from the Secret you created in
-# the pre-flight checklist — the chart never sees it.
+# Anthropic API key is mounted into the Job from the Secret you created
+# in the pre-flight checklist — the chart never sees it.
 inferenceProvider:
   enabled: true
   type: anthropic
@@ -155,15 +162,25 @@ inferenceProvider:
     name: my-anthropic-creds   # Secret you pre-created with the API key
     key: api-key
 
-# ─── NetworkPolicy egress for the gateway sidecar → LLM upstream ─────────
+# ─── NetworkPolicy egress for the sandbox pod → LLM upstream ─────────────
 # Required when inferenceProvider.baseUrl points at a *.svc.cluster.local
-# address. The driver+gateway pod's NetworkPolicy denies all in-cluster
-# egress by default; this rule punches a hole for the gateway sidecar
-# (NOT the sandbox — the sandbox NetworkPolicy is unchanged).
+# address. The sandbox-pod NetworkPolicy denies all in-cluster egress
+# except to the in-pod gateway (TCP/8080) and DNS — this rule punches a
+# hole for the supervisor's in-process inference router to reach the
+# operator's LLM upstream.
 #
-# Prerequisite: the upstream LLM gateway's namespace must carry the
-# `kubernetes.io/metadata.name=<value>` label (Kyma/Gardener doesn't
-# auto-apply this — see pre-flight checklist).
+# Why the sandbox NP and not the driver+gateway NP: per NVIDIA's
+# architecture (docs.nvidia.com/openshell + issue #998), the supervisor
+# inside the sandbox pod is what dials the upstream — the gateway
+# sidecar mints the bundle but doesn't forward request bytes.
+#
+# Prerequisites:
+#   1. The upstream LLM gateway's namespace must carry
+#      `kubernetes.io/metadata.name=<value>` (Kyma/Gardener doesn't
+#      auto-apply this — see pre-flight checklist).
+#   2. If you set podSelector, it must match the upstream's actual
+#      labels. Many in-cluster gateways use `app: <name>` rather than
+#      `app.kubernetes.io/name: <name>`.
 gatewayUpstreamEgress:
   enabled: true
   namespace: your-llm-ns
@@ -171,7 +188,7 @@ gatewayUpstreamEgress:
   # Optional: tighten the rule to specific pods within the namespace.
   podSelector: {}
   # podSelector:
-  #   app.kubernetes.io/name: gateway
+  #   app: gateway
 
 # ─── ServiceAccount & sandbox SA ──────────────────────────────────────────
 # Defaults are sensible; override only when an external RBAC overlay owns

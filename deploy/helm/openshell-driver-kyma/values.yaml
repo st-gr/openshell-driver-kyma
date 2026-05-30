@@ -242,17 +242,39 @@ inferenceProvider:
     name: ""              # e.g. "my-anthropic-creds"
     key: ""               # e.g. "api-key"
 
-# Optional: NetworkPolicy egress rule allowing the driver+gateway pod's
-# gateway sidecar to reach an in-cluster LLM upstream. Required when
-# inferenceProvider.baseUrl points at a *.svc.cluster.local address —
-# the gateway sidecar (not the sandbox) is the process that dials the
-# upstream after rewriting `inference.local` traffic. Today's
-# driver+gateway-pod NetworkPolicy denies all in-cluster egress except
-# DNS and TCP/443.
+# Optional: NetworkPolicy egress rule allowing the sandbox pod to reach
+# an in-cluster LLM upstream. Required when inferenceProvider.baseUrl
+# points at a *.svc.cluster.local address.
+#
+# Architecture (per NVIDIA's docs.nvidia.com/openshell/about/how-it-works
+# and the rejected-sidecar choice in NVIDIA/OpenShell#998 — "No subprocess,
+# no loopback hop"): the supervisor's in-process inference router inside
+# the sandbox pod is what dials the upstream, NOT the gateway sidecar.
+# The gateway sidecar mints the bundle (provider config + credential
+# lookup); the supervisor reads the bundle, terminates `inference.local`
+# TLS using the sandbox CA at /etc/openshell-tls/, strips caller-supplied
+# creds, injects the real upstream URL + key, and connects out from the
+# sandbox pod's eth0.
+#
+# So this rule lands on the SANDBOX-POD NetworkPolicy, not the
+# driver+gateway pod NP. Today's default sandbox-NP allows DNS, TCP/8080
+# to the in-pod gateway, and 0.0.0.0/0:443 with RFC1918 excluded — none
+# of which match an in-cluster *.svc.cluster.local:8080 destination.
+#
+# Isolation guarantees this rule preserves:
+#   - Agent process (user code in agent container): env shows only
+#     ANTHROPIC_BASE_URL=https://inference.local/v1; cannot read the real
+#     URL or API key. Cannot dial the upstream successfully even with
+#     this NP open, because it doesn't know the URL or hold the key.
+#   - Supervisor process (same pod, separate process namespace, runs as
+#     root): holds the bundle, makes the actual outbound HTTPS request.
+#     This is the process the rule unblocks.
 gatewayUpstreamEgress:
   enabled: false
   namespace: ""           # e.g. "your-llm-ns"
   port: 8080
-  # Optional pod-label selector to tighten the rule to only the gateway
-  # pods within `namespace`. Empty = whole namespace allowed.
+  # Optional pod-label selector to tighten the rule to only the upstream
+  # gateway's pods within `namespace`. Empty = whole namespace allowed.
+  # Note the upstream's actual labels (e.g. `app: gateway` is common,
+  # but the canonical `app.kubernetes.io/name` is not always present).
   podSelector: {}
