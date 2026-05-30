@@ -6,21 +6,28 @@
 
 use crate::error::DriverError;
 use async_trait::async_trait;
-use computev1::pb::DriverSandbox;
+use computev1::pb::{DriverPlatformEvent, DriverSandbox};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-/// One observation produced by the Sandbox CR watcher.
+/// One observation produced by the watch fan-in (Sandbox CRs + correlated
+/// platform events).
 ///
-/// `Updated` carries a boxed snapshot to keep the variant sizes balanced —
-/// `DriverSandbox` is several hundred bytes whereas the `Deleted` payload
-/// is just a `String`.
+/// `Updated` and `Platform` both carry boxed payloads to keep the variant
+/// sizes balanced — `DriverSandbox` is several hundred bytes whereas the
+/// `Deleted` payload is just a `String`.
 #[derive(Debug, Clone)]
 pub enum WatchEvent {
     /// A Sandbox CR was created or updated. Carries the latest snapshot.
     Updated(Box<DriverSandbox>),
     /// A Sandbox CR was deleted. Carries the sandbox id label value.
     Deleted(String),
+    /// A platform-level event (currently: Kubernetes Warning Events on
+    /// the Sandbox CR or its pod) correlated to a sandbox by name.
+    Platform {
+        sandbox_id: String,
+        event: Box<DriverPlatformEvent>,
+    },
 }
 
 /// Sandbox CR lifecycle. The single trait `Driver` calls on every RPC.
@@ -84,5 +91,9 @@ mod tests {
     fn watch_event_constructs() {
         let _u = WatchEvent::Updated(Box::default());
         let _d = WatchEvent::Deleted("sb-1".to_string());
+        let _p = WatchEvent::Platform {
+            sandbox_id: "sb-1".to_string(),
+            event: Box::default(),
+        };
     }
 }

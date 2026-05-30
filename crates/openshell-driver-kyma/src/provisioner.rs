@@ -18,9 +18,9 @@ use crate::error::DriverError;
 use crate::helpers::{build_env_list, build_resources, merge_maps, object_to_driver_sandbox};
 use crate::interfaces::{SandboxProvisioner, WatchEvent};
 use async_trait::async_trait;
-use computev1::pb::DriverSandbox;
+use computev1::pb::{DriverPlatformEvent, DriverSandbox};
 use futures::{StreamExt, TryStreamExt};
-use k8s_openapi::api::core::v1::Node;
+use k8s_openapi::api::core::v1::{Event as CoreEvent, Node};
 use kube::{
     api::{Api, ApiResource, DeleteParams, DynamicObject, ListParams, PostParams},
     core::GroupVersionKind,
@@ -29,7 +29,8 @@ use kube::{
 };
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use tokio::sync::mpsc;
+use std::sync::Arc;
+use tokio::sync::{mpsc, RwLock};
 
 const LABEL_SANDBOX_ID: &str = "openshell.ai/sandbox-id";
 const LABEL_MANAGED_BY: &str = "openshell.ai/managed-by";
@@ -387,26 +388,105 @@ impl SandboxProvisioner for KymaProvisioner {
 
         let (tx, rx) = mpsc::channel::<WatchEvent>(64);
 
+        // Shared cache populated by the Sandbox-CR watcher and read by the
+        // Event watcher. Maps `<sandbox-name>` (the CR's metadata.name) to
+        // the corresponding sandbox-id label value. K8s Events reference
+        // their target by `involvedObject.name`; Sandbox CRs and pods both
+        // share the CR's name, which gives us a single lookup path for
+        // both involvedObject.kind=="Sandbox" and =="Pod".
+        let name_to_id: Arc<RwLock<HashMap<String, String>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+
+        // Sandbox CR watcher.
+        let cr_tx = tx.clone();
+        let cr_cache = Arc::clone(&name_to_id);
         tokio::spawn(async move {
             let mut stream = watcher(api, cfg).boxed();
             while let Ok(Some(ev)) = stream.try_next().await {
                 use kube::runtime::watcher::Event;
                 let event = match ev {
                     Event::Apply(obj) | Event::InitApply(obj) => {
-                        WatchEvent::Updated(Box::new(object_to_driver_sandbox(&obj)))
-                    }
-                    Event::Delete(obj) => {
+                        let name = obj.metadata.name.clone().unwrap_or_default();
                         let id = obj
                             .metadata
                             .labels
                             .as_ref()
                             .and_then(|l| l.get(LABEL_SANDBOX_ID).cloned())
                             .unwrap_or_default();
+                        if !name.is_empty() && !id.is_empty() {
+                            cr_cache.write().await.insert(name, id);
+                        }
+                        WatchEvent::Updated(Box::new(object_to_driver_sandbox(&obj)))
+                    }
+                    Event::Delete(obj) => {
+                        let name = obj.metadata.name.clone().unwrap_or_default();
+                        let id = obj
+                            .metadata
+                            .labels
+                            .as_ref()
+                            .and_then(|l| l.get(LABEL_SANDBOX_ID).cloned())
+                            .unwrap_or_default();
+                        if !name.is_empty() {
+                            cr_cache.write().await.remove(&name);
+                        }
                         WatchEvent::Deleted(id)
                     }
                     Event::Init | Event::InitDone => continue,
                 };
-                if tx.send(event).await.is_err() {
+                if cr_tx.send(event).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        // Kubernetes Event watcher — surfaces pod-scheduling failures,
+        // image pull errors, volume mount failures, and similar Warning
+        // Events as platform-level WatchSandboxes events. Filtered to
+        // `type=Warning` so Normal Events (cluster heartbeat, lifecycle
+        // milestones) don't drown the stream.
+        let events_api: Api<CoreEvent> = Api::namespaced(self.client.clone(), &self.cfg.namespace);
+        let ev_tx = tx;
+        let ev_cache = name_to_id;
+        tokio::spawn(async move {
+            // Field selector only takes simple comparisons; type=Warning
+            // is supported on the Event resource.
+            let cfg = watcher::Config::default().fields("type=Warning");
+            let mut stream = watcher(events_api, cfg).boxed();
+            while let Ok(Some(ev)) = stream.try_next().await {
+                use kube::runtime::watcher::Event;
+                let core_ev = match ev {
+                    Event::Apply(e) | Event::InitApply(e) => e,
+                    Event::Delete(_) | Event::Init | Event::InitDone => continue,
+                };
+                let involved = &core_ev.involved_object;
+                let kind = involved.kind.as_deref().unwrap_or("");
+                if kind != "Sandbox" && kind != "Pod" {
+                    continue;
+                }
+                let Some(name) = involved.name.as_ref() else {
+                    continue;
+                };
+                let sandbox_id = match ev_cache.read().await.get(name) {
+                    Some(id) => id.clone(),
+                    None => continue,
+                };
+                let platform_event = DriverPlatformEvent {
+                    timestamp_ms: core_ev
+                        .last_timestamp
+                        .as_ref()
+                        .map(|t| t.0.as_millisecond())
+                        .unwrap_or(0),
+                    source: "kubernetes".to_string(),
+                    r#type: core_ev.type_.clone().unwrap_or_default(),
+                    reason: core_ev.reason.clone().unwrap_or_default(),
+                    message: core_ev.message.clone().unwrap_or_default(),
+                    metadata: HashMap::from([("involvedKind".to_string(), kind.to_string())]),
+                };
+                let out = WatchEvent::Platform {
+                    sandbox_id,
+                    event: Box::new(platform_event),
+                };
+                if ev_tx.send(out).await.is_err() {
                     break;
                 }
             }

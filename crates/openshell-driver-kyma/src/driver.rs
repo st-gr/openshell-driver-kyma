@@ -12,7 +12,7 @@ use computev1::pb::{
     GetSandboxRequest, GetSandboxResponse, ListSandboxesRequest, ListSandboxesResponse,
     StopSandboxRequest, StopSandboxResponse, ValidateSandboxCreateRequest,
     ValidateSandboxCreateResponse, WatchSandboxesDeletedEvent, WatchSandboxesEvent,
-    WatchSandboxesRequest, WatchSandboxesSandboxEvent,
+    WatchSandboxesPlatformEvent, WatchSandboxesRequest, WatchSandboxesSandboxEvent,
 };
 use futures::Stream;
 use std::pin::Pin;
@@ -227,6 +227,19 @@ impl ComputeDriver for Driver {
                         payload: Some(computev1::pb::watch_sandboxes_event::Payload::Deleted(
                             WatchSandboxesDeletedEvent { sandbox_id: id },
                         )),
+                    }
+                }
+                WatchEvent::Platform { sandbox_id, event } => {
+                    metrics.watch_event_received("platform");
+                    WatchSandboxesEvent {
+                        payload: Some(
+                            computev1::pb::watch_sandboxes_event::Payload::PlatformEvent(
+                                WatchSandboxesPlatformEvent {
+                                    sandbox_id,
+                                    event: Some(*event),
+                                },
+                            ),
+                        ),
                     }
                 }
             };
@@ -600,6 +613,55 @@ mod tests {
 
         // Third: stream closes when the sender drops.
         assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn watch_surfaces_platform_events() {
+        let (tx, rx) = mpsc::channel::<WatchEvent>(4);
+        tx.send(WatchEvent::Platform {
+            sandbox_id: "id-X".into(),
+            event: Box::new(computev1::pb::DriverPlatformEvent {
+                timestamp_ms: 1_700_000_000_000,
+                source: "kubernetes".into(),
+                r#type: "Warning".into(),
+                reason: "FailedScheduling".into(),
+                message: "0/3 nodes are available".into(),
+                metadata: std::collections::HashMap::from([("involvedKind".into(), "Pod".into())]),
+            }),
+        })
+        .await
+        .unwrap();
+        drop(tx);
+
+        let mut p = MockSandboxProvisioner::new();
+        let rx_cell = std::sync::Mutex::new(Some(rx));
+        p.expect_watch()
+            .returning(move || Ok(rx_cell.lock().unwrap().take().expect("watch called once")));
+
+        let mut m = MockDriverMetrics::new();
+        m.expect_watch_event_received().return_const(());
+
+        let d = make_driver_with_mocks(Config::default(), p, m);
+        let mut stream = d
+            .watch_sandboxes(Request::new(WatchSandboxesRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let ev = stream.next().await.unwrap().unwrap();
+        match ev.payload.unwrap() {
+            computev1::pb::watch_sandboxes_event::Payload::PlatformEvent(p) => {
+                assert_eq!(p.sandbox_id, "id-X");
+                let inner = p.event.unwrap();
+                assert_eq!(inner.reason, "FailedScheduling");
+                assert_eq!(inner.r#type, "Warning");
+                assert_eq!(
+                    inner.metadata.get("involvedKind").map(String::as_str),
+                    Some("Pod")
+                );
+            }
+            other => panic!("expected platform_event, got {other:?}"),
+        }
     }
 
     // The Driver does not build any axum/tonic server itself; the binary
