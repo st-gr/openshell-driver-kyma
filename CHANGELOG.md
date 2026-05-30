@@ -128,6 +128,15 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   --version <ver>` without cloning the repo. The dedicated `/charts`
   OCI namespace avoids collision with the driver container image at
   `ghcr.io/st-gr/openshell-driver-kyma`.
+- Native digest-pinning in the chart's image helper. When `image.tag`
+  or `gateway.image.tag` starts with `sha256:`, the helper emits
+  `<repo>@sha256:<digest>` (the OCI canonical form) instead of
+  `<repo>:<tag>`. Production digest pin is now a one-line values
+  overlay; no Kustomize patch needed.
+- The `release-tag` workflow now publishes the released image at both
+  `:v<tag>` and `:<v-stripped-tag>` so the chart's image helper
+  default (which falls through to `Chart.AppVersion`, with no leading
+  `v`) resolves cleanly without `--set image.tag=...`.
 
 ### Changed
 
@@ -243,12 +252,6 @@ unit of work and should ship in its own PR/release.
   pod-scheduling failures and policy-fetch errors as `WatchSandboxes`
   status updates so the gateway / CLI surface them to the user
   promptly.
-- **Native digest-pinning in the chart's image helper.** Today the
-  helper always emits `<repo>:<tag>`. Update `_helpers.tpl` so a
-  `tag` value of the form `sha256:...` (or starting with `@`) emits
-  `<repo>@sha256:<digest>` instead. Lets `image.tag` and
-  `gateway.image.tag` accept digests directly without a Kustomize
-  overlay.
 - **CI-driven `make e2e-cli`.** Run the full e2e on every push using
   the self-hosted Kyma runner at `st-gr/gha-runner-kyma`.
 - **Upstream PR for `feat/external-compute-driver-socket`.** Submit
@@ -260,10 +263,11 @@ unit of work and should ship in its own PR/release.
 - **Bump dev-image Node from 18 to 20+** so `markdownlint-cli2`
   works inside the dev container (current versions of
   `string-width` use the `/v` regex flag which Node 18 lacks).
-- **Live-cluster smoke for the in-cluster LLM-gateway routing.**
-  The chart-side wiring is complete + helm-template-verified across 6
-  scenarios, but a true end-to-end smoke (operator's actual upstream
-  LLM gateway + Anthropic API key, sandbox running `claude "say hi"`)
-  is a manual
-  step the operator runs once after install. To be moved into CI when
-  the self-hosted Kyma runner picks it up.
+- **CI-driven live-cluster smoke for in-cluster LLM-gateway routing.**
+  The smoke itself was completed manually (2026-05-30, a real Kyma
+  cluster + an in-cluster Anthropic-compatible upstream — sandbox
+  curled `https://inference.local/v1/messages`, response came back
+  through the supervisor's in-process inference router unchanged).
+  Moving that into CI requires the self-hosted Kyma runner +
+  operator-owned API key as a GitHub secret; deferred until the runner
+  picks it up.
