@@ -5,6 +5,12 @@ to a working `openshell sandbox exec` with Claude in the loop. The shape
 follows NVIDIA's CLI-first install: copy the example values file, edit
 the bits your operator owns, `helm install -f`.
 
+For the **full hands-on flow** — Kyma bootstrap, install, sandbox
+create, file upload, Claude inference that creates a new file, file
+download, teardown — see
+[`walkthrough-claude-files.md`](walkthrough-claude-files.md). Every
+step is verified against a real cluster.
+
 If you want the underlying mechanics (driver + gateway sidecar
 architecture, NetworkPolicy posture, etc.) read
 [`production-deployment.md`](production-deployment.md) after you finish
