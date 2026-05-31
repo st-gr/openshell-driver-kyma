@@ -189,7 +189,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   Discovered during the 2026-05-31 live E2E with `claude-cli/2.1.158`;
   the supervisor's NET:OPEN log showed the doubled `/v1`. With this
   fix `claude -p "..."` round-trips cleanly through
-  `inference.local → supervisor router → sail-proxy → Anthropic`.
+  `inference.local → supervisor router → operator's in-cluster LLM upstream → Anthropic`.
 
 ### Changed
 
