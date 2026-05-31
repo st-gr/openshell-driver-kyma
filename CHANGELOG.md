@@ -175,6 +175,20 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 - `e2e/sandbox/Dockerfile` pins `ubuntu:24.04` by digest so a future
   retag can't silently change what `make e2e-cli` builds.
 
+### Fixed
+
+- **`ANTHROPIC_BASE_URL` and `OPENAI_BASE_URL` injected as
+  `https://inference.local` instead of `https://inference.local/v1`.**
+  Anthropic and OpenAI SDKs (and `claude-code`) append `/v1/messages`
+  themselves; with `/v1` already in the env var, the request landed at
+  `/v1/v1/messages` and the supervisor's L7 router rejected it with
+  `403 {"error":"connection not allowed by policy: POST /v1/v1/messages"}`.
+  Curl-based clients that hand-built the URL had been masking the bug.
+  Discovered during the 2026-05-31 live E2E with `claude-cli/2.1.158`;
+  the supervisor's NET:OPEN log showed the doubled `/v1`. With this
+  fix `claude -p "..."` round-trips cleanly through
+  `inference.local → supervisor router → sail-proxy → Anthropic`.
+
 ### Changed
 
 - **`gatewayUpstreamEgress` NetworkPolicy rule moved from the

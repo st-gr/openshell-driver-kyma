@@ -152,8 +152,11 @@ How the routing works (per
 "No subprocess, no loopback hop"):
 
 - The agent application (your Claude code in the agent container) sees
-  only `ANTHROPIC_BASE_URL=https://inference.local/v1` in its env. It
-  cannot read the real upstream URL or the API key.
+  only `ANTHROPIC_BASE_URL=https://inference.local` in its env (no
+  `/v1` suffix — the Anthropic SDK and `claude-code` append
+  `/v1/messages` themselves; with a `/v1` suffix the request would
+  land at `/v1/v1/messages` and the supervisor's L7 router rejects it).
+  It cannot read the real upstream URL or the API key.
 - The supervisor (same pod, separate process namespace, runs privileged)
   fetches a bundle from the gateway via `GetInferenceBundle`. The
   bundle carries the resolved upstream URL + API key the chart's
@@ -186,17 +189,32 @@ sudo apt-get install -y rsync openssh-client
 apk add --no-cache rsync openssh-client
 ```
 
-**The `claude` CLI inside a sandbox needs a permissive policy.**
-The supervisor's default sandbox policy allows `inference.local` and a
-small set of upstream LLM hosts, but `claude-code` makes auxiliary
-requests (config probes, telemetry endpoints) that the default policy
-denies with `403 connection not allowed by policy`. The architectural
-inference path itself works — `curl https://inference.local/v1/messages`
-from inside the sandbox returns a real Anthropic response. To make
-`claude` itself work end-to-end, pass `openshell sandbox create
---policy <path-to-yaml>` with claude's full host set allowed. Sandbox-
-policy authoring is upstream OpenShell territory and out of scope for
-this chart.
+**`claude-code` works end-to-end with a few env knobs.**
+Out of the box the chart injects `ANTHROPIC_BASE_URL=https://inference.local`
+into every sandbox pod, but `openshell sandbox exec` does NOT propagate
+pod-spec env into exec sessions (the supervisor session manager strips
+them). To run `claude` via `openshell sandbox exec`, set the env
+explicitly inline; with the default chart values that's:
+
+```bash
+openshell sandbox exec --name <sandbox> -- sh -c '
+  export HOME=/sandbox \
+         ANTHROPIC_BASE_URL=https://inference.local \
+         ANTHROPIC_API_KEY=sk-ant-placeholder000000000000000000000000000000000000000000000000 \
+         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+  claude -p --bare --allow-dangerously-skip-permissions \
+         --model <your-configured-model> "say hi"'
+```
+
+`HOME=/sandbox` because `/home/sandbox` is Landlock-restricted in the
+exec session. `ANTHROPIC_API_KEY` must look like an Anthropic key
+(`sk-ant-` prefix); the supervisor's L7 router strips it and injects
+the real one from the gateway bundle. `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`
+silences statsig/sentry calls (also injectable chart-side via
+`driver.disableClaudeTelemetry: true` for the agent's main process).
+`--model` must match the model configured on the gateway via
+`inferenceProvider.modelId` — the supervisor refuses model swaps
+because that's a credential boundary.
 
 ## Inspect
 

@@ -153,8 +153,12 @@ and the in-process-only choice in
 [NVIDIA/OpenShell#998](https://github.com/NVIDIA/OpenShell/issues/998) —
 "No subprocess, no loopback hop":
 
-- The driver injects `ANTHROPIC_BASE_URL=https://inference.local/v1` and
-  `OPENAI_BASE_URL=...` into every sandbox pod (`provisioner.rs:277-284`).
+- The driver injects `ANTHROPIC_BASE_URL=https://inference.local` and
+  `OPENAI_BASE_URL=https://inference.local` into every sandbox pod
+  (`provisioner.rs::build_full_env_list`). No `/v1` suffix — Anthropic
+  and OpenAI SDKs append their version path themselves; an `/v1` here
+  would produce `/v1/v1/messages` and the supervisor's L7 router
+  rejects it as not matching its single allowed path.
 - The agent application sees ONLY `inference.local`. It never holds the
   real URL or API key.
 - The supervisor (same pod, separate process) terminates `inference.local`

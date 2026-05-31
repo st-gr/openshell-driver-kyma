@@ -352,14 +352,19 @@ impl KymaProvisioner {
                 self.cfg.gateway_endpoint.clone(),
             );
         }
+        // Inject the upstream pseudo-endpoint that the supervisor's
+        // in-process inference router intercepts. NO `/v1` suffix —
+        // Anthropic SDKs (and claude-code) append `/v1/messages`
+        // themselves, so a `…/v1` value here would produce
+        // `/v1/v1/messages` and the L7 router rejects it with
+        // "connection not allowed by policy". OpenAI SDKs follow the
+        // same convention. Confirmed in the supervisor's NET:OPEN log
+        // (route table only matches `path=/v1/messages`).
         gw_env.insert(
             "ANTHROPIC_BASE_URL".into(),
-            "https://inference.local/v1".into(),
+            "https://inference.local".into(),
         );
-        gw_env.insert(
-            "OPENAI_BASE_URL".into(),
-            "https://inference.local/v1".into(),
-        );
+        gw_env.insert("OPENAI_BASE_URL".into(), "https://inference.local".into());
         if self.cfg.disable_claude_telemetry {
             gw_env.insert(
                 "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".into(),
