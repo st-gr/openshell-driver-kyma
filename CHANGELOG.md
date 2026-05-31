@@ -6,6 +6,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-05-31
+
 ### Added
 
 - Phase 1 implementation: KymaProvisioner, KymaEnricher,
