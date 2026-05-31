@@ -39,6 +39,11 @@ Windows**. If your host is Windows, three options:
 The walkthrough body uses the host-CLI shape (works in WSL, Linux,
 macOS). The in-cluster-pod variants are in the appendix.
 
+If you want to skip the CLI entirely and hit the gateway's gRPC
+endpoints from any HTTP/2 client (`grpcurl`, raw `curl` over
+gRPC-Web, a Go/Python/JS gRPC library), see
+[`grpc-without-cli.md`](grpc-without-cli.md).
+
 ## 1. Prerequisites
 
 - A Kyma cluster you have `cluster-admin` on. `kubectl get ns` works.
