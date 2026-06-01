@@ -1,30 +1,28 @@
 //! Streaming pass-through integration test.
 //!
-//! Spins up a wiremock SAP backend that returns a binary blob with the
-//! AWS event-stream `Content-Type`. Asserts the bridge:
-//! 1. Sends `Accept: application/vnd.amazon.eventstream` outbound.
-//! 2. Sets the same Content-Type on its own response.
-//! 3. Pipes the bytes through unchanged (chunk boundaries don't matter
-//!    for this assertion — wiremock returns the body in one chunk and
-//!    we compare the whole thing — but the bridge code path uses
-//!    `bytes_stream()` and never buffers, which is what we care about).
-//! 4. Sets `X-Accel-Buffering: no`.
+//! Spins up a wiremock SAP backend that returns SSE bytes — same wire
+//! format Anthropic SSE uses. Verifies:
+//!  1. Outbound URL ends with `/invoke-with-response-stream`.
+//!  2. Outbound body has `model` and `stream` stripped, `anthropic_version`
+//!     present.
+//!  3. Bridge sets `Content-Type: text/event-stream` on its own response.
+//!  4. Bridge sets `X-Accel-Buffering: no`.
+//!  5. SSE bytes pass through unchanged.
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use openshell_bedrock_bridge::config::ServiceUrls;
 use openshell_bedrock_bridge::{router, AppState, Config, SapServiceKey};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use tower::ServiceExt;
-use wiremock::matchers::{body_string, header, method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::matchers::{header, method, path};
+use wiremock::{Mock, MockServer, Request as MockRequest, ResponseTemplate};
 
 fn cfg(server_uri: &str) -> Config {
     Config {
         bind_address: "127.0.0.1".into(),
         port: 0,
-        path_prefix: "/saic-aws-bedrock".into(),
         resource_group: "default".into(),
         sap_key: SapServiceKey {
             clientid: "client".into(),
@@ -40,26 +38,18 @@ fn cfg(server_uri: &str) -> Config {
     }
 }
 
-/// Hand-crafted bytes that look like a single AWS event-stream frame:
-/// total_len=0x1C, headers_len=0x00, prelude_crc=00000000 (not validated
-/// by the bridge — we're testing pass-through, not framing). 28 bytes
-/// total: 12 prelude + 0 headers + 12 payload + 4 trailing CRC.
-fn fake_eventstream_bytes() -> Vec<u8> {
-    let mut buf = Vec::new();
-    // Prelude: total length (4) + headers length (4) + prelude CRC (4)
-    buf.extend_from_slice(&[0x00, 0x00, 0x00, 0x1C]); // total = 28 bytes
-    buf.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // headers length = 0
-    buf.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]); // fake prelude CRC
-                                                      // Payload: 12 bytes — looks like a base64-encoded JSON-ish blob
-    buf.extend_from_slice(b"hello-stream");
-    // Trailing message CRC (4 bytes)
-    buf.extend_from_slice(&[0xCA, 0xFE, 0xBA, 0xBE]);
-    buf
+/// A small SSE blob shaped like an Anthropic streaming session.
+fn fake_sse_bytes() -> Vec<u8> {
+    let mut s = String::new();
+    s.push_str("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_01\"}}\n\n");
+    s.push_str("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n\n");
+    s.push_str("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n");
+    s.into_bytes()
 }
 
 #[tokio::main]
 #[test]
-async fn streaming_invoke_passes_bytes_through_with_correct_outbound_accept() {
+async fn streaming_request_routes_to_invoke_with_response_stream() {
     let server = MockServer::start().await;
 
     Mock::given(method("POST"))
@@ -71,40 +61,49 @@ async fn streaming_invoke_passes_bytes_through_with_correct_outbound_accept() {
         .mount(&server)
         .await;
 
-    let inbound_body = json!({
-        "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens": 32,
-        "messages": [{"role": "user", "content": "hi"}]
-    })
-    .to_string();
-    let upstream_bytes = fake_eventstream_bytes();
+    let upstream_bytes = fake_sse_bytes();
+    let upstream_for_resp = upstream_bytes.clone();
 
     Mock::given(method("POST"))
         .and(path(
             "/v2/inference/deployments/dep-opus/invoke-with-response-stream",
         ))
-        // Verifies the outbound Accept header from the bridge.
-        .and(header("accept", "application/vnd.amazon.eventstream"))
         .and(header("authorization", "Bearer tok"))
         .and(header("ai-resource-group", "default"))
         .and(header("content-type", "application/json"))
-        .and(body_string(inbound_body.clone()))
-        .respond_with(
+        .respond_with(move |req: &MockRequest| {
+            let body: Value = serde_json::from_slice(&req.body).expect("SAP receives JSON body");
+            assert!(
+                body.get("model").is_none(),
+                "outbound body must not carry 'model': {body}"
+            );
+            assert!(
+                body.get("stream").is_none(),
+                "outbound body must not carry 'stream': {body}"
+            );
+            assert_eq!(body["anthropic_version"], "bedrock-2023-05-31");
             ResponseTemplate::new(200)
-                .insert_header("Content-Type", "application/vnd.amazon.eventstream")
-                .set_body_bytes(upstream_bytes.clone()),
-        )
+                .insert_header("Content-Type", "text/event-stream")
+                .set_body_bytes(upstream_for_resp.clone())
+        })
         .expect(1)
         .mount(&server)
         .await;
 
     let app = router(AppState::new(cfg(&server.uri()), reqwest::Client::new()));
 
+    let inbound = json!({
+        "model": "claude-opus-4.7",
+        "max_tokens": 32,
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": true
+    })
+    .to_string();
     let req = Request::builder()
         .method("POST")
-        .uri("/saic-aws-bedrock/model/claude-opus-4.7/invoke-with-response-stream")
+        .uri("/v1/messages")
         .header("content-type", "application/json")
-        .body(Body::from(inbound_body.clone()))
+        .body(Body::from(inbound))
         .unwrap();
 
     let resp = app.oneshot(req).await.unwrap();
@@ -115,7 +114,7 @@ async fn streaming_invoke_passes_bytes_through_with_correct_outbound_accept() {
             .unwrap()
             .to_str()
             .unwrap(),
-        "application/vnd.amazon.eventstream"
+        "text/event-stream"
     );
     assert_eq!(
         resp.headers()
@@ -153,15 +152,21 @@ async fn streaming_invoke_upstream_429_translates_to_throttling() {
         .await;
 
     let app = router(AppState::new(cfg(&server.uri()), reqwest::Client::new()));
+    let inbound = json!({
+        "model": "claude-opus-4.7",
+        "messages": [],
+        "stream": true
+    })
+    .to_string();
     let req = Request::builder()
         .method("POST")
-        .uri("/saic-aws-bedrock/model/claude-opus-4.7/invoke-with-response-stream")
+        .uri("/v1/messages")
         .header("content-type", "application/json")
-        .body(Body::from("{}"))
+        .body(Body::from(inbound))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
     let body = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
-    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let v: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(v["__type"].as_str().unwrap(), "ThrottlingException");
 }

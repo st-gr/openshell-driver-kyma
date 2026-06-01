@@ -320,15 +320,18 @@ allows the agent to call `api.anthropic.com:443` directly with the
 user's OAuth-fronted Anthropic creds. Their pattern is process
 containment, not credential containment.
 
-## Variant: Bedrock mode via the SAP AI Core bridge
+## Variant: SAP AI Core via the in-cluster translation bridge
 
 If your Anthropic models live behind SAP AI Core's deployed-Bedrock
 schema (XSUAA service key, no SigV4), the chart ships an in-cluster
-translation bridge that lets Claude Code's Bedrock mode reach them.
-The agent's view is identical to the Anthropic-mode flow above —
-inference traffic still terminates at `inference.local` — but the
-URL prefix is `/saic-aws-bedrock` and the gateway provider is
-`aws-bedrock` instead of `anthropic`.
+translation bridge. **The bridge speaks the Anthropic Messages API on
+the inside** (`POST /v1/messages`) and converts outbound to SAP's
+Bedrock InvokeModel format. From the agent's perspective the wiring
+is identical to the Anthropic-mode flow above — same `inference.local`
+endpoint, same `claude` invocation, no Bedrock env, no AWS creds, no
+per-pod policy carve-out. The only operator-facing changes are the
+Secret pre-flight, the values overlay, and pointing
+`inferenceProvider.baseUrl` at the bridge.
 
 ### Pre-flight (one-time)
 
@@ -352,29 +355,37 @@ bedrockBridge:
     claude-opus-4.7:   <sap-deployment-uuid-for-opus-4-7>
     claude-sonnet-4.6: <sap-deployment-uuid-for-sonnet-4-6>
     claude-haiku-4.5:  <sap-deployment-uuid-for-haiku-4-5>
+
+# Point the gateway's Anthropic provider at the bridge instead of an
+# external Anthropic-API upstream. The credentialSecret value is
+# accepted by the gateway but ignored by the bridge (SAP auth is
+# XSUAA-bearer, minted bridge-side from the service-key Secret).
+inferenceProvider:
+  enabled: true
+  type: anthropic
+  baseUrl: http://ods-openshell-driver-kyma-bedrock-bridge.openshell-system.svc.cluster.local:8787
+  modelId: claude-opus-4.7   # must match a key in bedrockBridge.modelMap
+  credentialSecret:
+    name: my-anthropic-creds
+    key: api-key
 ```
 
 `helm upgrade -f my-values.yaml` deploys the bridge alongside the
-driver+gateway pod. A post-install Job registers an `aws-bedrock`
-provider on the gateway pointing at the bridge.
+driver+gateway pod. The chart's existing inference-provider Job then
+registers `claude-opus-4.7` (or whichever `inferenceProvider.modelId`
+is) as a normal Anthropic provider whose upstream is the bridge.
 
-### Sandbox env (Bedrock mode)
+### Sandbox env
 
-Replace Section 8's `claude` invocation with this. The key differences:
-`CLAUDE_CODE_USE_BEDROCK=1`, the Bedrock-shaped base URL pointing at
-`/saic-aws-bedrock`, and empty AWS creds (Claude Code won't try to
-SigV4-sign).
+Section 8's `claude` invocation works **unchanged**. `ANTHROPIC_MODEL`
+selects which key from `bedrockBridge.modelMap` to use, and
+`ANTHROPIC_SMALL_FAST_MODEL` selects the model for sub-agents (Task
+tool, etc.):
 
 ```bash
 openshell sandbox exec --name claude-files -- sh -c '
   cd /sandbox
   export HOME=/sandbox \
-         CLAUDE_CODE_USE_BEDROCK=1 \
-         ANTHROPIC_BEDROCK_BASE_URL=https://inference.local/saic-aws-bedrock \
-         AWS_ACCESS_KEY_ID="" \
-         AWS_SECRET_ACCESS_KEY="" \
-         AWS_REGION=us-east-1 \
-         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
          ANTHROPIC_MODEL=claude-opus-4.7 \
          ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-4.5 \
          ANTHROPIC_SMALL_FAST_MODEL=claude-haiku-4.5
@@ -387,15 +398,16 @@ openshell sandbox exec --name claude-files -- sh -c '
 ```
 
 Notes:
-- The `ANTHROPIC_MODEL=claude-opus-4.7` string must appear as a key in
-  `bedrockBridge.modelMap`. Operator picks the naming.
-- The bridge accepts any inbound `Authorization` (or none) — Claude
-  Code's empty AWS creds skip SigV4, which is what we want.
+- Both `ANTHROPIC_MODEL` and `ANTHROPIC_SMALL_FAST_MODEL` strings must
+  appear as keys in `bedrockBridge.modelMap`. Operator picks the
+  naming; Claude Code passes them through verbatim.
 - The bridge holds the SAP service key, exchanges it for an XSUAA
-  bearer (cached), and forwards request bytes verbatim to the SAP
-  deployment. Streaming is byte-pass-through; the bridge sets
-  `Accept: application/vnd.amazon.eventstream` outbound and SAP
-  responds with native AWS event-stream binary framing.
+  bearer (cached, refreshed ~60s before expiry), and forwards each
+  request body to the SAP deployment with `model` and `stream`
+  stripped and `anthropic_version: bedrock-2023-05-31` injected.
+- Streaming is byte-pass-through SSE: SAP defaults to
+  `text/event-stream` and Anthropic SSE has the same wire format, so
+  no per-event re-framing is needed.
 
 ### Sandbox-leakage verification (one-time, after first install)
 

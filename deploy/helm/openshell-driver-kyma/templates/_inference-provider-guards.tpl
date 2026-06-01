@@ -66,7 +66,7 @@ Tasks 5/6 land. */}}
 {{- fail "bedrockBridge.enabled=true with an empty modelMap requires bedrockBridge.singleDeploymentId so every inbound model id resolves to that deployment." -}}
 {{- end -}}
 {{- if not .Values.gateway.enabled -}}
-{{- fail "bedrockBridge.enabled=true requires gateway.enabled=true (the bridge is registered as an aws-bedrock provider on the in-pod gateway)." -}}
+{{- fail "bedrockBridge.enabled=true requires gateway.enabled=true. The bridge is wired into the chart by pointing inferenceProvider.baseUrl at it; sandbox pods reach the bridge via inference.local through the gateway's L7 router." -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

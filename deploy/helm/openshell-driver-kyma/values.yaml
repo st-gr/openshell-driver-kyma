@@ -338,11 +338,18 @@ gatewayUpstreamEgress:
 # pods never see SAP credentials.
 #
 # When `enabled: true`, the chart deploys:
-#   - A standalone Deployment + Service for the bridge.
+#   - A standalone Deployment + Service for the bridge (POST /v1/messages).
 #   - A NetworkPolicy on the bridge pod (DNS + 0.0.0.0/0:443 with RFC1918
 #     excluded — for the public SAP endpoints).
-#   - A post-install Job that registers an `aws-bedrock` provider on the
-#     in-pod gateway pointing at the bridge Service.
+#
+# The bridge speaks the Anthropic Messages API on the inside and
+# translates outbound to SAP AI Core's deployed Bedrock InvokeModel
+# endpoints. It is registered into the chart by pointing
+# `inferenceProvider.baseUrl` at the bridge's in-cluster Service URL
+# (with `inferenceProvider.type: anthropic`). Sandbox pods reach the
+# bridge via `inference.local` through the gateway's L7 router exactly
+# the same way they reach any other Anthropic upstream — no Bedrock
+# env, no AWS creds, no per-pod policy carve-out.
 #
 # Operator pre-creates a Secret holding the SAP service-key JSON:
 #   kubectl -n <release-ns> create secret generic my-sap-aicore-key \
@@ -357,15 +364,6 @@ bedrockBridge:
     tag: ""               # "" = .Chart.AppVersion. Override with v0.x.y or sha256:<digest>.
     pullPolicy: IfNotPresent
   replicas: 1
-  # URL prefix the bridge mounts its routes under (sandbox env should
-  # carry ANTHROPIC_BEDROCK_BASE_URL=https://inference.local${path}).
-  # The same prefix becomes the gateway's provider name so multiple
-  # bridges can coexist under different prefixes in the future.
-  path: /saic-aws-bedrock
-  # Provider name registered on the in-pod gateway (visible to
-  # `openshell provider list`). Defaults to the path with leading slash
-  # stripped when empty.
-  providerName: ""
   resources:
     requests:
       cpu: 50m
@@ -380,9 +378,10 @@ bedrockBridge:
       name: ""            # e.g. "my-sap-aicore-key"
       key: service-key.json   # the file's name inside the Secret + mount
     resourceGroup: default
-  # Bedrock-id -> SAP-deployment-id map. Pick whichever string keys you
-  # want; Claude Code passes ANTHROPIC_MODEL et al. through verbatim
-  # so the strings must match.
+  # Anthropic-API model id → SAP-deployment-id map. Keys are matched
+  # against the `"model"` field in inbound `/v1/messages` requests
+  # (i.e. whatever Claude Code's `ANTHROPIC_MODEL` resolves to), so the
+  # strings must match. Values are SAP AI Core deployment IDs (UUID-ish).
   modelMap: {}            # e.g. { "claude-opus-4.7": "<sap-deployment-uuid>", ... }
   # Single-deployment fallback. Used when modelMap lookup misses, OR
   # exclusively when modelMap is empty. At least one of {modelMap,

@@ -41,9 +41,6 @@ pub struct ServiceUrls {
 pub struct Config {
     pub bind_address: String,
     pub port: u16,
-    /// URL prefix the bridge mounts its routes under (e.g. `/saic-aws-bedrock`).
-    /// Stripped before path-mapping into SAP's `/v2/inference/...` shape.
-    pub path_prefix: String,
     pub resource_group: String,
     pub sap_key: SapServiceKey,
     /// Bedrock-id → SAP-deployment-id. Empty when only `default_deployment`
@@ -66,8 +63,6 @@ impl Config {
             .map(|s| s.parse::<u16>().context("PORT must be a u16"))
             .transpose()?
             .unwrap_or(8787);
-        let path_prefix =
-            env::var("BRIDGE_PATH_PREFIX").unwrap_or_else(|_| "/saic-aws-bedrock".to_string());
         let resource_group =
             env::var("SAP_AI_CORE_RESOURCE_GROUP").unwrap_or_else(|_| "default".to_string());
         let log_level = env::var("BRIDGE_LOG_LEVEL").unwrap_or_else(|_| "info".to_string());
@@ -91,7 +86,6 @@ impl Config {
         Ok(Self {
             bind_address,
             port,
-            path_prefix,
             resource_group,
             sap_key,
             model_map,
@@ -176,7 +170,6 @@ mod tests {
             "SAP_AI_CORE_RESOURCE_GROUP",
             "SAP_DEPLOYMENT_ID",
             "MODEL_MAP_JSON",
-            "BRIDGE_PATH_PREFIX",
             "BRIDGE_LOG_LEVEL",
             "PORT",
             "BIND_ADDRESS",
@@ -355,7 +348,6 @@ mod tests {
         let cfg = Config::from_env().expect("config builds");
         assert_eq!(cfg.bind_address, "0.0.0.0");
         assert_eq!(cfg.port, 8787);
-        assert_eq!(cfg.path_prefix, "/saic-aws-bedrock");
         assert_eq!(cfg.resource_group, "default");
         assert_eq!(cfg.log_level, "info");
     }

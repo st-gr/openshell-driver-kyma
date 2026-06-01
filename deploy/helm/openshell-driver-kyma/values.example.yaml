@@ -190,10 +190,20 @@ gatewayUpstreamEgress:
   # podSelector:
   #   app: gateway
 
-# ─── SAP AI Core Bedrock translation bridge (alternative inference path) ─
+# ─── SAP AI Core translation bridge ──────────────────────────────────────
 # When you want sandboxes to reach Anthropic models that SAP AI Core has
-# deployed under the Bedrock schema, deploy the in-cluster bridge instead
-# of (or in addition to) the inferenceProvider block above.
+# deployed under the Bedrock schema, deploy this in-cluster bridge.
+#
+# How it's wired into the chart:
+#   1. The bridge speaks the Anthropic Messages API on the inside
+#      (POST /v1/messages) and translates outbound to SAP's Bedrock
+#      InvokeModel endpoints.
+#   2. You point `inferenceProvider.baseUrl` (above) at the bridge's
+#      in-cluster Service URL with `inferenceProvider.type: anthropic`.
+#      The gateway treats the bridge as a normal Anthropic upstream.
+#   3. Sandbox env stays IDENTICAL to the standard Anthropic walkthrough
+#      (`ANTHROPIC_BASE_URL=https://inference.local`). No Bedrock env,
+#      no AWS creds, no per-pod policy carve-out.
 #
 # Pre-flight (one-time):
 #   kubectl -n openshell-system create secret generic my-sap-aicore-key \
@@ -204,12 +214,15 @@ gatewayUpstreamEgress:
 # uses XSUAA `client_credentials` to mint outbound tokens. Sandbox pods
 # never see SAP credentials — they see only `inference.local`.
 #
-# Sandbox env (when running Claude Code in Bedrock mode):
-#   CLAUDE_CODE_USE_BEDROCK=1
-#   ANTHROPIC_BEDROCK_BASE_URL=https://inference.local/saic-aws-bedrock
-#   AWS_ACCESS_KEY_ID=
-#   AWS_SECRET_ACCESS_KEY=
-#   ANTHROPIC_MODEL=claude-opus-4.7    # or whatever key you put in modelMap
+# Wiring example (adapt the inferenceProvider block above):
+#   inferenceProvider:
+#     enabled: true
+#     type: anthropic
+#     baseUrl: http://ods-openshell-driver-kyma-bedrock-bridge.openshell-system.svc.cluster.local:8787
+#     modelId: claude-opus-4.7   # must match a key in bedrockBridge.modelMap
+#     credentialSecret:
+#       name: my-anthropic-creds # any non-empty value; bridge ignores it
+#       key: api-key
 bedrockBridge:
   enabled: false
   image:
@@ -217,16 +230,15 @@ bedrockBridge:
     tag: ""               # "" = .Chart.AppVersion
     pullPolicy: IfNotPresent
   replicas: 1
-  path: /saic-aws-bedrock
-  providerName: ""        # "" = derived from path
   sap:
     serviceKeySecret:
       name: my-sap-aicore-key
       key: service-key.json
     resourceGroup: default
-  # Pick keys to match whatever you set in ANTHROPIC_MODEL et al. inside
-  # the sandbox. Deployment ids come from `openshell provider list` /
-  # SAP AI Launchpad.
+  # Map Anthropic-API model ids → SAP AI Core deployment ids. The keys
+  # are whatever Claude Code's ANTHROPIC_MODEL / ANTHROPIC_SMALL_FAST_MODEL
+  # resolves to inbound; the values are SAP deployment UUIDs from
+  # `openshell provider list` / SAP AI Launchpad.
   modelMap:
     claude-opus-4.7: <sap-deployment-uuid-for-opus-4-7>
     claude-sonnet-4.6: <sap-deployment-uuid-for-sonnet-4-6>

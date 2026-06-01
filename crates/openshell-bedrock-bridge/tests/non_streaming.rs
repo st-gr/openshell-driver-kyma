@@ -1,10 +1,11 @@
-//! End-to-end integration test for the non-streaming `/invoke` route.
+//! End-to-end integration test for the non-streaming `/v1/messages`
+//! route.
 //!
 //! Spins up a wiremock SAP backend covering both XSUAA `/oauth/token`
 //! and the AI Core inference endpoint. Builds the bridge router around
-//! that mock, sends a Bedrock-shape request through axum's `oneshot`,
-//! asserts:
-//!   - SAP got the expected outbound URL + headers + body bytes.
+//! that mock, sends an Anthropic-shape request through axum's
+//! `oneshot`, asserts:
+//!   - SAP got the expected outbound URL + headers + Bedrock-shape body.
 //!   - The bridge returned the SAP body verbatim.
 //!   - Error statuses translate to Bedrock-shape JSON.
 
@@ -12,17 +13,16 @@ use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use openshell_bedrock_bridge::config::ServiceUrls;
 use openshell_bedrock_bridge::{router, AppState, Config, SapServiceKey};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use tower::ServiceExt;
-use wiremock::matchers::{body_string, header, method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::matchers::{header, method, path};
+use wiremock::{Mock, MockServer, Request as MockRequest, ResponseTemplate};
 
 fn cfg(server_uri: &str) -> Config {
     Config {
         bind_address: "127.0.0.1".into(),
         port: 0,
-        path_prefix: "/saic-aws-bedrock".into(),
         resource_group: "default".into(),
         sap_key: SapServiceKey {
             clientid: "client".into(),
@@ -40,10 +40,9 @@ fn cfg(server_uri: &str) -> Config {
 
 #[tokio::main]
 #[test]
-async fn non_streaming_invoke_forwards_body_verbatim() {
+async fn translates_anthropic_body_and_forwards_to_sap_deployment() {
     let server = MockServer::start().await;
 
-    // Token endpoint.
     Mock::given(method("POST"))
         .and(path("/oauth/token"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -53,36 +52,60 @@ async fn non_streaming_invoke_forwards_body_verbatim() {
         .mount(&server)
         .await;
 
-    // SAP inference endpoint.
-    let inbound_body = json!({
-        "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens": 32,
-        "messages": [{"role": "user", "content": "hi"}]
-    })
-    .to_string();
     let upstream_response = json!({
+        "id": "msg_01",
+        "type": "message",
+        "role": "assistant",
         "content": [{"type": "text", "text": "Hi there"}],
         "stop_reason": "end_turn",
         "model": "claude-opus-4-7",
     });
+
+    // Custom matcher: SAP should see Bedrock-shape body (no `model`,
+    // no `stream`, anthropic_version injected).
     Mock::given(method("POST"))
         .and(path("/v2/inference/deployments/dep-opus-4-7/invoke"))
         .and(header("authorization", "Bearer tok-test"))
         .and(header("ai-resource-group", "default"))
         .and(header("content-type", "application/json"))
-        .and(body_string(inbound_body.clone()))
-        .respond_with(ResponseTemplate::new(200).set_body_json(upstream_response.clone()))
+        .respond_with(move |req: &MockRequest| {
+            let body: Value = serde_json::from_slice(&req.body).expect("SAP receives JSON body");
+            assert!(
+                body.get("model").is_none(),
+                "outbound body must not carry 'model': {body}"
+            );
+            assert!(
+                body.get("stream").is_none(),
+                "outbound body must not carry 'stream': {body}"
+            );
+            assert_eq!(
+                body["anthropic_version"], "bedrock-2023-05-31",
+                "bridge must inject anthropic_version: {body}"
+            );
+            assert_eq!(
+                body["max_tokens"], 32,
+                "bridge must preserve other fields: {body}"
+            );
+            ResponseTemplate::new(200).set_body_json(upstream_response.clone())
+        })
         .expect(1)
         .mount(&server)
         .await;
 
     let app = router(AppState::new(cfg(&server.uri()), reqwest::Client::new()));
 
+    let inbound = json!({
+        "model": "claude-opus-4.7",
+        "max_tokens": 32,
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": false
+    })
+    .to_string();
     let req = Request::builder()
         .method("POST")
-        .uri("/saic-aws-bedrock/model/claude-opus-4.7/invoke")
+        .uri("/v1/messages")
         .header("content-type", "application/json")
-        .body(Body::from(inbound_body.clone()))
+        .body(Body::from(inbound))
         .unwrap();
 
     let resp = app.oneshot(req).await.unwrap();
@@ -93,8 +116,9 @@ async fn non_streaming_invoke_forwards_body_verbatim() {
     );
 
     let body_bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
-    let parsed: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
-    assert_eq!(parsed, upstream_response);
+    let parsed: Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(parsed["content"][0]["text"], "Hi there");
+    assert_eq!(parsed["stop_reason"], "end_turn");
 
     server.verify().await;
 }
@@ -113,18 +137,43 @@ async fn unknown_model_returns_404_resource_not_found() {
         .await;
 
     let app = router(AppState::new(cfg(&server.uri()), reqwest::Client::new()));
+    let inbound = json!({
+        "model": "no-such-model",
+        "messages": []
+    })
+    .to_string();
     let req = Request::builder()
         .method("POST")
-        .uri("/saic-aws-bedrock/model/no-such-model/invoke")
+        .uri("/v1/messages")
         .header("content-type", "application/json")
-        .body(Body::from(r#"{}"#))
+        .body(Body::from(inbound))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     let body = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
-    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let v: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(v["__type"].as_str().unwrap(), "ResourceNotFoundException");
     assert!(v["message"].as_str().unwrap().contains("no-such-model"));
+}
+
+#[tokio::main]
+#[test]
+async fn missing_model_returns_400_validation() {
+    let server = MockServer::start().await;
+    let app = router(AppState::new(cfg(&server.uri()), reqwest::Client::new()));
+    let inbound = json!({"messages": []}).to_string();
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/messages")
+        .header("content-type", "application/json")
+        .body(Body::from(inbound))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+    let v: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["__type"].as_str().unwrap(), "ValidationException");
+    assert!(v["message"].as_str().unwrap().contains("model"));
 }
 
 #[tokio::main]
@@ -149,16 +198,17 @@ async fn upstream_400_translates_to_validation_exception() {
         .await;
 
     let app = router(AppState::new(cfg(&server.uri()), reqwest::Client::new()));
+    let inbound = json!({"model": "claude-opus-4.7", "messages": []}).to_string();
     let req = Request::builder()
         .method("POST")
-        .uri("/saic-aws-bedrock/model/claude-opus-4.7/invoke")
+        .uri("/v1/messages")
         .header("content-type", "application/json")
-        .body(Body::from("{}"))
+        .body(Body::from(inbound))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let body = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
-    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let v: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(v["__type"].as_str().unwrap(), "ValidationException");
 }
 

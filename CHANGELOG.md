@@ -9,27 +9,38 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ### Added
 
 - **`openshell-bedrock-bridge` crate + image + chart wiring.** A new
-  in-cluster HTTP translation proxy that lets Claude Code's Bedrock
-  mode reach Anthropic models deployed via SAP AI Core's Bedrock
-  schema (XSUAA bearer auth, no SigV4). The bridge accepts
-  `POST /saic-aws-bedrock/model/{id}/invoke[-with-response-stream]`,
-  exchanges the operator's SAP BTP service-key for an XSUAA bearer
-  (cached until ~60s before expiry), forwards the request body
-  unchanged to `${AI_API_URL}/v2/inference/deployments/{deploymentId}/{subpath}`,
-  and pipes the response bytes back. Streaming is byte-pass-through:
-  the bridge sets `Accept: application/vnd.amazon.eventstream`
-  outbound and SAP emits native AWS event-stream binary framing
-  (verified via curl probe — no re-framing required).
+  in-cluster HTTP translation proxy that lets Claude Code reach
+  Anthropic models deployed via SAP AI Core's Bedrock schema (XSUAA
+  bearer auth, no SigV4). The bridge speaks the **Anthropic Messages
+  API** on the inside (`POST /v1/messages`) and translates outbound to
+  SAP's Bedrock InvokeModel endpoints. From the gateway's perspective
+  it's a normal `anthropic` provider; from the sandbox's perspective,
+  inference flows through `inference.local` exactly the way the
+  standard Anthropic walkthrough describes — no Bedrock-mode env, no
+  AWS creds, no per-pod policy carve-out.
+- Translation flow: parse the inbound `/v1/messages` body, look up the
+  `model` field in the operator-supplied `modelMap` to pick a SAP
+  deployment id, strip `model` and `stream` from the body, inject
+  `anthropic_version: "bedrock-2023-05-31"`, exchange the operator's
+  SAP BTP service-key for an XSUAA bearer (cached until ~60s before
+  expiry), forward to
+  `${AI_API_URL}/v2/inference/deployments/{deploymentId}/{invoke|invoke-with-response-stream}`,
+  and pipe the response bytes back. Streaming is byte-pass-through SSE:
+  SAP defaults to `text/event-stream` and Anthropic SSE has the same
+  wire format, so no per-event re-framing is needed.
 - New chart block `bedrockBridge:` (default `enabled: false`). When on,
   the chart deploys the bridge as a standalone Deployment + ClusterIP
   Service + dedicated NetworkPolicy (DNS + 0.0.0.0/0:443 with RFC1918
   excluded — public SAP endpoints only), AND extends the sandbox-pod
-  NetworkPolicy with an egress rule to the bridge:8787. A post-install
-  Job registers an `aws-bedrock` provider on the in-pod gateway
-  pointing at the bridge. Pre-flight `{{- fail -}}` guards refuse to
-  render when `bedrockBridge.enabled=true` is missing the SAP service-
-  key Secret reference, missing-both `modelMap` and `singleDeploymentId`,
-  or missing `gateway.enabled=true`.
+  NetworkPolicy with an egress rule to the bridge:8787. The operator
+  wires the bridge into the chart by pointing
+  `inferenceProvider.baseUrl` at the bridge's in-cluster Service URL
+  with `inferenceProvider.type: anthropic`; the existing
+  inference-provider Job then registers it as a normal Anthropic
+  upstream. Pre-flight `{{- fail -}}` guards refuse to render when
+  `bedrockBridge.enabled=true` is missing the SAP service-key Secret
+  reference, missing-both `modelMap` and `singleDeploymentId`, or
+  missing `gateway.enabled=true`.
 - Sensitive-material discipline: the operator pre-creates a Secret
   carrying the SAP service-key JSON
   (`kubectl create secret generic <name> --from-file=service-key.json=./sk-openshell.json`).
@@ -49,17 +60,18 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 - `.gitignore` patterns for SAP service-key files (`sk-*.json`,
   `*.sap-key.json`, `service-key*.json`, `**/sap-aicore-*.json`) so
   operator-uploaded keys can't accidentally land in git.
-- `docs/walkthrough-claude-files.md` "Variant: Bedrock mode via the
-  SAP AI Core bridge" section showing the values overlay edits, the
-  Bedrock-mode sandbox env, and the three sandbox-leakage verification
+- `docs/walkthrough-claude-files.md` "Variant: SAP AI Core via the
+  in-cluster translation bridge" section showing the values overlay,
+  the (unchanged) sandbox env, and three sandbox-leakage verification
   steps (mount-only-on-bridge, sandbox SA can't get the Secret,
   sandbox env carries no SAP material).
-- 31 new bridge tests: Tier-1 unit (config three-source loader, XSUAA
-  token cache + refresh, model resolver, error mapper) plus Tier-2
-  integration (non-streaming forward-body-verbatim, unknown-model 404,
-  upstream-400 ValidationException, healthz, streaming pass-through
-  with binary blob, streaming-429 ThrottlingException) — all green
-  inside the dev image.
+- 42 new bridge tests: Tier-1 unit (config three-source loader, XSUAA
+  token cache + refresh, model resolver, error mapper, Anthropic→
+  Bedrock body translator) plus Tier-2 integration (Anthropic-shape
+  request → Bedrock-shape outbound + verbatim response, unknown-model
+  404, missing-model 400 ValidationException, upstream-400
+  ValidationException, healthz, streaming SSE pass-through,
+  streaming-429 ThrottlingException) — all green inside the dev image.
 
 ## [0.1.1] — 2026-05-31
 

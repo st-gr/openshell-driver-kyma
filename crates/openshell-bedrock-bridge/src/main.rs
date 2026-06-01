@@ -13,11 +13,10 @@ async fn main() -> Result<()> {
     let bind = format!("{}:{}", config.bind_address, config.port);
     tracing::info!(
         bind = %bind,
-        path_prefix = %config.path_prefix,
         resource_group = %config.resource_group,
         models = ?config.model_map.keys().collect::<Vec<_>>(),
         default_deployment = ?config.default_deployment,
-        "openshell-bedrock-bridge starting"
+        "openshell-bedrock-bridge starting (POST /v1/messages)"
     );
 
     let http = reqwest::Client::builder()

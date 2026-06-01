@@ -59,8 +59,6 @@ spec:
               value: "8787"
             - name: BIND_ADDRESS
               value: "0.0.0.0"
-            - name: BRIDGE_PATH_PREFIX
-              value: {{ .Values.bedrockBridge.path | quote }}
             - name: BRIDGE_LOG_LEVEL
               value: {{ .Values.bedrockBridge.logLevel | quote }}
             - name: SAP_AI_CORE_SERVICE_KEY_FILE
