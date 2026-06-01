@@ -320,6 +320,106 @@ allows the agent to call `api.anthropic.com:443` directly with the
 user's OAuth-fronted Anthropic creds. Their pattern is process
 containment, not credential containment.
 
+## Variant: Bedrock mode via the SAP AI Core bridge
+
+If your Anthropic models live behind SAP AI Core's deployed-Bedrock
+schema (XSUAA service key, no SigV4), the chart ships an in-cluster
+translation bridge that lets Claude Code's Bedrock mode reach them.
+The agent's view is identical to the Anthropic-mode flow above —
+inference traffic still terminates at `inference.local` — but the
+URL prefix is `/saic-aws-bedrock` and the gateway provider is
+`aws-bedrock` instead of `anthropic`.
+
+### Pre-flight (one-time)
+
+```bash
+# SAP service-key Secret. Contents stay on disk + in this Secret —
+# the chart never reads the JSON.
+kubectl -n "$NS" create secret generic my-sap-aicore-key \
+  --from-file=service-key.json=./sk-openshell.json
+```
+
+### Values overlay additions
+
+```yaml
+bedrockBridge:
+  enabled: true
+  sap:
+    serviceKeySecret:
+      name: my-sap-aicore-key
+      key: service-key.json
+  modelMap:
+    claude-opus-4.7:   <sap-deployment-uuid-for-opus-4-7>
+    claude-sonnet-4.6: <sap-deployment-uuid-for-sonnet-4-6>
+    claude-haiku-4.5:  <sap-deployment-uuid-for-haiku-4-5>
+```
+
+`helm upgrade -f my-values.yaml` deploys the bridge alongside the
+driver+gateway pod. A post-install Job registers an `aws-bedrock`
+provider on the gateway pointing at the bridge.
+
+### Sandbox env (Bedrock mode)
+
+Replace Section 8's `claude` invocation with this. The key differences:
+`CLAUDE_CODE_USE_BEDROCK=1`, the Bedrock-shaped base URL pointing at
+`/saic-aws-bedrock`, and empty AWS creds (Claude Code won't try to
+SigV4-sign).
+
+```bash
+openshell sandbox exec --name claude-files -- sh -c '
+  cd /sandbox
+  export HOME=/sandbox \
+         CLAUDE_CODE_USE_BEDROCK=1 \
+         ANTHROPIC_BEDROCK_BASE_URL=https://inference.local/saic-aws-bedrock \
+         AWS_ACCESS_KEY_ID="" \
+         AWS_SECRET_ACCESS_KEY="" \
+         AWS_REGION=us-east-1 \
+         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+         ANTHROPIC_MODEL=claude-opus-4.7 \
+         ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-4.5 \
+         ANTHROPIC_SMALL_FAST_MODEL=claude-haiku-4.5
+  claude -p \
+    --allow-dangerously-skip-permissions \
+    --allowed-tools Write,Read \
+    --add-dir /sandbox \
+    "Read /sandbox/draft.md. Write /sandbox/summary.md..."
+'
+```
+
+Notes:
+- The `ANTHROPIC_MODEL=claude-opus-4.7` string must appear as a key in
+  `bedrockBridge.modelMap`. Operator picks the naming.
+- The bridge accepts any inbound `Authorization` (or none) — Claude
+  Code's empty AWS creds skip SigV4, which is what we want.
+- The bridge holds the SAP service key, exchanges it for an XSUAA
+  bearer (cached), and forwards request bytes verbatim to the SAP
+  deployment. Streaming is byte-pass-through; the bridge sets
+  `Accept: application/vnd.amazon.eventstream` outbound and SAP
+  responds with native AWS event-stream binary framing.
+
+### Sandbox-leakage verification (one-time, after first install)
+
+Confirm the SAP service-key never reaches the sandbox:
+
+```bash
+# 1. Bridge file is mounted on the bridge pod, not anywhere else.
+kubectl -n "$NS" exec deploy/ods-openshell-driver-kyma-bedrock-bridge \
+  -- ls -la /etc/sap-aicore/
+# Expected: -r-------- ... service-key.json
+
+# 2. Sandbox SA cannot get the Secret.
+kubectl -n "$NS" auth can-i get secret/my-sap-aicore-key \
+  --as=system:serviceaccount:"$NS":openshell-sandbox
+# Expected: no
+
+# 3. Sandbox env carries no SAP material.
+openshell sandbox exec --name claude-files -- sh -c '
+  cat /etc/sap-aicore/service-key.json 2>&1 || true
+  env | grep -iE "CLIENTSECRET|XSUAA|hana.ondemand" || echo "(empty)"
+'
+# Expected: "No such file or directory" + "(empty)"
+```
+
 ## Appendix: in-cluster pod variant (no host CLI install)
 
 If you can't install `openshell` on your host (or want to test

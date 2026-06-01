@@ -6,6 +6,61 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **`openshell-bedrock-bridge` crate + image + chart wiring.** A new
+  in-cluster HTTP translation proxy that lets Claude Code's Bedrock
+  mode reach Anthropic models deployed via SAP AI Core's Bedrock
+  schema (XSUAA bearer auth, no SigV4). The bridge accepts
+  `POST /saic-aws-bedrock/model/{id}/invoke[-with-response-stream]`,
+  exchanges the operator's SAP BTP service-key for an XSUAA bearer
+  (cached until ~60s before expiry), forwards the request body
+  unchanged to `${AI_API_URL}/v2/inference/deployments/{deploymentId}/{subpath}`,
+  and pipes the response bytes back. Streaming is byte-pass-through:
+  the bridge sets `Accept: application/vnd.amazon.eventstream`
+  outbound and SAP emits native AWS event-stream binary framing
+  (verified via curl probe — no re-framing required).
+- New chart block `bedrockBridge:` (default `enabled: false`). When on,
+  the chart deploys the bridge as a standalone Deployment + ClusterIP
+  Service + dedicated NetworkPolicy (DNS + 0.0.0.0/0:443 with RFC1918
+  excluded — public SAP endpoints only), AND extends the sandbox-pod
+  NetworkPolicy with an egress rule to the bridge:8787. A post-install
+  Job registers an `aws-bedrock` provider on the in-pod gateway
+  pointing at the bridge. Pre-flight `{{- fail -}}` guards refuse to
+  render when `bedrockBridge.enabled=true` is missing the SAP service-
+  key Secret reference, missing-both `modelMap` and `singleDeploymentId`,
+  or missing `gateway.enabled=true`.
+- Sensitive-material discipline: the operator pre-creates a Secret
+  carrying the SAP service-key JSON
+  (`kubectl create secret generic <name> --from-file=service-key.json=./sk-openshell.json`).
+  The chart **never** reads the Secret's contents. The bridge pod
+  mounts it as a file at `/etc/sap-aicore/service-key.json` (read-only,
+  defaultMode `0o400`). Sandbox pods cannot reach the Secret: different
+  pod, different SA, no `secrets:get` RBAC, NP egress allows only
+  `bridge:8787`. The bridge logs token length only — never the
+  `clientsecret` or the bearer token itself.
+- New Dockerfile `deploy/Dockerfile.bridge` (multi-stage cargo-chef →
+  distroless/cc, nonroot UID 65532), mirroring the driver Dockerfile.
+- New image `ghcr.io/st-gr/openshell-bedrock-bridge` published by both
+  the `docker-build` workflow (every push to main) and the `release-tag`
+  workflow (every `v*` tag, with `:v<tag>`, `:<v-stripped-tag>`, and
+  `:latest`). docker-build is now a 2x matrix; release-tag has
+  parallel build steps with separate cache scopes.
+- `.gitignore` patterns for SAP service-key files (`sk-*.json`,
+  `*.sap-key.json`, `service-key*.json`, `**/sap-aicore-*.json`) so
+  operator-uploaded keys can't accidentally land in git.
+- `docs/walkthrough-claude-files.md` "Variant: Bedrock mode via the
+  SAP AI Core bridge" section showing the values overlay edits, the
+  Bedrock-mode sandbox env, and the three sandbox-leakage verification
+  steps (mount-only-on-bridge, sandbox SA can't get the Secret,
+  sandbox env carries no SAP material).
+- 31 new bridge tests: Tier-1 unit (config three-source loader, XSUAA
+  token cache + refresh, model resolver, error mapper) plus Tier-2
+  integration (non-streaming forward-body-verbatim, unknown-model 404,
+  upstream-400 ValidationException, healthz, streaming pass-through
+  with binary blob, streaming-429 ThrottlingException) — all green
+  inside the dev image.
+
 ## [0.1.1] — 2026-05-31
 
 ### Added
