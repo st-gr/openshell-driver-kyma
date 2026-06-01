@@ -8,6 +8,13 @@ authors.workspace = true
 rust-version.workspace = true
 description = "HTTP translation proxy: Claude Code Bedrock requests -> SAP AI Core deployed Anthropic models"
 
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "openshell-bedrock-bridge"
+path = "src/main.rs"
+
 [dependencies]
 tokio.workspace = true
 axum.workspace = true
