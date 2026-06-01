@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/computev1", "crates/openshell-driver-kyma"]
+members = ["crates/computev1", "crates/openshell-driver-kyma", "crates/openshell-bedrock-bridge"]
 
 [workspace.package]
 version = "0.1.1"
