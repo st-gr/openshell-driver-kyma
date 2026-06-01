@@ -1,0 +1,38 @@
+{{- if .Values.bedrockBridge.enabled }}
+
+═══════════════════════════════════════════════════════════════════
+SAP AI Core translation bridge is deployed.
+═══════════════════════════════════════════════════════════════════
+
+The bridge speaks the Anthropic Messages API on the inside
+(`POST /v1/messages`) and translates outbound to SAP AI Core's
+deployed Bedrock InvokeModel endpoints. Sandbox pods do NOT need
+Bedrock-mode env, AWS creds, or a per-pod policy carve-out — they
+talk to `inference.local` exactly as today, and the gateway routes
+to the bridge.
+
+In-cluster bridge URL (gateway-side):
+  http://{{ include "openshell-driver-kyma.bedrockBridgeFullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:8787
+
+To wire claude-code through it: set the chart's
+`inferenceProvider.baseUrl` to that URL and `inferenceProvider.type`
+to `anthropic` (the bridge is a normal Anthropic upstream from the
+gateway's POV — `x-api-key` is accepted and ignored, since SAP auth
+is XSUAA-bearer-side, on the bridge):
+
+  inferenceProvider:
+    enabled: true
+    type: anthropic
+    baseUrl: http://{{ include "openshell-driver-kyma.bedrockBridgeFullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:8787
+    modelId: <a key from your bedrockBridge.modelMap>
+    credentialSecret:
+      name: <a Secret you pre-created>
+      key: api-key   # any non-empty value; bridge ignores it
+
+Verify the bridge is healthy:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "openshell-driver-kyma.bedrockBridgeFullname" . }} 8787:8787 &
+  curl -fsS http://localhost:8787/healthz -i | head -3
+
+Tail bridge logs while a sandbox is running to confirm traffic:
+  kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "openshell-driver-kyma.bedrockBridgeFullname" . }} -f
+{{- end }}

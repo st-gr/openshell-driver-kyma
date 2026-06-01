@@ -73,6 +73,44 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   ValidationException, healthz, streaming SSE pass-through,
   streaming-429 ThrottlingException) — all green inside the dev image.
 
+#### Design rationale
+
+The original SAP AI Core Bedrock translation prompt described a
+`POST /saic-aws-bedrock/model/{id}/invoke[-with-response-stream]`
+shape with claude-code in Bedrock mode (`CLAUDE_CODE_USE_BEDROCK=1`,
+`ANTHROPIC_BEDROCK_BASE_URL`, empty AWS creds). We tested that shape
+end-to-end against a real Kyma cluster and found two empirical
+constraints in NVIDIA's upstream OpenShell:
+
+1. `normalize_provider_type` does not recognize `aws-bedrock`.
+   `provider create --type aws-bedrock` is rejected at the gateway,
+   so the bridge can't be registered through the chart's standard
+   provider hook.
+2. The supervisor's in-sandbox L7 router pins URL patterns per
+   provider type. For `anthropic`-type providers, only `/v1/messages`
+   is permitted; any other path returns 403
+   `"connection not allowed by policy"`. So registering the bridge
+   as `--type anthropic` to bypass (1) doesn't help — the supervisor
+   still refuses Bedrock-shape URLs.
+
+Together, these mean the prompt's verbatim sandbox env is not
+deliverable on a stock OpenShell sandbox today. The Anthropic-in /
+Bedrock-out design above moves the protocol translation server-side
+into the bridge, so the sandbox uses the standard Anthropic-mode env
+and the gateway routes `/v1/messages` traffic normally.
+
+#### Future unlock for the prompt's verbatim Bedrock-mode env
+
+An upstream PR to NVIDIA OpenShell adding `aws-bedrock` to
+`normalize_provider_type` (with the right URL patterns:
+`/model/{id}/invoke` and `/model/{id}/invoke-with-response-stream`)
+would let operators register the bridge as `--type aws-bedrock` and
+run claude-code in its native Bedrock mode against `inference.local`
+exactly the way the prompt describes. Once that lands, the bridge
+itself could shrink to a path-translating + auth-substituting
+pass-through (no body translation, no field denylist). See
+`docs/upstream-aws-bedrock-pr-draft.md` for the planned PR.
+
 ## [0.1.1] — 2026-05-31
 
 ### Added

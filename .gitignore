@@ -63,6 +63,24 @@ sk-*.json
 service-key*.json
 **/sap-aicore-*.json
 
+# Operator-environment overlays. `my-values.yaml` is the conventional
+# name used in walkthroughs; it routinely contains tenant-specific
+# data (SAP deployment UUIDs, internal service URLs, namespace names)
+# that the chart treats as configuration but the repo treats as
+# operator-private. The chart's own `values.example.yaml` is the
+# committed reference.
+my-values.yaml
+my-values-*.yaml
+
+# Transient session/skill cache used by the agent harness when this
+# repo is the working directory.
+.merge-cache/
+
+# Design-time prompts the operator dropped next to the repo as input
+# to a coding session. Not part of the chart or the bridge crate;
+# usually contains rough wording and tenant-flavored examples.
+claude-code-bedrock-translation-prompt.md
+
 # Node module noise from scripts/ if anyone runs `npm install` ad-hoc
 scripts/node_modules/
 
