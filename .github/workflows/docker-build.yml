@@ -8,6 +8,7 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'deploy/Dockerfile'
+      - 'deploy/Dockerfile.bridge'
       - '.github/workflows/docker-build.yml'
   workflow_dispatch:
     inputs:
@@ -24,6 +25,16 @@ jobs:
   build-and-push:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - dockerfile: deploy/Dockerfile
+            image_owner_repo: openshell-driver-kyma
+            cache_scope: driver-v2
+          - dockerfile: deploy/Dockerfile.bridge
+            image_owner_repo: openshell-bedrock-bridge
+            cache_scope: bridge-v1
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -40,16 +51,16 @@ jobs:
 
       - name: Lowercase repo owner
         id: repo
-        run: echo "lower=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+        run: echo "owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
 
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: deploy/Dockerfile
+          file: ${{ matrix.dockerfile }}
           push: true
           tags: |
-            ghcr.io/${{ steps.repo.outputs.lower }}:${{ github.sha }}
-            ghcr.io/${{ steps.repo.outputs.lower }}:latest
-          cache-from: type=gha,scope=driver-v2
-          cache-to: type=gha,mode=max,scope=driver-v2
+            ghcr.io/${{ steps.repo.outputs.owner }}/${{ matrix.image_owner_repo }}:${{ github.sha }}
+            ghcr.io/${{ steps.repo.outputs.owner }}/${{ matrix.image_owner_repo }}:latest
+          cache-from: type=gha,scope=${{ matrix.cache_scope }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.cache_scope }}

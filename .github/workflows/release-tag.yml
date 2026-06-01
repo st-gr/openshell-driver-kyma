@@ -29,6 +29,7 @@ jobs:
         id: repo
         run: |
           echo "lower=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+          echo "owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
           # `helm package` produces openshell-driver-kyma-<Chart.Version>.tgz
           # using Chart.AppVersion. Chart.AppVersion has no leading 'v', so
           # also publish the image at the v-stripped tag so the chart's
@@ -36,7 +37,7 @@ jobs:
           # resolves cleanly without a --set image.tag override.
           echo "version=$(echo '${{ github.ref_name }}' | sed 's/^v//')" >> "$GITHUB_OUTPUT"
 
-      - name: Build and push tagged image
+      - name: Build and push tagged driver image
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -50,6 +51,22 @@ jobs:
           # one workflow can't serve a wrong binary into a release build.
           cache-from: type=gha,scope=release-v1
           cache-to: type=gha,mode=max,scope=release-v1
+
+      - name: Build and push tagged bedrock-bridge image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile.bridge
+          push: true
+          tags: |
+            ghcr.io/${{ steps.repo.outputs.owner }}/openshell-bedrock-bridge:${{ github.ref_name }}
+            ghcr.io/${{ steps.repo.outputs.owner }}/openshell-bedrock-bridge:${{ steps.repo.outputs.version }}
+            ghcr.io/${{ steps.repo.outputs.owner }}/openshell-bedrock-bridge:latest
+          # Separate cache scope so the bridge build doesn't share a cache
+          # layer with either the driver build or the bridge's own
+          # docker-build.yml run.
+          cache-from: type=gha,scope=release-bridge-v1
+          cache-to: type=gha,mode=max,scope=release-bridge-v1
 
       - name: Install Helm
         uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112 # v4.3.0
