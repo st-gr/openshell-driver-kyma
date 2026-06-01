@@ -1,0 +1,116 @@
+{{- if .Values.bedrockBridge.enabled -}}
+{{- include "openshell-driver-kyma.bedrockBridgeGuards" . -}}
+# Post-install / post-upgrade hook: registers an `aws-bedrock` provider
+# on the in-pod gateway pointing at the bedrock-bridge Service.
+#
+# Same shape as inference-provider-hook.yaml — alpine + apk + the
+# upstream `openshell` CLI musl tarball — but configures provider type
+# `aws-bedrock` with dummy AWS credentials (the bridge ignores SigV4)
+# and a BEDROCK_BASE_URL pointing at the in-cluster bridge.
+{{- $hookName := printf "%s-bedrock-bridge-provider-hook" (include "openshell-driver-kyma.fullname" .) }}
+{{- $bridgeSvc := include "openshell-driver-kyma.bedrockBridgeFullname" . }}
+{{- $providerName := default (trimPrefix "/" .Values.bedrockBridge.path) .Values.bedrockBridge.providerName }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $hookName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "-3"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $hookName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "-3"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 300
+  ttlSecondsAfterFinished: 300
+  template:
+    metadata:
+      labels:
+        # Distinct app.kubernetes.io/name so the chart's driver+gateway
+        # NP doesn't match this hook pod (same trick as
+        # inference-provider-hook).
+        app.kubernetes.io/name: openshell-driver-kyma-bedrock-bridge-provider-hook
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        sidecar.istio.io/inject: "false"
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: {{ $hookName }}
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: provider-hook
+          image: "alpine:3.20"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          env:
+            - name: GATEWAY_URL
+              value: "http://{{ include "openshell-driver-kyma.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.gateway.grpcPort }}"
+            - name: GATEWAY_HEALTH_URL
+              value: "http://{{ include "openshell-driver-kyma.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.gateway.healthPort }}"
+            - name: BRIDGE_BASE_URL
+              value: "http://{{ $bridgeSvc }}.{{ .Release.Namespace }}.svc.cluster.local:8787{{ .Values.bedrockBridge.path }}"
+            - name: PROVIDER_NAME
+              value: {{ $providerName | quote }}
+            - name: CLI_VERSION
+              value: "v0.0.50"
+          command:
+            - /bin/sh
+            - -eu
+            - -c
+            - |
+              apk add --no-cache curl ca-certificates >/dev/null
+              curl -fsSL "https://github.com/NVIDIA/OpenShell/releases/download/${CLI_VERSION}/openshell-x86_64-unknown-linux-musl.tar.gz" \
+                | tar -xz -C /usr/local/bin
+              chmod +x /usr/local/bin/openshell
+
+              echo "[hook] waiting for gateway at ${GATEWAY_HEALTH_URL}..."
+              for i in $(seq 1 60); do
+                if curl -fsS -o /dev/null --connect-timeout 2 "${GATEWAY_HEALTH_URL}/healthz" 2>/dev/null; then
+                  echo "[hook] gateway is up after ${i} attempts"
+                  break
+                fi
+                if [ "$i" = 60 ]; then
+                  echo "[hook] gateway never became reachable" >&2
+                  exit 1
+                fi
+                sleep 2
+              done
+
+              # The bridge ignores SigV4. The dummy AWS creds satisfy the
+              # gateway's provider schema; the bridge replaces them with
+              # an XSUAA bearer outbound to SAP.
+              echo "[hook] configuring aws-bedrock provider '${PROVIDER_NAME}' -> ${BRIDGE_BASE_URL}..."
+              if openshell --gateway-endpoint "${GATEWAY_URL}" provider create \
+                  --name "${PROVIDER_NAME}" \
+                  --type aws-bedrock \
+                  --credential "AWS_ACCESS_KEY_ID=dummy" \
+                  --credential "AWS_SECRET_ACCESS_KEY=dummy" \
+                  --config "BEDROCK_BASE_URL=${BRIDGE_BASE_URL}"; then
+                echo "[hook] provider created"
+              else
+                echo "[hook] provider create failed (likely AlreadyExists); updating"
+                openshell --gateway-endpoint "${GATEWAY_URL}" provider update "${PROVIDER_NAME}" \
+                  --credential "AWS_ACCESS_KEY_ID=dummy" \
+                  --credential "AWS_SECRET_ACCESS_KEY=dummy" \
+                  --config "BEDROCK_BASE_URL=${BRIDGE_BASE_URL}"
+              fi
+              echo "[hook] DONE"
+{{- end }}

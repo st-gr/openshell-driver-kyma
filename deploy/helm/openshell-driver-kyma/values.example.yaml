@@ -190,6 +190,50 @@ gatewayUpstreamEgress:
   # podSelector:
   #   app: gateway
 
+# ─── SAP AI Core Bedrock translation bridge (alternative inference path) ─
+# When you want sandboxes to reach Anthropic models that SAP AI Core has
+# deployed under the Bedrock schema, deploy the in-cluster bridge instead
+# of (or in addition to) the inferenceProvider block above.
+#
+# Pre-flight (one-time):
+#   kubectl -n openshell-system create secret generic my-sap-aicore-key \
+#     --from-file=service-key.json=./sk-openshell.json
+#
+# The chart never reads the Secret. The bridge pod mounts it at
+# /etc/sap-aicore/service-key.json (read-only, defaultMode 0o400) and
+# uses XSUAA `client_credentials` to mint outbound tokens. Sandbox pods
+# never see SAP credentials — they see only `inference.local`.
+#
+# Sandbox env (when running Claude Code in Bedrock mode):
+#   CLAUDE_CODE_USE_BEDROCK=1
+#   ANTHROPIC_BEDROCK_BASE_URL=https://inference.local/saic-aws-bedrock
+#   AWS_ACCESS_KEY_ID=
+#   AWS_SECRET_ACCESS_KEY=
+#   ANTHROPIC_MODEL=claude-opus-4.7    # or whatever key you put in modelMap
+bedrockBridge:
+  enabled: false
+  image:
+    repository: ghcr.io/st-gr/openshell-bedrock-bridge
+    tag: ""               # "" = .Chart.AppVersion
+    pullPolicy: IfNotPresent
+  replicas: 1
+  path: /saic-aws-bedrock
+  providerName: ""        # "" = derived from path
+  sap:
+    serviceKeySecret:
+      name: my-sap-aicore-key
+      key: service-key.json
+    resourceGroup: default
+  # Pick keys to match whatever you set in ANTHROPIC_MODEL et al. inside
+  # the sandbox. Deployment ids come from `openshell provider list` /
+  # SAP AI Launchpad.
+  modelMap:
+    claude-opus-4.7: <sap-deployment-uuid-for-opus-4-7>
+    claude-sonnet-4.6: <sap-deployment-uuid-for-sonnet-4-6>
+    claude-haiku-4.5: <sap-deployment-uuid-for-haiku-4-5>
+  singleDeploymentId: ""  # only used when modelMap is empty
+  logLevel: info
+
 # ─── ServiceAccount & sandbox SA ──────────────────────────────────────────
 # Defaults are sensible; override only when an external RBAC overlay owns
 # the SA wiring (chart still renders Role/Binding pointing at the name

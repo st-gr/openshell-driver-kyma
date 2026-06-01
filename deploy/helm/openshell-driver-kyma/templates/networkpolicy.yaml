@@ -159,4 +159,75 @@ spec:
         - port: {{ .Values.gatewayUpstreamEgress.port }}
           protocol: TCP
     {{- end }}
+    {{- if .Values.bedrockBridge.enabled }}
+    # Sandbox-pod -> in-cluster bedrock-bridge. The supervisor's L7
+    # router (in the sandbox pod) dials the bridge from sandbox-pod's
+    # eth0 — same flow as gatewayUpstreamEgress, but pointing at our
+    # in-cluster bridge Service rather than an external upstream.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ include "openshell-driver-kyma.name" . }}-bedrock-bridge
+              app.kubernetes.io/instance: {{ .Release.Name }}
+      ports:
+        - port: 8787
+          protocol: TCP
+    {{- end }}
+{{- end }}
+{{- if and .Values.driver.enableNetworkPolicy .Values.bedrockBridge.enabled }}
+---
+# NetworkPolicy for the bedrock-bridge pod.
+#
+# Ingress: only from sandbox pods on 8787. The bridge is the SAP-
+# AI-Core translator and has no other in-cluster callers.
+#
+# Egress:
+#   1. DNS (53/UDP+TCP) — required for SAP hostname resolution.
+#   2. 0.0.0.0/0:443 with RFC1918 excluded — for the public SAP
+#      endpoints (XSUAA token + AI Core API). RFC1918 exclusion
+#      keeps a compromised bridge from reaching internal services.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "openshell-driver-kyma.bedrockBridgeFullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+    app.kubernetes.io/component: bedrock-bridge
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "openshell-driver-kyma.name" . }}-bedrock-bridge
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              openshell.ai/managed-by: openshell
+      ports:
+        - port: 8787
+          protocol: TCP
+  egress:
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+      ports:
+        - port: 443
+          protocol: TCP
 {{- end }}

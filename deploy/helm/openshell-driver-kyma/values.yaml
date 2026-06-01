@@ -328,3 +328,64 @@ gatewayUpstreamEgress:
   # Note the upstream's actual labels (e.g. `app: gateway` is common,
   # but the canonical `app.kubernetes.io/name` is not always present).
   podSelector: {}
+
+# Optional: deploy an in-cluster bridge that translates Claude Code's
+# AWS Bedrock requests to SAP AI Core's deployed-Bedrock format.
+#
+# Architecture: agent (Bedrock mode) -> https://inference.local/saic-aws-bedrock/...
+#   -> supervisor's L7 router -> in-pod gateway -> bridge pod -> SAP AI Core.
+# The bridge is the SOLE process holding the SAP service key — sandbox
+# pods never see SAP credentials.
+#
+# When `enabled: true`, the chart deploys:
+#   - A standalone Deployment + Service for the bridge.
+#   - A NetworkPolicy on the bridge pod (DNS + 0.0.0.0/0:443 with RFC1918
+#     excluded — for the public SAP endpoints).
+#   - A post-install Job that registers an `aws-bedrock` provider on the
+#     in-pod gateway pointing at the bridge Service.
+#
+# Operator pre-creates a Secret holding the SAP service-key JSON:
+#   kubectl -n <release-ns> create secret generic my-sap-aicore-key \
+#     --from-file=service-key.json=./sk-openshell.json
+# Then references it via `bedrockBridge.sap.serviceKeySecret.name`. The
+# chart NEVER reads the Secret's contents — kubelet mounts it as a file
+# on the bridge pod (read-only, defaultMode 0o400).
+bedrockBridge:
+  enabled: false
+  image:
+    repository: ghcr.io/st-gr/openshell-bedrock-bridge
+    tag: ""               # "" = .Chart.AppVersion. Override with v0.x.y or sha256:<digest>.
+    pullPolicy: IfNotPresent
+  replicas: 1
+  # URL prefix the bridge mounts its routes under (sandbox env should
+  # carry ANTHROPIC_BEDROCK_BASE_URL=https://inference.local${path}).
+  # The same prefix becomes the gateway's provider name so multiple
+  # bridges can coexist under different prefixes in the future.
+  path: /saic-aws-bedrock
+  # Provider name registered on the in-pod gateway (visible to
+  # `openshell provider list`). Defaults to the path with leading slash
+  # stripped when empty.
+  providerName: ""
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+  sap:
+    # The chart never reads the Secret's contents. The bridge pod
+    # mounts it as a file at /etc/sap-aicore/service-key.json.
+    serviceKeySecret:
+      name: ""            # e.g. "my-sap-aicore-key"
+      key: service-key.json   # the file's name inside the Secret + mount
+    resourceGroup: default
+  # Bedrock-id -> SAP-deployment-id map. Pick whichever string keys you
+  # want; Claude Code passes ANTHROPIC_MODEL et al. through verbatim
+  # so the strings must match.
+  modelMap: {}            # e.g. { "claude-opus-4.7": "<sap-deployment-uuid>", ... }
+  # Single-deployment fallback. Used when modelMap lookup misses, OR
+  # exclusively when modelMap is empty. At least one of {modelMap,
+  # singleDeploymentId} MUST be set.
+  singleDeploymentId: ""
+  logLevel: info

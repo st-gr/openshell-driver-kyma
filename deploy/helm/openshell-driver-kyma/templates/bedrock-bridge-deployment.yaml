@@ -1,0 +1,111 @@
+{{- include "openshell-driver-kyma.bedrockBridgeGuards" . -}}
+{{- if .Values.bedrockBridge.enabled }}
+{{- $name := include "openshell-driver-kyma.bedrockBridgeFullname" . }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+    app.kubernetes.io/component: bedrock-bridge
+spec:
+  replicas: {{ .Values.bedrockBridge.replicas }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "openshell-driver-kyma.name" . }}-bedrock-bridge
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        # Distinct app.kubernetes.io/name from the driver+gateway pod so the
+        # chart's other NetworkPolicies don't match the bridge.
+        app.kubernetes.io/name: {{ include "openshell-driver-kyma.name" . }}-bedrock-bridge
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: bedrock-bridge
+        # Skip Istio sidecar injection — the bridge speaks plaintext HTTP
+        # internally and TLS-on-public-egress reqwest-side.
+        sidecar.istio.io/inject: "false"
+      annotations:
+        checksum/values: {{ .Values.bedrockBridge | toYaml | sha256sum }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: bridge
+          image: {{ include "openshell-driver-kyma.bedrockBridgeImage" . | quote }}
+          imagePullPolicy: {{ .Values.bedrockBridge.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+            runAsNonRoot: true
+            runAsUser: 65532
+          env:
+            - name: PORT
+              value: "8787"
+            - name: BIND_ADDRESS
+              value: "0.0.0.0"
+            - name: BRIDGE_PATH_PREFIX
+              value: {{ .Values.bedrockBridge.path | quote }}
+            - name: BRIDGE_LOG_LEVEL
+              value: {{ .Values.bedrockBridge.logLevel | quote }}
+            - name: SAP_AI_CORE_SERVICE_KEY_FILE
+              value: /etc/sap-aicore/{{ .Values.bedrockBridge.sap.serviceKeySecret.key }}
+            - name: SAP_AI_CORE_RESOURCE_GROUP
+              value: {{ .Values.bedrockBridge.sap.resourceGroup | quote }}
+            {{- with .Values.bedrockBridge.modelMap }}
+            - name: MODEL_MAP_JSON
+              value: {{ . | toJson | quote }}
+            {{- end }}
+            {{- with .Values.bedrockBridge.singleDeploymentId }}
+            - name: SAP_DEPLOYMENT_ID
+              value: {{ . | quote }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: 8787
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 3
+          resources:
+            {{- toYaml .Values.bedrockBridge.resources | nindent 12 }}
+          volumeMounts:
+            - name: sap-service-key
+              mountPath: /etc/sap-aicore
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: sap-service-key
+          secret:
+            secretName: {{ .Values.bedrockBridge.sap.serviceKeySecret.name | quote }}
+            defaultMode: 0o400
+        - name: tmp
+          emptyDir: {}
+{{- end }}

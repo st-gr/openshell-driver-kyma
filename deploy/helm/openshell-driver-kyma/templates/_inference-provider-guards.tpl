@@ -53,3 +53,20 @@ Tasks 5/6 land. */}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
+
+{{- define "openshell-driver-kyma.bedrockBridgeGuards" -}}
+{{- if .Values.bedrockBridge.enabled -}}
+{{- if not .Values.bedrockBridge.sap.serviceKeySecret.name -}}
+{{- fail "bedrockBridge.enabled=true requires bedrockBridge.sap.serviceKeySecret.name pointing at a Secret you created with the SAP BTP service-key JSON (e.g. `kubectl create secret generic my-sap-aicore-key --from-file=service-key.json=./sk-openshell.json`)." -}}
+{{- end -}}
+{{- if and (not .Values.bedrockBridge.modelMap) (not .Values.bedrockBridge.singleDeploymentId) -}}
+{{- fail "bedrockBridge.enabled=true requires either bedrockBridge.modelMap (object of bedrock-id -> SAP-deployment-id) OR bedrockBridge.singleDeploymentId. At least one path must be set so the bridge knows where to forward inference traffic." -}}
+{{- end -}}
+{{- if and (kindIs "map" .Values.bedrockBridge.modelMap) (eq (len .Values.bedrockBridge.modelMap) 0) (not .Values.bedrockBridge.singleDeploymentId) -}}
+{{- fail "bedrockBridge.enabled=true with an empty modelMap requires bedrockBridge.singleDeploymentId so every inbound model id resolves to that deployment." -}}
+{{- end -}}
+{{- if not .Values.gateway.enabled -}}
+{{- fail "bedrockBridge.enabled=true requires gateway.enabled=true (the bridge is registered as an aws-bedrock provider on the in-pod gateway)." -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}

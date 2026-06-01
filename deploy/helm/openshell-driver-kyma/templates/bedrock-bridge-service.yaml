@@ -1,0 +1,20 @@
+{{- if .Values.bedrockBridge.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "openshell-driver-kyma.bedrockBridgeFullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+    app.kubernetes.io/component: bedrock-bridge
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: {{ include "openshell-driver-kyma.name" . }}-bedrock-bridge
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: http
+      port: 8787
+      targetPort: http
+      protocol: TCP
+{{- end }}

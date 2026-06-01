@@ -84,6 +84,25 @@ Gateway image reference. Same digest-pin convention as the driver image.
 {{- end }}
 
 {{/*
+Bedrock-bridge image reference. Same digest-pin convention as the driver image.
+*/}}
+{{- define "openshell-driver-kyma.bedrockBridgeImage" -}}
+{{- $tag := default .Chart.AppVersion .Values.bedrockBridge.image.tag -}}
+{{- if hasPrefix "sha256:" $tag -}}
+{{- printf "%s@%s" .Values.bedrockBridge.image.repository $tag -}}
+{{- else -}}
+{{- printf "%s:%s" .Values.bedrockBridge.image.repository $tag -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Bedrock-bridge fullname (Deployment + Service share this).
+*/}}
+{{- define "openshell-driver-kyma.bedrockBridgeFullname" -}}
+{{- printf "%s-bedrock-bridge" (include "openshell-driver-kyma.fullname" .) -}}
+{{- end }}
+
+{{/*
 JWT signing-key Secret name. Defaults to <fullname>-jwt-keys.
 Used by both the certgen pre-install hook (to create the Secret) and the
 gateway container (to mount it at /etc/openshell-jwt).
