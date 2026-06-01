@@ -54,6 +54,15 @@ deploy/runner/.env*
 **/*-pat.txt
 **/anthropic-token-*.txt
 
+# SAP BTP service-key files (clientid + clientsecret + tenant URL).
+# Operators drop these next to the repo for local cargo-test use; they
+# must never land in git. Pre-flight `git check-ignore -v sk-<name>.json`
+# before any commit on a branch that touches the bedrock-bridge.
+sk-*.json
+*.sap-key.json
+service-key*.json
+**/sap-aicore-*.json
+
 # Node module noise from scripts/ if anyone runs `npm install` ad-hoc
 scripts/node_modules/
 
