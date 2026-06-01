@@ -1,0 +1,39 @@
+# syntax=docker/dockerfile:1.7
+# Production Dockerfile for openshell-bedrock-bridge.
+#
+# Mirrors deploy/Dockerfile (multi-stage cargo-chef -> distroless/cc,
+# nonroot UID 65532). The only differences are the binary built and the
+# image's final ENTRYPOINT.
+#
+# The bridge speaks plaintext HTTP on port 8787; TLS termination is
+# done elsewhere (Kyma APIRule, Istio mesh, or a sibling proxy). This
+# image runs unprivileged with no shell, no package manager, no extras.
+
+ARG RUST_VERSION=1.95.0
+
+# --- recipe stage ----------------------------------------------------------
+FROM rust:${RUST_VERSION}-slim-bookworm AS chef
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        protobuf-compiler libprotobuf-dev pkg-config build-essential \
+    && rm -rf /var/lib/apt/lists/*
+RUN cargo install --locked cargo-chef
+WORKDIR /app
+
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+# --- builder stage ---------------------------------------------------------
+FROM chef AS builder
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json
+COPY . .
+RUN cargo build --release --bin openshell-bedrock-bridge \
+    && strip target/release/openshell-bedrock-bridge
+
+# --- runtime stage ---------------------------------------------------------
+FROM gcr.io/distroless/cc-debian12:nonroot
+COPY --from=builder /app/target/release/openshell-bedrock-bridge /usr/local/bin/openshell-bedrock-bridge
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/openshell-bedrock-bridge"]
