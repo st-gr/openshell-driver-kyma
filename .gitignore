@@ -81,6 +81,13 @@ my-values-*.yaml
 # usually contains rough wording and tenant-flavored examples.
 claude-code-bedrock-translation-prompt.md
 
+# Local-only scratchpad for drafting vouch requests to upstream
+# repositories. NVIDIA OpenShell's vouch bot enforces "no AI-generated
+# content" on these — the file's notes on that gate aren't appropriate
+# for public git history. The actual vouch text gets posted manually
+# as a GitHub Discussion.
+docs/vouch-request-draft.md
+
 # Node module noise from scripts/ if anyone runs `npm install` ad-hoc
 scripts/node_modules/
 
