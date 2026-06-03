@@ -1,6 +1,16 @@
 ## Summary
 
-Adds `aws-bedrock` as a recognized inference protocol in the supervisor's L7 router and the providers catalog, so operators can register a Bedrock-shaped upstream as `--type aws-bedrock` and route Claude Code Bedrock-mode traffic (`POST /model/{id}/invoke[-with-response-stream]`) through `inference.local` the same way OpenAI and Anthropic upstreams work today. Without this, sandboxes hit `403 "connection not allowed by policy"` because no L7 pattern matches Bedrock URLs.
+Adds `aws-bedrock` as a recognized inference protocol in the supervisor's L7 router and the providers catalog, so operators can register a Bedrock-shaped upstream as `--type aws-bedrock` and route Claude Code Bedrock-mode traffic (`POST /model/{id}/invoke[-with-response-stream]`) through `inference.local` the same way OpenAI and Anthropic upstreams work today. Without this, sandboxes hit `403 "connection not allowed by policy"` because no L7 pattern matches Bedrock URLs. The canonical no-SigV4 use case is **SAP AI Core deployed Bedrock models** (Anthropic models behind a Bedrock-shape API with XSUAA bearer auth instead of SigV4); operators wanting **real AWS Bedrock** additionally need #1630's proxy-side SigV4 signing.
+
+## Use cases
+
+| Upstream | What you need | Why |
+|---|---|---|
+| **SAP AI Core deployed Bedrock** (XSUAA bearer; no SigV4) | This PR alone | The bridge ignores inbound auth and mints XSUAA outbound; the supervisor's L7 router only needs to recognize Bedrock URL patterns, which this PR adds. |
+| **In-cluster translating bridge** (LiteLLM in Bedrock-emulation mode, custom Bedrock-compatible proxy that authenticates separately) | This PR alone | Same shape as SAP — operator's bridge handles upstream auth; the proxy just needs URL-pattern recognition. |
+| **Real AWS Bedrock** (SigV4 enforced at AWS) | This PR **plus** #1630 | This PR adds the URL-pattern recognition; #1630 adds proxy-side SigV4 signing via the `credential_signing: sigv4` policy field. The two are complementary; this PR is the prerequisite that makes #1630's signing applicable to Bedrock paths. |
+
+In all three cases, `provider create --type aws-bedrock` requires `--no-verify` until a Bedrock-aware arm is added to `validation_probe()` in `crates/openshell-router/src/backend.rs`. That extension is left for a follow-up PR to keep this one focused on the URL-pattern + provider-registration changes.
 
 ## Related Issue
 
@@ -53,7 +63,7 @@ The 7 new pattern-matcher tests are in `crates/openshell-sandbox/src/l7/inferenc
 
 ## Operator context
 
-This PR enables the `st-gr/openshell-driver-kyma` Helm chart to register an SAP AI Core ↔ Bedrock translation bridge as a first-class `aws-bedrock` provider, instead of the current workaround that registers it as `--type anthropic` with `/v1/messages` on the inside (which forces a server-side Anthropic→Bedrock body translator and a denylist for Anthropic-API-only fields the SAP gateway rejects). With this PR, the bridge becomes a path-translating + auth-substituting pass-through. Operators using direct AWS Bedrock or a different Bedrock-compatible proxy benefit from the same plumbing.
+Concrete impact: the [`st-gr/openshell-driver-kyma`](https://github.com/st-gr/openshell-driver-kyma) Helm chart currently registers its SAP AI Core ↔ Bedrock translation bridge as `--type anthropic` with `/v1/messages` on the inside, because `aws-bedrock` isn't a recognized provider type. The chart therefore carries a server-side Anthropic→Bedrock body translator and a denylist for Anthropic-API-only fields the SAP gateway rejects. After this PR, the bridge becomes a path-translating + auth-substituting pass-through with no body work — the chart's translator code goes away.
 
 ## Checklist
 
