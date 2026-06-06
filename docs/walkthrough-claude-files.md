@@ -154,8 +154,7 @@ openshell sandbox create \
   --from ghcr.io/st-gr/sandbox-claude:latest \
   --provider claude-code \
   --auto-providers \
-  --policy ./claude-policy.yaml \
-  -- sleep infinity
+  --policy ./claude-policy.yaml
 
 # Wait for the sandbox to become Ready (typically ~10–15 s on Kyma).
 # `openshell sandbox create` returns as soon as the CR is accepted, well
@@ -178,11 +177,14 @@ What's happening:
 - `--policy ./claude-policy.yaml` — locks the sandbox's network egress
   to `inference.local:443` only. The agent process cannot dial
   api.anthropic.com or anywhere else.
-- `-- sleep infinity` — sets the sandbox container's PID 1 to a
-  long-running no-op. Without this the container has no main process
-  and exits immediately, so subsequent `exec`/`connect`/`upload` have
-  nothing to attach to. (Not a wait — the wait happens after, against
-  the cluster's Ready condition.)
+- **No trailing `-- <COMMAND>` clause needed.** The pod's PID 1 is the
+  OpenShell supervisor binary (`/opt/openshell/bin/openshell-sandbox`),
+  set by the base image — it runs unconditionally and is what keeps
+  the pod alive. The `--` clause sets the *initial command*, which only
+  matters in combination with `--no-keep` (which auto-deletes the
+  sandbox when that command exits). Earlier docs in this repo and
+  upstream told you to add `-- sleep infinity`; that's a no-op without
+  `--no-keep` and has been removed here.
 
 You'll see the harmless CLI message
 `Error: × No such file or directory (os error 2)` after the sandbox is
