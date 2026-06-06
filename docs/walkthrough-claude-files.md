@@ -123,6 +123,17 @@ subsequent `openshell` commands don't need `--gateway-endpoint`.
 
 ## 6. Create the Claude-equipped sandbox
 
+The policy below is a minimal template that lets the agent reach
+`inference.local:443` (where the supervisor's L7 router intercepts) and
+nothing else. For the field-by-field schema and how to iterate on it,
+see the upstream docs:
+
+- [Customize Sandbox Policies](https://docs.nvidia.com/openshell/sandboxes/policies)
+  — what each section does, hot-reload semantics, debugging denied
+  requests.
+- [Policy Schema Reference](https://docs.nvidia.com/openshell/reference/policy-schema)
+  — every field, every accepted value.
+
 ```bash
 # A format-valid placeholder is enough. The supervisor's L7 router
 # strips this and injects the real key from the gateway bundle.
