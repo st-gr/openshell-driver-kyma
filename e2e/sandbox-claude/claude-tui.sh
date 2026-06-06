@@ -23,7 +23,11 @@
 #    wrapper functional under unusual configurations.
 set -eu
 
-export HOME="${HOME:-/tmp}"
+# The supervisor injects HOME=/home/sandbox but filesystem_policy makes
+# that read-only, so claude can't write its onboarding state. Force /tmp
+# unconditionally — ${HOME:-/tmp} only fires if HOME is unset, which it
+# never is under the supervisor.
+export HOME=/tmp
 mkdir -p "$HOME"
 
 unset ANTHROPIC_API_KEY
