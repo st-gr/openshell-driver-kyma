@@ -157,7 +157,7 @@ gateway:
   enabled: false
   image:
     repository: ghcr.io/st-gr/openshell-gateway
-    tag: latest
+    tag: "sha256:3c32ce89bd61cf2ca443f850c564d4e0dbc5beab638b227f91d8654f822bc07d"
     pullPolicy: IfNotPresent
   grpcPort: 8080
   metricsPort: 9091
