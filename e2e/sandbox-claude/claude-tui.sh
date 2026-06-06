@@ -1,6 +1,10 @@
 #!/bin/sh
-# Convenience wrapper: pre-onboarded TUI claude in openshell-driver-kyma
-# sandboxes.
+# Convenience wrapper installed as /usr/local/bin/claude in
+# openshell-driver-kyma sandboxes (with /usr/local/bin/claude-tui kept
+# as a symlink for backcompat). On default Ubuntu PATH, /usr/local/bin
+# precedes /usr/bin, so typing `claude` resolves to this wrapper; the
+# final exec dials /usr/bin/claude (the real npm-installed binary) by
+# full path to avoid recursion.
 #
 # The OpenShell sandbox supervisor's L7 router strips inbound client auth
 # at the inference.local boundary and substitutes the operator's bundle
