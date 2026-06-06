@@ -156,6 +156,15 @@ openshell sandbox create \
   --auto-providers \
   --policy ./claude-policy.yaml \
   -- sleep infinity
+
+# Wait for the sandbox to become Ready (typically ~10–15 s on Kyma).
+# `openshell sandbox create` returns as soon as the CR is accepted, well
+# before the pod reaches Running, so a bare follow-up `list` would just
+# show Pending.
+until openshell sandbox list 2>/dev/null | grep -q "claude-files.*Ready"; do
+  sleep 1
+done
+openshell sandbox list
 ```
 
 What's happening:
@@ -169,13 +178,16 @@ What's happening:
 - `--policy ./claude-policy.yaml` — locks the sandbox's network egress
   to `inference.local:443` only. The agent process cannot dial
   api.anthropic.com or anywhere else.
-- `-- sleep infinity` — keeps the sandbox alive so you can `exec`
-  into it. Without this it'd run claude as the main command and exit.
+- `-- sleep infinity` — sets the sandbox container's PID 1 to a
+  long-running no-op. Without this the container has no main process
+  and exits immediately, so subsequent `exec`/`connect`/`upload` have
+  nothing to attach to. (Not a wait — the wait happens after, against
+  the cluster's Ready condition.)
 
 You'll see the harmless CLI message
 `Error: × No such file or directory (os error 2)` after the sandbox is
 created — that's the CLI returning before the sandbox reaches Ready.
-Check via `kubectl -n "$NS" get sandbox claude-files`.
+The `until` loop above is what blocks until the supervisor is up.
 
 ## 7. Upload a file
 
