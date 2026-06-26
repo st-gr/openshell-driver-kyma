@@ -156,6 +156,8 @@ spec:
             - {{ .Values.gateway.healthPort | quote }}
             - --metrics-port
             - {{ .Values.gateway.metricsPort | quote }}
+            - --drivers
+            - kyma
             - --compute-driver-socket
             - {{ .Values.driver.socket | quote }}
             {{- if .Values.gateway.tls.enabled }}
