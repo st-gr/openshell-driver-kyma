@@ -156,8 +156,12 @@ podLabels: {}
 gateway:
   enabled: false
   image:
-    repository: ghcr.io/st-gr/openshell-gateway
-    tag: "sha256:3c32ce89bd61cf2ca443f850c564d4e0dbc5beab638b227f91d8654f822bc07d"
+    # Pinned to upstream `0.0.73` (commit 474d2d4a). Includes the
+    # external-compute-driver work (NVIDIA/OpenShell#1703) and the
+    # AWS Bedrock provider plumbing (NVIDIA/OpenShell#1704). Bump via
+    # https://github.com/NVIDIA/OpenShell/pkgs/container/openshell%2Fgateway
+    repository: ghcr.io/nvidia/openshell/gateway
+    tag: "sha256:523609f8a2799304cda7e485138c125c9765426c04981033812717a659d0c46f"
     pullPolicy: IfNotPresent
   grpcPort: 8080
   metricsPort: 9091

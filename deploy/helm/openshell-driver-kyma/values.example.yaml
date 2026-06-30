@@ -82,7 +82,7 @@ imagePullSecrets: []
 gateway:
   enabled: true
   image:
-    repository: ghcr.io/st-gr/openshell-gateway
+    repository: ghcr.io/nvidia/openshell/gateway
     tag: latest          # PIN BY DIGEST for production
     pullPolicy: IfNotPresent
 
