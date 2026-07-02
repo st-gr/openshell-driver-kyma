@@ -133,7 +133,7 @@ Notes on why this is short:
 
 ```bash
 helm install ods oci://ghcr.io/st-gr/charts/openshell-driver-kyma \
-  --version 0.1.1 \
+  --version 0.1.2 \
   --namespace "$NS" \
   -f my-values.yaml \
   --wait --timeout=300s
@@ -156,17 +156,28 @@ The last line proves the gateway is talking to the kyma driver over
 the shared UDS. If it's missing, the driver container failed —
 check its logs.
 
+Do not install chart `0.1.1` — its default `gateway.image` points at a
+stale pre-release fork build (`ghcr.io/st-gr/openshell-gateway:latest`)
+that silently breaks sandbox phase reporting (`openshell sandbox
+create` never sees the sandbox reach `Ready` and times out after
+300 s). Chart `0.1.2`+ pins the upstream NVIDIA gateway by digest.
+
 A post-install Job also runs once and registers the Anthropic
-provider + inference route on the gateway. Verify it succeeded:
+provider + inference route on the gateway. On success helm deletes
+the Job (hook delete-policy), so its absence is the normal outcome —
+confirm via events, or via the CLI in step 5:
 
 ```bash
-kubectl -n "$NS" logs job/ods-openshell-driver-kyma-inference-provider-hook
-# Look for: "provider created" / "inference set" (and no error lines)
+kubectl -n "$NS" get events --sort-by=lastTimestamp | grep inference-provider-hook
+# Look for: "Completed   job/ods-openshell-driver-kyma-inference-provider-hook"
 ```
 
-If it timed out, the most common cause is a wrong `inferenceProvider.baseUrl`
-that the gateway can't validate against — see the [troubleshooting
-appendix in `getting-started.md`](getting-started.md#troubleshooting).
+If the install instead timed out waiting on the hook, the most common
+cause is a wrong `inferenceProvider.baseUrl` that the gateway can't
+validate against — see the [troubleshooting appendix in
+`getting-started.md`](getting-started.md#troubleshooting). The failed
+Job sticks around in that case, so `kubectl -n "$NS" logs
+job/ods-openshell-driver-kyma-inference-provider-hook` shows why.
 
 ## 4. Install the openshell CLI
 
@@ -257,27 +268,36 @@ done
 openshell sandbox list
 ```
 
-Now exec Claude. `openshell sandbox exec` does not inherit the pod-spec
-env, so set what Claude needs inline:
+Now exec Claude. Two constraints shape the command:
+
+- `openshell sandbox exec` does not inherit the pod-spec env, so set
+  what Claude needs inline.
+- The gateway rejects multi-line command arguments (`command argument
+  contains newline or carriage return characters`), so the whole
+  `sh -c` payload must stay on **one line** — chain with `;`.
+
+The interactive path is the verified one — open Claude's TUI inside
+the sandbox and ask it something:
 
 ```bash
-openshell sandbox exec --name hello -- sh -c '
-  export HOME=/sandbox \
-         ANTHROPIC_BASE_URL=https://inference.local \
-         ANTHROPIC_API_KEY=sk-ant-placeholder000000000000000000000000000000000000000000000000 \
-         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
-  claude -p \
-    --allow-dangerously-skip-permissions \
-    --model claude-opus-4-7 \
-    "Reply with exactly the string OK and nothing else."'
+openshell sandbox exec --name hello -- sh -c 'export HOME=/sandbox ANTHROPIC_BASE_URL=https://inference.local ANTHROPIC_API_KEY=sk-ant-placeholder000000000000000000000000000000000000000000000000 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1; claude --model claude-opus-4-7'
 ```
 
-Expected output: `OK`.
+Type a prompt (e.g. "reply OK"), watch the answer stream back through
+`inference.local`, then exit with `/quit` (or Ctrl+C twice).
 
-If you see `authentication_error`, your Secret's `api-key` value is
-wrong — recreate it with the correct key and roll the gateway pod so it
-re-reads the DB. If you see `model_not_found`, `--model` doesn't match
-`inferenceProvider.modelId` in your values overlay.
+For scripted/non-interactive use, the same command with `claude -p
+"<prompt>"` *should* print the reply and exit — but on current
+versions we have seen `-p` hang inside the sandbox before making any
+API request (the supervisor log shows no inference traffic at all, so
+it is a claude-code startup issue in print mode, not a routing or
+credential problem). If `-p` hangs for you too, use the TUI above to
+confirm the pipeline, and track the print-mode issue separately.
+
+If Claude answers with `authentication_error`, your Secret's `api-key`
+value is wrong — recreate it with the correct key and roll the gateway
+pod so it re-reads the DB. If you see `model_not_found`, `--model`
+doesn't match `inferenceProvider.modelId` in your values overlay.
 
 For the fuller flow (uploading a file, having Claude produce a new
 file, downloading it) follow
@@ -317,12 +337,23 @@ cluster-wide — remove it separately with a matching
 
 ## Verified against
 
+Run end-to-end on 2026-07-02:
+
 - Kyma / Gardener (SAP BTP), 4x `cpu-worker` amd64 nodes, Kubernetes
   v1.34.
-- Chart `openshell-driver-kyma` `0.1.1`.
+- Chart `openshell-driver-kyma` `0.1.2` (do **not** use `0.1.1` — see
+  the note in step 3).
 - Gateway image `ghcr.io/nvidia/openshell/gateway@sha256:523609f8…`
-  (upstream NVIDIA `0.0.73`, containing NVIDIA/OpenShell#1703 and #1704).
+  (upstream NVIDIA `0.0.73`, containing NVIDIA/OpenShell#1703 and #1704),
+  pulled via the chart's default digest pin.
 - `openshell` CLI `v0.0.75`.
+
+Verified: install, gateway↔driver named-endpoint handshake
+(`configured_driver=kyma advertised_driver=kyma in_tree=false`),
+provider + inference route registration, sandbox create reaching
+`Ready`, and inference through `inference.local` from the sandbox.
+Known open item: `claude -p` (print mode) can hang inside the sandbox
+before making any request — the interactive TUI path works; see step 6.
 
 If your outcome diverges from what's above, the source of truth is
 `scripts/e2e-cli.sh` — every push through CI runs the same shape
