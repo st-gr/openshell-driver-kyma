@@ -184,7 +184,7 @@ SCC are entirely independent — they only need unique local ports.
 6. Point the OpenShell CLI at `http://localhost:8080`:
 
    ```bash
-   openshell gateway add http://localhost:8080 --local
+   openshell gateway add --local http://localhost:8080
    openshell sandbox create -- claude
    ```
 

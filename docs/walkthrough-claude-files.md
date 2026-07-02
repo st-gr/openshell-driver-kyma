@@ -115,7 +115,7 @@ out on `inference-provider-hook`, see
 
 ```bash
 kubectl -n "$NS" port-forward svc/ods-openshell-driver-kyma 8080:8080 &
-openshell gateway add http://localhost:8080 --local
+openshell gateway add --local http://localhost:8080
 ```
 
 `gateway add --local` registers this gateway as the active one so
@@ -472,7 +472,7 @@ kubectl -n "$NS" exec cli -- sh -c '
   apk add --no-cache curl rsync openssh-client &&
   curl -fsSL https://github.com/NVIDIA/OpenShell/releases/download/v0.0.50/openshell-x86_64-unknown-linux-musl.tar.gz \
     | tar -xz -C /usr/local/bin &&
-  /usr/local/bin/openshell gateway add http://ods-openshell-driver-kyma:8080 --local
+  /usr/local/bin/openshell gateway add --local http://ods-openshell-driver-kyma:8080
 '
 
 # Then everywhere the walkthrough says `openshell ...`, prefix with

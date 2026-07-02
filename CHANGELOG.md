@@ -6,8 +6,17 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.2] — 2026-07-02
+
 ### Added
 
+- **End-to-end tutorial for direct Anthropic-shaped endpoints**
+  ([`docs/tutorial-anthropic-direct.md`](docs/tutorial-anthropic-direct.md)).
+  A linear ~15 minute walkthrough for a first-time reader with a Kyma
+  cluster, `kubectl`, and any Anthropic-compatible upstream URL + API
+  key — no SAP AI Core, no in-cluster LLM gateway, no OIDC. Uses the
+  upstream NVIDIA gateway image, cross-links to the other docs for the
+  variants it deliberately doesn't cover.
 - **`openshell-bedrock-bridge` crate + image + chart wiring.** A new
   in-cluster HTTP translation proxy that lets Claude Code reach
   Anthropic models deployed via SAP AI Core's Bedrock schema (XSUAA
@@ -110,6 +119,37 @@ exactly the way the prompt describes. Once that lands, the bridge
 itself could shrink to a path-translating + auth-substituting
 pass-through (no body translation, no field denylist). See
 `docs/upstream-aws-bedrock-pr-draft.md` for the planned PR.
+
+### Fixed
+
+- **`deployment.yaml`: pass `--drivers kyma` alongside
+  `--compute-driver-socket`** ([`fa2ee6e`](https://github.com/st-gr/openshell-driver-kyma/commit/fa2ee6e)).
+  Required by the named-remote-endpoint refactor upstream shipped as
+  NVIDIA/OpenShell#1703. Reserved built-in driver names
+  (`kubernetes`, `docker`, `podman`, `vm`) reject sockets; non-reserved
+  names like `kyma` pair with the socket. Without this addition the
+  gateway sidecar's driver name defaults to the fallback `external`
+  (still functional but produces a misleading log line and blocks the
+  named-endpoint capabilities check).
+- **`openshell gateway add` command syntax across tutorials.**
+  Upstream CLI `v0.0.75` requires `--local` before the endpoint URL
+  (`openshell gateway add --local http://…` — was
+  `openshell gateway add http://… --local`). Updated in
+  `docs/tutorial-anthropic-direct.md`, `docs/walkthrough-claude-files.md`,
+  and `docs/cloud-connector-setup.md`.
+
+### Changed
+
+- **Gateway image pinned to upstream NVIDIA `0.0.73`**
+  ([`9ee21b8`](https://github.com/st-gr/openshell-driver-kyma/commit/9ee21b8)).
+  Retires the local-fork build path
+  (`ghcr.io/st-gr/openshell-gateway`) that we ran while
+  NVIDIA/OpenShell#1703 (external compute driver), NVIDIA/OpenShell#1704
+  (AWS Bedrock provider), and the cross-PR `shutdown_tx` regression
+  NVIDIA/OpenShell#2026 (fixed upstream in NVIDIA/OpenShell#1985) were
+  in flight. `values.yaml` now points at
+  `ghcr.io/nvidia/openshell/gateway@sha256:523609f8…`; `values.example.yaml`
+  references the upstream repo.
 
 ## [0.1.1] — 2026-05-31
 

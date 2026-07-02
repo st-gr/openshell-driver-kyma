@@ -195,7 +195,7 @@ it with the CLI as the local default:
 
 ```bash
 kubectl -n "$NS" port-forward svc/ods-openshell-driver-kyma 8080:8080 &
-openshell gateway add http://localhost:8080 --local
+openshell gateway add --local http://localhost:8080
 openshell status
 # Server Status: OK
 ```
