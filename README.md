@@ -27,10 +27,18 @@ for the implementation plan.
 
 ## Quick start
 
-Follow [`docs/getting-started.md`](docs/getting-started.md) — a
-linear walkthrough from "I have a Kyma cluster" to a running sandbox
-in ~15 minutes. It mirrors what `make e2e-cli` does in CI, so it's
-guaranteed to track the implementation.
+If you have a Kyma cluster, `kubectl`, and an Anthropic-shaped LLM
+endpoint + API key, follow
+[`docs/tutorial-anthropic-direct.md`](docs/tutorial-anthropic-direct.md) —
+a linear ~15 minute end-to-end from an empty cluster to Claude running
+inside an isolated sandbox, using the upstream NVIDIA gateway image.
+
+For the more comprehensive walkthrough (including uploading files,
+running inference, downloading results, plus SAP AI Core and
+private-in-cluster-upstream variants) start at
+[`docs/getting-started.md`](docs/getting-started.md). It mirrors what
+`make e2e-cli` does in CI, so it's guaranteed to track the
+implementation.
 
 For production deploys (OIDC user auth, public Kyma APIRule, image
 digests pinned), see [`docs/production-deployment.md`](docs/production-deployment.md).
