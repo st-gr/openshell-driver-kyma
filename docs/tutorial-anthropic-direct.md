@@ -117,11 +117,27 @@ inferenceProvider:
 
 Notes on why this is short:
 
-- **`gatewayUpstreamEgress` is not enabled.** That block is for
-  reaching a private LLM gateway in another namespace of your cluster.
-  For `https://api.anthropic.com` (or any public endpoint), the chart's
-  default sandbox NetworkPolicy already allows `0.0.0.0/0:443` (with
-  RFC1918 excluded), which covers the outbound hop.
+- **`gatewayUpstreamEgress` is not enabled — this is only safe for a
+  public `:443` endpoint.** The chart's default sandbox NetworkPolicy
+  allows egress to DNS, the in-pod gateway, and `0.0.0.0/0:443` **with
+  RFC1918 ranges excluded** (`10/8`, `172.16/12`, `192.168/16`). A
+  public `https://api.anthropic.com` is reached over `:443` on a public
+  IP, so it is covered. **But if your endpoint is inside the cluster**
+  (an RFC1918 ClusterIP, and/or a non-443 port like `:8080`), the
+  supervisor cannot reach it and every inference call fails with
+  `503 inference service unavailable` — while the sandbox itself looks
+  perfectly healthy. In that case enable the egress carve-out:
+
+  ```yaml
+  gatewayUpstreamEgress:
+    enabled: true
+    namespace: your-llm-ns   # namespace hosting the upstream
+    port: 8080               # the upstream's port
+  ```
+
+  This is the single most common reason a correctly-installed setup
+  produces no inference. See the verification `curl`/`node` probe in
+  step 6 to distinguish it from other failures.
 - **No `gatewayApirule` / OIDC block.** Those are for exposing the
   gateway outside the cluster with browser-based auth. This tutorial
   uses `kubectl port-forward` to reach the gateway; auth stays
@@ -268,36 +284,74 @@ done
 openshell sandbox list
 ```
 
-Now exec Claude. Two constraints shape the command:
+### 6a. Confirm the inference path first
 
-- `openshell sandbox exec` does not inherit the pod-spec env, so set
-  what Claude needs inline.
-- The gateway rejects multi-line command arguments (`command argument
-  contains newline or carriage return characters`), so the whole
-  `sh -c` payload must stay on **one line** — chain with `;`.
-
-The interactive path is the verified one — open Claude's TUI inside
-the sandbox and ask it something:
+Before involving Claude Code, prove the gateway actually serves
+inference — this one probe separates "the pipeline works" from "some
+claude-code quirk." The sandbox image ships `node` (no `curl`), so use
+it to POST directly to `inference.local`. Keep it on one line — the
+exec endpoint rejects multi-line command arguments:
 
 ```bash
-openshell sandbox exec --name hello -- sh -c 'export HOME=/sandbox ANTHROPIC_BASE_URL=https://inference.local ANTHROPIC_API_KEY=sk-ant-placeholder000000000000000000000000000000000000000000000000 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1; claude --model claude-opus-4-7'
+openshell sandbox exec --name hello -- node -e 'const https=require("https");const b=JSON.stringify({model:"claude-opus-4-7",max_tokens:16,messages:[{role:"user",content:"Reply OK"}]});const r=https.request("https://inference.local/v1/messages",{method:"POST",rejectUnauthorized:false,headers:{"content-type":"application/json","anthropic-version":"2023-06-01","x-api-key":"sk-ant-placeholder000000000000000000000000000000000000000000000000"}},s=>{let d="";s.on("data",c=>d+=c);s.on("end",()=>{console.log("HTTP",s.statusCode);console.log(d.slice(0,300))})});r.on("error",e=>console.log("ERR",e.message));r.write(b);r.end();'
 ```
 
-Type a prompt (e.g. "reply OK"), watch the answer stream back through
-`inference.local`, then exit with `/quit` (or Ctrl+C twice).
+- **`HTTP 200` with `{"content":[{"text":"OK",…}]}`** — the whole path
+  works (supervisor strips the placeholder `x-api-key`, injects the
+  real one, forwards to your upstream). Proceed to 6b.
+- **`HTTP 503 {"error":"inference service unavailable"}`** — the
+  supervisor cannot reach your configured upstream. This is almost
+  always the `gatewayUpstreamEgress` gap from step 2: an in-cluster or
+  non-`:443` endpoint blocked by the sandbox NetworkPolicy. Enable the
+  egress carve-out and re-test.
+- **`ERR` / TLS errors** — `inference.local` isn't resolving or the
+  sandbox policy denies it; check the sandbox `--policy` allows
+  `inference.local:443`.
 
-For scripted/non-interactive use, the same command with `claude -p
-"<prompt>"` *should* print the reply and exit — but on current
-versions we have seen `-p` hang inside the sandbox before making any
-API request (the supervisor log shows no inference traffic at all, so
-it is a claude-code startup issue in print mode, not a routing or
-credential problem). If `-p` hangs for you too, use the TUI above to
-confirm the pipeline, and track the print-mode issue separately.
+The `x-api-key` here is a format-valid placeholder; the L7 router
+replaces it. `rejectUnauthorized:false` skips verifying the supervisor's
+per-SNI cert, which is fine for this probe.
+
+### 6b. Run Claude Code
+
+Once 6a returns `200`, Claude Code works both interactively and in
+print mode. **Call the wrapper `claude`** (installed at
+`/usr/local/bin/claude`) — it sets `HOME`, seeds onboarding state,
+points `ANTHROPIC_BASE_URL` at `inference.local`, and unsets the
+supervisor's placeholder `ANTHROPIC_API_KEY` so Claude uses the managed
+key and never reaches for `api.anthropic.com`. **Do not re-export
+`ANTHROPIC_API_KEY` yourself** — that forces claude-code into an auth
+pre-flight against `api.anthropic.com`, which the sandbox policy blocks.
+
+Non-interactive (print mode):
+
+```bash
+openshell sandbox exec --name hello -- claude -p --model claude-opus-4-7 "Reply with exactly OK"
+```
+
+Expected output: `OK`.
+
+Interactive TUI (allocates a PTY automatically when your terminal is
+interactive):
+
+```bash
+openshell sandbox exec --name hello -- claude --model claude-opus-4-7
+```
+
+Type a prompt, watch it stream back through `inference.local`, exit
+with `/quit`.
 
 If Claude answers with `authentication_error`, your Secret's `api-key`
 value is wrong — recreate it with the correct key and roll the gateway
 pod so it re-reads the DB. If you see `model_not_found`, `--model`
 doesn't match `inferenceProvider.modelId` in your values overlay.
+
+> **Why `claude -p` might appear to hang.** In print mode claude-code
+> buffers all output until completion, so if the underlying inference
+> call fails (e.g. the 503 above), you see silence rather than an
+> error. If `claude -p` hangs, run the 6a probe — a `503` there is the
+> real cause, not claude-code. `--output-format stream-json --verbose`
+> also surfaces the buffered error.
 
 For the fuller flow (uploading a file, having Claude produce a new
 file, downloading it) follow
@@ -348,12 +402,19 @@ Run end-to-end on 2026-07-02:
   pulled via the chart's default digest pin.
 - `openshell` CLI `v0.0.75`.
 
-Verified: install, gateway↔driver named-endpoint handshake
+Verified end-to-end: install, gateway↔driver named-endpoint handshake
 (`configured_driver=kyma advertised_driver=kyma in_tree=false`),
 provider + inference route registration, sandbox create reaching
-`Ready`, and inference through `inference.local` from the sandbox.
-Known open item: `claude -p` (print mode) can hang inside the sandbox
-before making any request — the interactive TUI path works; see step 6.
+`Ready`, a direct `node` POST to `inference.local` returning
+`HTTP 200` with a Claude reply, and `claude -p` returning `OK` through
+the wrapper.
+
+Verified against an **in-cluster** upstream (an Anthropic-shaped
+gateway on an RFC1918 ClusterIP, port 8080), which required
+`gatewayUpstreamEgress` — without it, inference returned
+`503 inference service unavailable` while the sandbox looked healthy.
+For a genuinely public `https://api.anthropic.com:443` endpoint the
+default policy suffices and no egress block is needed.
 
 If your outcome diverges from what's above, the source of truth is
 `scripts/e2e-cli.sh` — every push through CI runs the same shape
