@@ -62,6 +62,35 @@ flowchart TB
     style PATH fill:#cfe2ff,stroke:#0a58ca
 ```
 
+## What you're building
+
+[OpenShell](https://github.com/NVIDIA/OpenShell) is NVIDIA's
+open-source system for running AI agents inside locked-down sandboxes:
+the platform holds the credentials and enforces network policy; the
+agent inside never sees either. Four components appear throughout this
+tutorial:
+
+- **gateway** — the control plane. Serves the `openshell` CLI's gRPC
+  API, stores providers/routes/policies, and hands each sandbox its
+  config. It never forwards inference traffic.
+- **driver** (`openshell-driver-kyma`, this repo) — translates the
+  gateway's sandbox-lifecycle calls into Kyma-compatible `Sandbox`
+  custom resources; the two talk over a Unix socket inside a shared
+  pod.
+- **supervisor** — PID 1 inside every sandbox pod. Sets up the
+  isolation (Landlock, seccomp, a network namespace), terminates
+  `inference.local` TLS, strips whatever credentials the agent sends,
+  and injects the real API key it fetches from the gateway.
+- **agent** — your workload (here: Claude Code). It sees exactly one
+  inference endpoint, `https://inference.local`, and a placeholder
+  key. It cannot read the real key or reach the upstream directly.
+
+Deeper background: NVIDIA's
+[How it works](https://docs.nvidia.com/openshell/about/how-it-works)
+page and the
+["What's running, what's isolated"](walkthrough-claude-files.md#whats-running-whats-isolated)
+section of the companion walkthrough.
+
 The upstream gateway image comes from NVIDIA — nothing here needs a
 fork build.
 
@@ -100,12 +129,15 @@ kubectl -n agent-sandbox-system rollout status \
   deployment/agent-sandbox-controller --timeout=120s
 ```
 
-### 1b. Create the sandbox namespace with `privileged` PSA
+### 1b. Create the sandbox namespace with a privileged security level
 
-The OpenShell supervisor needs `privileged` Pod Security Admission
-because it configures Landlock + seccomp + a network namespace for each
-agent. Kyma enforces PSA by default; without this label the pods won't
-start.
+Kubernetes'
+[Pod Security Admission](https://kubernetes.io/docs/concepts/security/pod-security-admission/)
+(PSA) restricts what pods in a namespace may do, via labels on the
+namespace. The OpenShell supervisor needs the most permissive level,
+`privileged`, because it configures Landlock + seccomp + a network
+namespace for each agent. Kyma enforces PSA by default; without these
+labels the sandbox pods won't start.
 
 ```bash
 NS=openshell-system
@@ -287,11 +319,15 @@ to end.
 ## 6. Run Claude in a sandbox
 
 The sandbox image `ghcr.io/st-gr/sandbox-claude:latest` bundles Node 22
-and the `claude` CLI. Its default policy locks agent egress to
+and the `claude` CLI. The policy below locks agent egress to
 `inference.local:443` only, so the agent's outbound goes exclusively
 through the supervisor's L7 router — the router strips the agent's
 placeholder credentials and injects the real ones from the gateway
-bundle.
+bundle. For what each policy section means and how to iterate on one,
+see NVIDIA's
+[Customize Sandbox Policies](https://docs.nvidia.com/openshell/sandboxes/policies)
+and the
+[Policy Schema Reference](https://docs.nvidia.com/openshell/reference/policy-schema).
 
 Create the sandbox:
 

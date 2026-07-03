@@ -79,6 +79,10 @@ gRPC-Web, a Go/Python/JS gRPC library), see
 - An Anthropic API key (or whatever credential your upstream LLM
   gateway accepts).
 - An `openshell` CLI on your host or in WSL (see the note above).
+- New to OpenShell? The gateway / driver / supervisor / agent roles
+  and the credential-containment model are summarized in the
+  ["What you're building"](tutorial-anthropic-direct.md#what-youre-building)
+  primer of the companion tutorial.
 
 ## 2. Bootstrap the cluster (one-time)
 
@@ -87,8 +91,9 @@ gRPC-Web, a Go/Python/JS gRPC library), see
 kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.4.6/manifest.yaml
 kubectl -n agent-sandbox-system rollout status deployment/agent-sandbox-controller --timeout=120s
 
-# Sandbox namespace + PSA labels (required: the supervisor needs
-# privileged for Landlock + netns + capabilities).
+# Sandbox namespace + Pod Security Admission (PSA) labels. PSA is
+# Kubernetes' namespace-level pod security enforcement; the supervisor
+# needs the `privileged` level for Landlock + netns + capabilities.
 NS=openshell-system
 kubectl create namespace "$NS"
 kubectl label namespace "$NS" \

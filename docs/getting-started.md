@@ -33,10 +33,11 @@ cluster on every push.
 
 ## 2. Bootstrap the sandbox namespace
 
-The OpenShell supervisor needs `privileged` PSA on its namespace because
-it sets up Landlock + seccomp + a network namespace for each agent. The
-chart's pre-install hook fails fast with an actionable error if the label
-is missing.
+The OpenShell supervisor needs the `privileged`
+[Pod Security Admission](https://kubernetes.io/docs/concepts/security/pod-security-admission/)
+(PSA) level on its namespace because it sets up Landlock + seccomp + a
+network namespace for each agent. The chart's pre-install hook fails
+fast with an actionable error if the label is missing.
 
 ```bash
 NS=openshell-system
