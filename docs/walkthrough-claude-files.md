@@ -38,10 +38,6 @@ sequenceDiagram
     Op->>GW: sandbox delete + helm uninstall
 ```
 
-(For a poster-quality rendering of this diagram via an
-image-generation LLM, see
-[`diagram-imagegen-prompts.md`](diagram-imagegen-prompts.md).)
-
 All steps verified end-to-end against a real Kyma cluster on
 2026-05-31. Total time: ~10 minutes once the prerequisites are in
 place.

@@ -62,10 +62,6 @@ flowchart TB
     style PATH fill:#cfe2ff,stroke:#0a58ca
 ```
 
-(For a poster-quality rendering of this diagram via an
-image-generation LLM, see
-[`diagram-imagegen-prompts.md`](diagram-imagegen-prompts.md).)
-
 The upstream gateway image comes from NVIDIA — nothing here needs a
 fork build.
 
