@@ -4,7 +4,7 @@ This is the canonical hands-on guide. It takes a clean Kyma cluster
 through:
 
 1. Cluster prerequisites + namespace bootstrap.
-2. Installing the chart (`v0.1.1`) from OCI.
+2. Installing the chart (`v0.1.2`) from OCI.
 3. Installing the `openshell` CLI on your host.
 4. Creating a Claude-equipped sandbox.
 5. Uploading a file to the sandbox.
@@ -127,7 +127,7 @@ curl -fsSL https://raw.githubusercontent.com/st-gr/openshell-driver-kyma/main/de
 
 ```bash
 helm install ods oci://ghcr.io/st-gr/charts/openshell-driver-kyma \
-  --version 0.1.1 \
+  --version 0.1.2 \
   --namespace "$NS" \
   -f my-values.yaml \
   --wait --timeout=300s
@@ -238,7 +238,7 @@ cat > /tmp/draft.md <<'EOF'
 
 Three things shipped this week:
 - Helm chart published as OCI artifact.
-- Driver v0.1.1 with inference.local URL fix.
+- Driver release with the inference.local URL fix.
 - E2E live-cluster smoke succeeded.
 
 Two things outstanding:
@@ -284,8 +284,8 @@ The flags that matter:
 - `ANTHROPIC_BASE_URL=https://inference.local` — **no `/v1` suffix**.
   Anthropic SDKs append `/v1/messages` themselves. Earlier chart
   versions injected `…/v1` and produced `/v1/v1/messages`, which the
-  supervisor's L7 router rejected. Fixed in v0.1.1; the chart's
-  pod-spec env var is now correct, but exec sessions don't inherit
+  supervisor's L7 router rejected. Current charts inject the
+  correct value into the pod spec, but exec sessions don't inherit
   pod-spec env, so set it inline.
 - `ANTHROPIC_API_KEY=sk-ant-…` — placeholder. The supervisor's L7
   router strips it and injects the real one from the gateway bundle.

@@ -229,12 +229,6 @@ The last line proves the gateway is talking to the kyma driver over
 the shared UDS. If it's missing, the driver container failed —
 check its logs.
 
-Do not install chart `0.1.1` — its default `gateway.image` points at a
-stale pre-release fork build (`ghcr.io/st-gr/openshell-gateway:latest`)
-that silently breaks sandbox phase reporting (`openshell sandbox
-create` never sees the sandbox reach `Ready` and times out after
-300 s). Chart `0.1.2`+ pins the upstream NVIDIA gateway by digest.
-
 A post-install Job also runs once and registers the Anthropic
 provider + inference route on the gateway. On success helm deletes
 the Job (hook delete-policy), so its absence is the normal outcome —
@@ -452,8 +446,7 @@ Run end-to-end on 2026-07-02:
 
 - Kyma / Gardener (SAP BTP), 4x `cpu-worker` amd64 nodes, Kubernetes
   v1.34.
-- Chart `openshell-driver-kyma` `0.1.2` (do **not** use `0.1.1` — see
-  the note in step 3).
+- Chart `openshell-driver-kyma` `0.1.2`.
 - Gateway image `ghcr.io/nvidia/openshell/gateway@sha256:523609f8…`
   (upstream NVIDIA `0.0.73`, containing NVIDIA/OpenShell#1703 and #1704),
   pulled via the chart's default digest pin.
