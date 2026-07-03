@@ -5,6 +5,67 @@ one Anthropic-shaped API endpoint, one API key. No SAP AI Core, no
 in-cluster LLM gateway, no OIDC. About 15 minutes from "empty cluster"
 to Claude producing output inside an isolated sandbox on your cluster.
 
+```mermaid
+flowchart TB
+    P["Prerequisites:<br/>Kyma cluster + kubectl + helm<br/>Anthropic endpoint + API key<br/>host for the openshell CLI"]
+
+    subgraph S1["1 — Cluster bootstrap"]
+        direction LR
+        C1["agent-sandbox<br/>controller v0.4.6"]
+        C2["namespace openshell-system<br/>PSA privileged"]
+        C3["Secret<br/>my-anthropic-creds"]
+    end
+
+    subgraph S2["2 — Values overlay"]
+        V{"Where is the<br/>upstream endpoint?"}
+        VPUB["public :443<br/>default NetworkPolicy suffices"]
+        VPRIV["in-cluster / RFC1918 / non-443:<br/>MUST enable gatewayUpstreamEgress<br/>or all inference returns 503"]
+    end
+
+    subgraph S3["3 — helm install chart 0.1.2"]
+        POD["driver + gateway pod 2/2<br/>gateway 0.0.73, Unix socket,<br/>--drivers kyma"]
+        HOOK["hook Job: provider create +<br/>inference set (auto-deletes)"]
+    end
+
+    S45["4-5 — install openshell CLI,<br/>port-forward :8080,<br/>gateway add --local"]
+
+    subgraph S6["6 — run Claude in a sandbox"]
+        CREATE["sandbox create --policy<br/>(egress locked to inference.local)"]
+        PROBE{"6a probe: node POST<br/>inference.local/v1/messages"}
+        OK["HTTP 200 — pipeline works"]
+        E503["HTTP 503 — upstream unreachable,<br/>fix gatewayUpstreamEgress"]
+        RUN["6b claude -p or TUI via wrapper<br/>(do NOT export ANTHROPIC_API_KEY)"]
+        PATH["agent → inference.local →<br/>supervisor injects real key →<br/>upstream"]
+    end
+
+    S7["7 — teardown: sandbox delete,<br/>helm uninstall, delete namespace"]
+
+    P --> S1
+    S1 --> S2
+    V -->|public| VPUB
+    V -->|private| VPRIV
+    S2 --> S3
+    HOOK -.reads key.-> C3
+    S3 --> S45
+    S45 --> CREATE
+    CREATE --> PROBE
+    PROBE -->|200| OK
+    OK --> RUN
+    RUN === PATH
+    PROBE -->|503| E503
+    E503 -.fix values, retest.-> PROBE
+    RUN --> S7
+
+    style VPRIV fill:#f8d7da,stroke:#b02a37,stroke-width:2px
+    style E503 fill:#f8d7da,stroke:#b02a37,stroke-width:2px
+    style OK fill:#d1e7dd,stroke:#146c43
+    style PATH fill:#cfe2ff,stroke:#0a58ca
+```
+
+(For a poster-quality rendering of this diagram via an
+image-generation LLM, see
+[`diagram-imagegen-prompts.md`](diagram-imagegen-prompts.md).)
+
 The upstream gateway image comes from NVIDIA — nothing here needs a
 fork build.
 

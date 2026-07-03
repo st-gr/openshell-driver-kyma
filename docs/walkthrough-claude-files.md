@@ -12,6 +12,36 @@ through:
 7. Downloading the new file to your host.
 8. Tearing the sandbox + release down.
 
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Op as Operator host
+    participant GW as gateway :8080
+    participant DRV as kyma driver
+    participant CTRL as agent-sandbox controller
+    participant SBX as sandbox pod<br/>(supervisor + claude)
+    participant UP as upstream<br/>(Anthropic API or bedrock-bridge to SAP AI Core)
+
+    Note over Op,CTRL: one-time setup: controller + PSA namespace + Secret + helm install (OCI chart)
+    Op->>GW: gateway add --local (via kubectl port-forward)
+    Op->>GW: sandbox create --policy claude-policy.yaml
+    GW->>DRV: CreateSandbox over Unix socket
+    DRV->>CTRL: create Sandbox CR
+    CTRL-->>SBX: schedule pod, sideload supervisor, phase Ready
+    Op->>SBX: sandbox upload draft.md (rsync over ssh)
+    Op->>SBX: sandbox exec claude -p "read draft.md, write summary.md"
+    SBX->>SBX: L7 router strips placeholder x-api-key
+    SBX->>GW: GetInferenceBundle (real key + upstream URL)
+    SBX->>UP: POST /v1/messages with real credentials
+    UP-->>SBX: completion - claude writes /sandbox/summary.md
+    Op->>SBX: sandbox download summary.md
+    Op->>GW: sandbox delete + helm uninstall
+```
+
+(For a poster-quality rendering of this diagram via an
+image-generation LLM, see
+[`diagram-imagegen-prompts.md`](diagram-imagegen-prompts.md).)
+
 All steps verified end-to-end against a real Kyma cluster on
 2026-05-31. Total time: ~10 minutes once the prerequisites are in
 place.
