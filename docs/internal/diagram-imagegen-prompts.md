@@ -15,6 +15,20 @@ than Mermaid but are *lossy with small text and topology* — they
 hallucinate labels and merge boxes unless the prompt pins both down.
 The recipes below are ordered by what most improves fidelity.
 
+**Generated images stay out of the guides.** The embedded Mermaid is
+canonical: it updates in the same diff as the doc text, reviews
+line-by-line in PRs, and renders natively on GitHub. A generated PNG
+drifts silently the moment a step changes, and `.gitignore` excludes
+`*.png` deliberately. Keep renders as local artifacts next to this
+file (untracked).
+
+**Validation note (2026-07-02):** Prompt A produced
+`openshell-kyma-direct-anthropic-endpoint.png` (kept untracked in this
+directory) with 100% label fidelity on the first pass — every node,
+color, and arrow style correct, including `gatewayUpstreamEgress` and
+the dashed retry loop. The verbatim-spec + prose-containment pattern
+works; expect iteration mainly on smaller/denser diagrams.
+
 Universal rules, both diagrams:
 
 1. **Paste the Mermaid source into the prompt and declare it the
