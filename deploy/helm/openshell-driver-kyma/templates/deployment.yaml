@@ -123,9 +123,9 @@ spec:
               mountPath: /tmp
         {{- if .Values.gateway.enabled }}
         # Gateway sidecar. Shares the socket-dir emptyDir with the driver
-        # container; reads the UDS at .Values.driver.socket. The image
-        # comes from the st-gr/OpenShell fork which adds the
-        # --compute-driver-socket flag to upstream NVIDIA/OpenShell.
+        # container; reads the UDS at .Values.driver.socket. The image is
+        # the upstream NVIDIA/OpenShell gateway (the --compute-driver-socket
+        # external-driver flag landed upstream in NVIDIA/OpenShell#1703).
         - name: gateway
           image: {{ include "openshell-driver-kyma.gatewayImage" . | quote }}
           imagePullPolicy: {{ .Values.gateway.image.pullPolicy }}

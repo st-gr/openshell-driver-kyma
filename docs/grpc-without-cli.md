@@ -12,8 +12,9 @@ support, and worked examples invoking real RPCs.
 
 ## What the server speaks
 
-Verified live against `ghcr.io/st-gr/openshell-gateway:latest` (the
-image the chart runs by default):
+Verified live against the upstream NVIDIA gateway image
+`ghcr.io/nvidia/openshell/gateway` (the image the chart runs by
+default):
 
 | Surface | Status |
 |---|---|

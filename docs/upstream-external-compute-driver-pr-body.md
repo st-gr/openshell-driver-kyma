@@ -1,3 +1,10 @@
+> **Status (archival):** Merged as
+> [NVIDIA/OpenShell#1703](https://github.com/NVIDIA/OpenShell/pull/1703)
+> on 2026-06-26. This is the as-submitted PR body, kept for the record.
+> The fork gateway image it references
+> (`ghcr.io/st-gr/openshell-gateway`) has since been retired — the chart
+> now runs the unmodified upstream `ghcr.io/nvidia/openshell/gateway`.
+
 ## Summary
 
 Adds an opt-in `--compute-driver-socket=<path>` flag (env `OPENSHELL_COMPUTE_DRIVER_SOCKET`) to the gateway. When set, the gateway dispatches sandbox lifecycle to an out-of-tree compute driver speaking the existing `compute_driver.proto` contract over a Unix domain socket, instead of one of the four built-in drivers (Kubernetes / Podman / Docker / VM).

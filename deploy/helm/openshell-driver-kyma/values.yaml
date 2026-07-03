@@ -147,9 +147,9 @@ affinity: {}
 podAnnotations: {}
 podLabels: {}
 
-# Gateway sidecar configuration. When enabled, the chart deploys an
-# openshell-server (NVIDIA OpenShell gateway, st-gr/OpenShell fork)
-# container alongside the driver in the same pod. They share the socket-dir
+# Gateway sidecar configuration. When enabled, the chart deploys the
+# upstream NVIDIA OpenShell gateway (openshell-server) container
+# alongside the driver in the same pod. They share the socket-dir
 # emptyDir; the driver writes the UDS at .Values.driver.socket, the gateway
 # reads it via --compute-driver-socket. No separate socketPath value — the
 # driver.socket is the single source of truth.
