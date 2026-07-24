@@ -342,3 +342,23 @@ wired. Either run the `openshell provider create` + `openshell
 inference set` steps manually post-install, or leave OIDC unset for
 in-cluster-only deployments (the gateway runs
 `allow_unauthenticated_users=true` and the Job needs no extra auth).
+
+**Existing sandboxes return `503 cluster inference is not configured`
+after a gateway upgrade.** Gateway `0.0.91` introduced a **workspace**
+concept. Sandboxes created by an older gateway carry an empty
+workspace and can no longer resolve an inference bundle, so every
+inference call fails — even though `openshell inference get` reports a
+healthy route and `sandbox list` shows them `Ready`. The gateway log
+names it:
+
+```bash
+kubectl -n "$NS" logs deploy/<release>-openshell-driver-kyma -c gateway \
+  | grep -i "non-empty workspace"
+# WARN Store reconciliation sweep failed
+#      error=encode error: sandbox requires a non-empty workspace
+```
+
+There is no in-place migration — **recreate each affected sandbox**
+(`openshell sandbox delete <name>`, then create it again with the same
+flags). Sandboxes created after the upgrade are unaffected. Worth
+planning for whenever you bump `gateway.image.tag` across `0.0.91`.

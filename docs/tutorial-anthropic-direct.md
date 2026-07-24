@@ -394,6 +394,25 @@ openshell sandbox exec --name hello -- node -e 'const https=require("https");con
   always the `gatewayUpstreamEgress` gap from step 2: an in-cluster or
   non-`:443` endpoint blocked by the sandbox NetworkPolicy. Enable the
   egress carve-out and re-test.
+- **`HTTP 503 {"error":"cluster inference is not configured"}`** —
+  different failure, despite the same status code. The sandbox predates
+  a gateway upgrade. Gateway `0.0.91` introduced a **workspace**
+  concept; sandboxes created by an older gateway have an empty
+  workspace and cannot resolve an inference bundle, so every request
+  fails even though `openshell inference get` shows a healthy route.
+  Confirm it in the gateway log:
+
+  ```bash
+  kubectl -n "$NS" logs deploy/ods-openshell-driver-kyma -c gateway \
+    | grep -i "non-empty workspace"
+  # WARN Store reconciliation sweep failed
+  #      error=encode error: sandbox requires a non-empty workspace
+  ```
+
+  **Fix: recreate the sandbox.** There is no in-place migration — delete
+  it and create it again with the same flags, and it picks up the
+  default workspace. Do this for every sandbox that outlived a gateway
+  upgrade.
 - **`ERR` / TLS errors** — `inference.local` isn't resolving or the
   sandbox policy denies it; check the sandbox `--policy` allows
   `inference.local:443`.
