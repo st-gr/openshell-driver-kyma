@@ -23,7 +23,7 @@ flowchart TB
     end
 
     subgraph S3["3 — helm install chart 0.1.2"]
-        POD["driver + gateway pod 2/2<br/>gateway 0.0.73, Unix socket,<br/>--drivers kyma"]
+        POD["driver + gateway pod 2/2<br/>gateway 0.0.91, Unix socket,<br/>--drivers kyma"]
         HOOK["hook Job: provider create +<br/>inference set (auto-deletes)"]
     end
 
@@ -284,7 +284,7 @@ See [`install-cli.md`](install-cli.md) for the full matrix. For a
 quick smoke test on Linux (or WSL2):
 
 ```bash
-VERSION=v0.0.75
+VERSION=v0.0.91
 curl -fsSL "https://github.com/NVIDIA/OpenShell/releases/download/${VERSION}/openshell-x86_64-unknown-linux-musl.tar.gz" \
   | tar -xz -C /usr/local/bin
 openshell --version
@@ -292,11 +292,14 @@ openshell --version
 
 On macOS: `brew install astral-sh/uv/uv && uv tool install -U openshell`.
 
-**Pin the CLI version to the gateway image**. This tutorial pins the
-gateway to the digest of `0.0.73` via the chart default (see
-`values.yaml`), so `v0.0.75` CLI is fine — the gRPC contract is
-compatible across recent patch releases, but the CLI's error messages
-match the gateway's shape when they align.
+**Keep the CLI and the gateway on the same version.** This tutorial
+pins the gateway to the `0.0.91` digest via the chart default (see
+`values.yaml`), so install the matching `v0.0.91` CLI. The gRPC
+contract does drift between releases: a newer CLI against an older
+gateway can fail on individual commands whose response shape changed
+(we hit exactly this with `inference get` on a `0.0.91` CLI talking to
+a `0.0.73` gateway — sandbox and provider commands kept working, but
+that one broke). If you bump one, bump the other.
 
 ## 5. Reach the gateway + verify
 
@@ -483,10 +486,11 @@ Run end-to-end on 2026-07-02:
 - Kyma / Gardener (SAP BTP), 4x `cpu-worker` amd64 nodes, Kubernetes
   v1.34.
 - Chart `openshell-driver-kyma` `0.1.2`.
-- Gateway image `ghcr.io/nvidia/openshell/gateway@sha256:523609f8…`
-  (upstream NVIDIA `0.0.73`, containing NVIDIA/OpenShell#1703 and #1704),
+- Gateway image `ghcr.io/nvidia/openshell/gateway@sha256:92e73aca…`
+  (upstream NVIDIA `0.0.91`, containing NVIDIA/OpenShell#1703, #1704, and
+  the TUI config-key form #2224),
   pulled via the chart's default digest pin.
-- `openshell` CLI `v0.0.75`.
+- `openshell` CLI `v0.0.91`.
 
 Verified end-to-end: install, gateway↔driver named-endpoint handshake
 (`configured_driver=kyma advertised_driver=kyma in_tree=false`),

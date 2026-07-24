@@ -9,7 +9,7 @@ upstream releases page, and as a PyPI wheel for users who prefer `uv`.
 
 The CLI's gRPC contract evolves with the gateway. Pin the CLI to the
 same version as the gateway image you deployed (`gateway.image.tag`
-in the chart). At time of writing the latest is `v0.0.50`.
+in the chart). At time of writing the latest is `v0.0.91`.
 
 If you're tracking `latest` on the gateway image, install the latest
 CLI release; if you bumped the gateway to a specific tag, install
@@ -20,7 +20,7 @@ that exact tag.
 No glibc requirement; no Python. Single binary.
 
 ```bash
-VERSION=v0.0.50
+VERSION=v0.0.91
 curl -fsSL "https://github.com/NVIDIA/OpenShell/releases/download/${VERSION}/openshell-x86_64-unknown-linux-musl.tar.gz" \
   | tar -xz -C /usr/local/bin
 openshell --version

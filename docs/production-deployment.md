@@ -63,7 +63,7 @@ gateway:
     # driver image above). Bump via
     # https://github.com/NVIDIA/OpenShell/pkgs/container/openshell%2Fgateway
     repository: ghcr.io/nvidia/openshell/gateway
-    tag: "sha256:523609f8a2799304cda7e485138c125c9765426c04981033812717a659d0c46f"  # 0.0.73
+    tag: "sha256:92e73acabfa3d99cc66cc4e2610de5c78617e690db1aac6d3e965c168ac7f6e7"  # 0.0.91
     pullPolicy: IfNotPresent
 
   # OIDC required for the public-APIRule path. The chart's

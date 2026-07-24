@@ -47,7 +47,7 @@ These pin the message types you'll send and the response shapes you'll
 get back. The CLI version pin you should match is the one your gateway
 image was built against — usually equal to the openshell-cli
 `OPENSHELL_CLI_VERSION` constant in the inference-provider-hook
-template (currently `v0.0.50`). Replace `main` with `v0.0.50` above
+template (currently `v0.0.91`). Replace `main` with `v0.0.91` above
 for an exact match.
 
 ## Reach the gateway

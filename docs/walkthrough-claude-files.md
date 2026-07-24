@@ -501,7 +501,7 @@ kubectl -n "$NS" run cli --restart=Never --image=alpine:3.20 --command -- sleep 
 # Inside the pod (one-time setup):
 kubectl -n "$NS" exec cli -- sh -c '
   apk add --no-cache curl rsync openssh-client &&
-  curl -fsSL https://github.com/NVIDIA/OpenShell/releases/download/v0.0.50/openshell-x86_64-unknown-linux-musl.tar.gz \
+  curl -fsSL https://github.com/NVIDIA/OpenShell/releases/download/v0.0.91/openshell-x86_64-unknown-linux-musl.tar.gz \
     | tar -xz -C /usr/local/bin &&
   /usr/local/bin/openshell gateway add --local http://ods-openshell-driver-kyma:8080
 '
