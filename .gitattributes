@@ -1,0 +1,20 @@
+# Normalize line endings so editors that write CRLF don't produce
+# whole-file phantom diffs. Files are stored LF in the repository
+# regardless of what the working tree contains.
+#
+# Without this, an editor rewriting a file with CRLF shows up as every
+# line changed (e.g. `git diff` reporting 354+/354- on a file with no
+# content change), which buries real edits and makes review noisy.
+* text=auto eol=lf
+
+# Binary assets — never touch these.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.gz binary
+*.tgz binary
+*.zip binary
+*.wasm binary
