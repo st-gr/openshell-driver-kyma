@@ -69,6 +69,20 @@ dev-shell-with-kube:
 proto:
 	$(DOCKER_RUN) $(DEV_IMAGE) cargo build -p computev1
 
+# Verify the vendored protos still match the upstream ref pinned in
+# proto/UPSTREAM.lock. Runs on the host (needs network), not in the container.
+.PHONY: proto-check
+proto-check:
+	./scripts/check-proto-drift.sh
+
+# Re-vendor at a new upstream tag: make proto-vendor TAG=v0.0.91
+.PHONY: proto-vendor
+proto-vendor:
+ifeq ($(strip $(TAG)),)
+	$(error TAG must be set, e.g. make proto-vendor TAG=v0.0.91)
+endif
+	./scripts/vendor-proto.sh $(TAG)
+
 .PHONY: fmt
 fmt:
 	$(DOCKER_RUN) $(DEV_IMAGE) cargo fmt --all
