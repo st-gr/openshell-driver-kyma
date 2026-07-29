@@ -96,6 +96,15 @@ const GPU_RESOURCE: &str = "nvidia.com/gpu";
 // IssueSandboxToken at startup, then uses the gateway token for all
 // subsequent gRPC calls. Without this volume the supervisor refuses to
 // start with "no sandbox token source available".
+//
+// This is also why `DriverSandboxSpec.sandbox_token` (added upstream in
+// v0.0.91, marked `[(openshell.options.v1.secret) = true]`) is deliberately
+// never read here: writing it into the pod spec would persist a bearer token
+// in an object readable by anyone with `get sandbox` in the namespace, and
+// it would outlive its rotation. The upstream Kubernetes driver ignores it
+// for the same reason. Nothing in this crate logs a whole DriverSandbox or
+// DriverSandboxSpec either — every tracing call names scalar fields
+// explicitly — so the secret cannot reach the logs by accident.
 const SA_TOKEN_VOLUME: &str = "openshell-sa-token";
 const SA_TOKEN_MOUNT_PATH: &str = "/var/run/secrets/openshell";
 const SA_TOKEN_AUDIENCE: &str = "openshell-gateway";
