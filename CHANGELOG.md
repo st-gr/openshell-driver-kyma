@@ -6,6 +6,80 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-07-29
+
+### Changed — BREAKING
+
+- **Synced the `ComputeDriver` contract with upstream OpenShell v0.0.91.**
+  The protos were vendored once on 2026-05-27 and never updated, leaving
+  the driver six upstream changes behind the gateway now deployed. Nothing
+  was visibly broken, because the drifted fields happened to be ones this
+  cluster never exercised — but two of the six changes are wire-breaking,
+  so the failure was latent rather than absent.
+  - `DriverSandboxSpec.gpu` (a `bool`) became `resource_requirements`
+    (a `ResourceRequirements` message) **at the same field number**. That
+    is varint → length-delimited on the wire, so a GPU sandbox request from
+    a v0.0.91 gateway could not have decoded. Unreachable until now only
+    because this cluster has no GPU nodes.
+  - `GetCapabilitiesResponse.supports_gpu` was reserved upstream. GPU
+    capability is now reported by rejecting the request at
+    `ValidateSandboxCreate`, which moves the failure from list time to
+    create time. `driver.gpuSupport` still gates that check.
+  - GPU counts follow upstream exactly: a `gpu` block with the count
+    omitted means **one** GPU, and `count: 0` is an error rather than
+    "no GPU". `has_gpu_capacity` checks the requested count **per node**,
+    not cluster-wide — a pod runs on one node, so two nodes with one GPU
+    each cannot host a two-GPU sandbox.
+- **Sandbox CRs, PVCs and APIRules are now named `{workspace}--{name}`.**
+  This matches upstream's v0.0.91 tenancy model and stops identically-named
+  sandboxes in different workspaces from colliding in a shared namespace.
+  A name that would exceed the DNS-1123 63-character limit is now rejected
+  at validate time with an actionable message instead of a late 422 from
+  the API server. Under the `default` workspace that caps sandbox names at
+  54 characters.
+- **`GetSandbox` and `DeleteSandbox` resolve via the
+  `openshell.ai/sandbox-id` label instead of a direct name lookup.** The
+  gateway addresses sandboxes by id and by *bare* name and knows nothing of
+  the qualified object name, so this had to land together with the rename —
+  not after it — or every lookup would have missed. `list` and `watch` now
+  skip an unconvertible CR with a warning rather than failing wholesale, so
+  one malformed object cannot hide every other sandbox.
+
+  **Migration:** existing sandboxes are not found after upgrading, because
+  they predate the naming change. Delete them **before** rolling out the new
+  driver, then recreate them:
+
+  ```sh
+  openshell sandbox delete <name>     # for each existing sandbox
+  helm upgrade ...                    # roll out the new driver
+  openshell sandbox create ...        # recreate
+  ```
+
+  This is the same "recreate your sandboxes" migration the 0.0.91 gateway
+  upgrade already required, so the two pair naturally in one window.
+
+### Added
+
+- **Proto drift is now a CI failure.** `scripts/check-proto-drift.sh`
+  compares the vendored protos against the upstream ref pinned in
+  `proto/UPSTREAM.lock` and runs as a `branch-checks` job. It verifies both
+  that the local files match upstream (catching a hand-edited proto) and
+  that the checksums recorded in the lock match upstream (catching a lock
+  doctored to fit). It compares against the *pinned* commit, so releases
+  upstream don't turn the build red on their own — adopting a new version
+  stays a deliberate commit.
+- `make proto-vendor TAG=<tag>` (`scripts/vendor-proto.sh`) automates
+  re-vendoring: resolves the tag to a commit, rewrites the provenance
+  headers, and regenerates `proto/UPSTREAM.lock`. `make proto-check` runs
+  the drift check locally.
+- `proto/UPSTREAM.lock` records the upstream tag, **commit SHA**, and a
+  per-file sha256 of the pristine content. The original vendoring recorded
+  only a content hash with no upstream ref, which is precisely why two
+  months of drift went unnoticed.
+- `proto/options.proto` is vendored so the `sandbox_token` secret
+  annotation resolves. It is deliberately excluded from `compile_protos`:
+  it is extend-only and resolves through the include path.
+
 ## [0.1.2] — 2026-07-02
 
 ### Added

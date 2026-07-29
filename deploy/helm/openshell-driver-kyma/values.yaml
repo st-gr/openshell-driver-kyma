@@ -64,6 +64,10 @@ driver:
   istioInjectSandboxes: false
   enableApirule: false
   clusterDomain: ""
+  # Gates the node-capacity precheck in ValidateSandboxCreate. Since the
+  # v0.0.91 contract sync this is NOT advertised via GetCapabilities — that
+  # response field was reserved upstream. With this false, any sandbox that
+  # requests a GPU is rejected at create time.
   gpuSupport: true
   enableNetworkPolicy: true
   # When true, the driver injects `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`

@@ -362,3 +362,37 @@ There is no in-place migration — **recreate each affected sandbox**
 (`openshell sandbox delete <name>`, then create it again with the same
 flags). Sandboxes created after the upgrade are unaffected. Worth
 planning for whenever you bump `gateway.image.tag` across `0.0.91`.
+
+**Existing sandboxes disappear after upgrading the driver past the
+v0.0.91 contract sync.** The same workspace concept also changed how the
+driver names Kubernetes objects: a Sandbox CR is now
+`{workspace}--{name}` (for example `default--hello`) rather than just
+`hello`, so that two sandboxes with the same name in different
+workspaces cannot collide. Sandboxes created by an older driver have
+unqualified names and are no longer found — `openshell sandbox list`
+stops showing them, though the CRs are still on the cluster:
+
+```bash
+kubectl -n "$NS" get sandbox
+# NAME    AGE      <- no `--` in the name means it predates the rename
+# hello   3d
+```
+
+**Delete your sandboxes before rolling out the new driver**, not after —
+once the driver is upgraded, `openshell sandbox delete` can no longer
+find them and you are left removing the CRs by hand:
+
+```bash
+openshell sandbox delete hello        # BEFORE helm upgrade
+helm upgrade ...                      # roll out the new driver
+openshell sandbox create --name hello ...
+```
+
+If you upgraded first, clean up directly and recreate:
+
+```bash
+kubectl -n "$NS" delete sandbox hello
+```
+
+Because this lands in the same release as the workspace change above,
+one maintenance window covers both.

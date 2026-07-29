@@ -413,6 +413,28 @@ openshell sandbox exec --name hello -- node -e 'const https=require("https");con
   it and create it again with the same flags, and it picks up the
   default workspace. Do this for every sandbox that outlived a gateway
   upgrade.
+- **`openshell sandbox list` no longer shows a sandbox you know exists**
+  — you upgraded the driver past the v0.0.91 contract sync. That same
+  workspace concept also changed how the driver names Kubernetes
+  objects: a Sandbox CR is now `{workspace}--{name}` (e.g.
+  `default--hello`) so two sandboxes with the same name in different
+  workspaces cannot collide. Sandboxes created by an older driver have
+  unqualified names and are no longer found. Check for the missing `--`:
+
+  ```bash
+  kubectl -n "$NS" get sandbox
+  # NAME    AGE     <- no `--` means it predates the rename
+  # hello   3d
+  ```
+
+  **Fix: delete and recreate.** Do the delete *before* upgrading the
+  driver if you can — afterwards `openshell sandbox delete` can't find
+  it either, and you have to remove the CR directly:
+
+  ```bash
+  kubectl -n "$NS" delete sandbox hello
+  openshell sandbox create --name hello ...
+  ```
 - **`ERR` / TLS errors** — `inference.local` isn't resolving or the
   sandbox policy denies it; check the sandbox `--policy` allows
   `inference.local:443`.
