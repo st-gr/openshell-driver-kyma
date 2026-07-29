@@ -101,7 +101,13 @@ impl PlatformEnricher for KymaEnricher {
         Ok(template)
     }
 
-    fn render_apirule(&self, sandbox_id: &str, sandbox_name: &str) -> Option<Value> {
+    fn render_apirule(
+        &self,
+        sandbox_id: &str,
+        kube_name: &str,
+        sandbox_name: &str,
+        workspace: &str,
+    ) -> Option<Value> {
         if !self.cfg.enable_apirule {
             return None;
         }
@@ -117,18 +123,23 @@ impl PlatformEnricher for KymaEnricher {
             self.cfg.cluster_domain.clone()
         };
 
-        let host = format!("{sandbox_name}.{domain}");
-        let svc_name = format!("{sandbox_name}-svc");
+        // Host and Service both derive from the workspace-qualified object
+        // name. Using the bare name would let two sandboxes called `dev` in
+        // different workspaces claim the same ingress host and fight over it.
+        let host = format!("{kube_name}.{domain}");
+        let svc_name = format!("{kube_name}-svc");
 
         Some(json!({
             "apiVersion": "gateway.kyma-project.io/v2",
             "kind": "APIRule",
             "metadata": {
-                "name": sandbox_name,
+                "name": kube_name,
                 "namespace": self.cfg.namespace,
                 "labels": {
                     "openshell.ai/managed-by": "openshell",
                     "openshell.ai/sandbox-id": sandbox_id,
+                    "openshell.ai/sandbox-name": sandbox_name,
+                    "openshell.ai/sandbox-workspace": workspace,
                 }
             },
             "spec": {
@@ -222,7 +233,9 @@ mod tests {
             cluster_domain: "example.com".into(),
             ..Config::default()
         });
-        assert!(e.render_apirule("id-1", "sb-1").is_none());
+        assert!(e
+            .render_apirule("id-1", "ws-a--sb-1", "sb-1", "ws-a")
+            .is_none());
     }
 
     #[tokio::test]
@@ -233,14 +246,24 @@ mod tests {
             cluster_domain: "example.com".into(),
             ..Config::default()
         });
-        let m = e.render_apirule("id-1", "sb-1").unwrap();
+        let m = e
+            .render_apirule("id-1", "ws-a--sb-1", "sb-1", "ws-a")
+            .unwrap();
         assert_eq!(m["apiVersion"], "gateway.kyma-project.io/v2");
         assert_eq!(m["kind"], "APIRule");
-        assert_eq!(m["metadata"]["name"], "sb-1");
+        // Object name, host and Service all use the workspace-qualified name
+        // so two sandboxes called `sb-1` in different workspaces cannot fight
+        // over the same ingress host.
+        assert_eq!(m["metadata"]["name"], "ws-a--sb-1");
         assert_eq!(m["metadata"]["namespace"], "openshell-system");
         assert_eq!(m["metadata"]["labels"]["openshell.ai/sandbox-id"], "id-1");
-        assert_eq!(m["spec"]["hosts"][0], "sb-1.example.com");
-        assert_eq!(m["spec"]["service"]["name"], "sb-1-svc");
+        assert_eq!(m["metadata"]["labels"]["openshell.ai/sandbox-name"], "sb-1");
+        assert_eq!(
+            m["metadata"]["labels"]["openshell.ai/sandbox-workspace"],
+            "ws-a"
+        );
+        assert_eq!(m["spec"]["hosts"][0], "ws-a--sb-1.example.com");
+        assert_eq!(m["spec"]["service"]["name"], "ws-a--sb-1-svc");
         assert_eq!(m["spec"]["service"]["port"], 8080);
         assert_eq!(m["spec"]["rules"][0]["path"], "/*");
         let methods: Vec<&str> = m["spec"]["rules"][0]["methods"]
@@ -261,7 +284,9 @@ mod tests {
             cluster_domain: String::new(),
             ..Config::default()
         });
-        let m = e.render_apirule("id-1", "sb-1").unwrap();
-        assert_eq!(m["spec"]["hosts"][0], "sb-1.cluster.local");
+        let m = e
+            .render_apirule("id-1", "ws-a--sb-1", "sb-1", "ws-a")
+            .unwrap();
+        assert_eq!(m["spec"]["hosts"][0], "ws-a--sb-1.cluster.local");
     }
 }

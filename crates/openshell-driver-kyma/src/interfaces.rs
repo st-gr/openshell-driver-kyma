@@ -35,12 +35,16 @@ pub enum WatchEvent {
 #[async_trait]
 pub trait SandboxProvisioner: Send + Sync + 'static {
     async fn create(&self, sb: &DriverSandbox) -> Result<(), DriverError>;
-    async fn delete(&self, name: &str) -> Result<(), DriverError>;
-    async fn get(&self, name: &str) -> Result<DriverSandbox, DriverError>;
+    /// Both keyed by sandbox **id**, not name: the CR is named
+    /// `{workspace}--{name}`, which the gateway never sees, so the
+    /// `openshell.ai/sandbox-id` label is the only stable handle.
+    async fn delete(&self, sandbox_id: &str) -> Result<(), DriverError>;
+    async fn get(&self, sandbox_id: &str) -> Result<DriverSandbox, DriverError>;
     async fn list(&self) -> Result<Vec<DriverSandbox>, DriverError>;
     async fn watch(&self) -> Result<mpsc::Receiver<WatchEvent>, DriverError>;
     async fn validate_create(&self, sb: &DriverSandbox) -> Result<(), DriverError>;
-    async fn has_gpu_capacity(&self) -> Result<bool, DriverError>;
+    /// True when a single node can satisfy `count` GPUs.
+    async fn has_gpu_capacity(&self, count: u32) -> Result<bool, DriverError>;
 
     /// POST a rendered Kyma `APIRule` manifest. No-op when the APIRule
     /// flag is off — the driver layer still gates the call site, this
@@ -70,7 +74,17 @@ pub trait PlatformEnricher: Send + Sync + 'static {
 
     /// Renders the optional APIRule manifest. Returns `None` when the
     /// `--enable-apirule` flag is off.
-    fn render_apirule(&self, sandbox_id: &str, sandbox_name: &str) -> Option<serde_json::Value>;
+    /// `kube_name` is the `{workspace}--{name}` object name — the APIRule and
+    /// the Service it targets are real cluster objects, so they must use the
+    /// same name the Sandbox CR does. `sandbox_name` is the bare name, used
+    /// only for the label.
+    fn render_apirule(
+        &self,
+        sandbox_id: &str,
+        kube_name: &str,
+        sandbox_name: &str,
+        workspace: &str,
+    ) -> Option<serde_json::Value>;
 }
 
 /// Bounded-cardinality counters and histograms. Implementations should

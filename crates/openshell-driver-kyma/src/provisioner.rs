@@ -15,7 +15,9 @@
 
 use crate::config::Config;
 use crate::error::DriverError;
-use crate::helpers::{build_env_list, build_resources, merge_maps, object_to_driver_sandbox};
+use crate::helpers::{
+    build_env_list, build_resources, effective_gpu_count, merge_maps, object_to_driver_sandbox,
+};
 use crate::interfaces::{SandboxProvisioner, WatchEvent};
 use async_trait::async_trait;
 use computev1::pb::{DriverPlatformEvent, DriverSandbox};
@@ -32,8 +34,50 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 
-const LABEL_SANDBOX_ID: &str = "openshell.ai/sandbox-id";
+// Identity labels. Re-exported from `helpers` so the CR writer and the CR
+// reader (`object_to_driver_sandbox`) can never drift apart.
+use crate::helpers::{
+    LABEL_SANDBOX_ID, LABEL_SANDBOX_NAME, LABEL_SANDBOX_NAMESPACE, LABEL_SANDBOX_WORKSPACE,
+};
+
 const LABEL_MANAGED_BY: &str = "openshell.ai/managed-by";
+
+/// Kubernetes object names are DNS-1123 labels, capped at 63 characters.
+const MAX_KUBE_NAME_LEN: usize = 63;
+
+/// Build the Kubernetes object name for a sandbox.
+///
+/// Since v0.0.91 upstream qualifies every sandbox-derived object with its
+/// workspace so two sandboxes of the same name in different workspaces cannot
+/// collide in a shared namespace. This must match upstream's
+/// `kube_resource_name` exactly.
+#[must_use]
+pub fn kube_resource_name(workspace: &str, name: &str) -> String {
+    format!("{workspace}--{name}")
+}
+
+/// Reject sandbox/workspace pairs whose combined object name would exceed the
+/// DNS-1123 limit, so the failure is an actionable `InvalidArgument` at
+/// validate time rather than an opaque 422 from the API server at create time.
+///
+/// # Errors
+/// Returns `DriverError::InvalidArgument` when `{workspace}--{name}` exceeds
+/// 63 characters, or when the workspace is empty.
+pub fn validate_kube_resource_name(workspace: &str, name: &str) -> Result<(), DriverError> {
+    if workspace.is_empty() {
+        return Err(DriverError::InvalidArgument(
+            "sandbox workspace is required".to_string(),
+        ));
+    }
+    let combined = workspace.len() + 2 + name.len();
+    if combined > MAX_KUBE_NAME_LEN {
+        return Err(DriverError::InvalidArgument(format!(
+            "combined Kubernetes resource name '{workspace}--{name}' is {combined} characters, \
+             exceeding the DNS-1123 limit of {MAX_KUBE_NAME_LEN}"
+        )));
+    }
+    Ok(())
+}
 const LABEL_KAGENTI: &str = "kagenti.io/type";
 const LABEL_ISTIO_INJECT: &str = "sidecar.istio.io/inject";
 // Pod annotation read by the gateway after a successful TokenReview to
@@ -85,15 +129,49 @@ impl KymaProvisioner {
         Api::namespaced_with(self.client.clone(), &self.cfg.namespace, &self.sandbox_ar)
     }
 
-    /// Idempotent PVC create for a sandbox's workspace mount.
+    /// Look a Sandbox CR up by its `openshell.ai/sandbox-id` label.
+    ///
+    /// The gateway addresses sandboxes by id and by *bare* name; it has no
+    /// concept of our `{workspace}--{name}` object naming. The id label is
+    /// therefore the only handle that survives the rename, which is why
+    /// `get`/`delete` resolve through here instead of doing a direct name
+    /// lookup. This mirrors the upstream Kubernetes driver.
+    async fn find_by_sandbox_id(&self, sandbox_id: &str) -> Result<DynamicObject, DriverError> {
+        let lp = ListParams::default().labels(&format!(
+            "{LABEL_MANAGED_BY}=openshell,{LABEL_SANDBOX_ID}={sandbox_id}"
+        ));
+        let list = self.sandboxes_api().list(&lp).await?;
+        list.items
+            .into_iter()
+            .next()
+            .ok_or_else(|| DriverError::NotFound(sandbox_id.to_string()))
+    }
+
+    /// Resolve a sandbox id to the Kubernetes object name of its CR.
+    async fn resolve_cr_name(&self, sandbox_id: &str) -> Result<String, DriverError> {
+        let obj = self.find_by_sandbox_id(sandbox_id).await?;
+        obj.metadata
+            .name
+            .clone()
+            .ok_or_else(|| DriverError::NotFound(sandbox_id.to_string()))
+    }
+
+    /// Idempotent PVC create for a sandbox's `/workspace` mount.
+    ///
+    /// The claim is named from the *Kubernetes* object name
+    /// (`{workspace}--{name}`), not the bare sandbox name, so two sandboxes
+    /// sharing a name across OpenShell workspaces get distinct claims. Note
+    /// the two unrelated senses of "workspace" here: the OpenShell tenancy
+    /// boundary (part of the name) and the pod's `/workspace` mount (the
+    /// `-workspace` suffix).
     ///
     /// Tolerates AlreadyExists (a previous create attempt succeeded but
     /// the Sandbox CR create or a follow-up step failed; second attempt
     /// finds the PVC waiting). All other API errors propagate.
-    async fn ensure_workspace_pvc(&self, sandbox_name: &str) -> Result<(), DriverError> {
+    async fn ensure_sandbox_pvc(&self, sb: &DriverSandbox) -> Result<(), DriverError> {
         let pvc_api: Api<k8s_openapi::api::core::v1::PersistentVolumeClaim> =
             Api::namespaced(self.client.clone(), &self.cfg.namespace);
-        let claim_name = format!("{sandbox_name}-workspace");
+        let claim_name = format!("{}-workspace", kube_resource_name(&sb.workspace, &sb.name));
 
         let mut spec = json!({
             "accessModes": ["ReadWriteOnce"],
@@ -112,7 +190,9 @@ impl KymaProvisioner {
                     "namespace": self.cfg.namespace,
                     "labels": {
                         LABEL_MANAGED_BY: "openshell",
-                        "openshell.ai/sandbox-name": sandbox_name,
+                        LABEL_SANDBOX_ID: sb.id,
+                        LABEL_SANDBOX_NAME: sb.name,
+                        LABEL_SANDBOX_WORKSPACE: sb.workspace,
                     },
                 },
                 "spec": spec,
@@ -195,8 +275,14 @@ impl KymaProvisioner {
 
         // Resources: use what the user asked for, or fall back to defaults
         // sized for typical Kyma namespace quotas.
+        // A `count: 0` GPU request is rejected in `validate_create` and again
+        // in `create`, both of which run before we ever build a spec. Treating
+        // the error as "no GPU" here is the safe fallback: it under-allocates
+        // rather than silently handing out a device on a malformed request.
+        let gpu_count = effective_gpu_count(spec.and_then(|s| s.resource_requirements.as_ref()))
+            .unwrap_or(None);
         let resources = match template.and_then(|t| t.resources.as_ref()) {
-            Some(res) => build_resources(res, spec.is_some_and(|s| s.gpu)),
+            Some(res) => build_resources(res, gpu_count),
             None => json!({
                 "requests": { "cpu": "100m", "memory": "128Mi" },
                 "limits":   { "cpu": "500m", "memory": "512Mi" },
@@ -251,7 +337,7 @@ impl KymaProvisioner {
         // we just thread its name into the pod's `volumes` and the
         // agent container's `volumeMounts`.
         if !self.cfg.sandbox_storage_size.is_empty() {
-            let claim_name = format!("{}-workspace", sb.name);
+            let claim_name = format!("{}-workspace", kube_resource_name(&sb.workspace, &sb.name));
             let volumes = pod_spec["volumes"]
                 .as_array_mut()
                 .expect("volumes initialized above");
@@ -388,6 +474,9 @@ impl KymaProvisioner {
     fn build_dynamic_object(&self, sb: &DriverSandbox) -> DynamicObject {
         let mut driver_labels: HashMap<String, String> = HashMap::new();
         driver_labels.insert(LABEL_SANDBOX_ID.into(), sb.id.clone());
+        driver_labels.insert(LABEL_SANDBOX_NAME.into(), sb.name.clone());
+        driver_labels.insert(LABEL_SANDBOX_NAMESPACE.into(), self.cfg.namespace.clone());
+        driver_labels.insert(LABEL_SANDBOX_WORKSPACE.into(), sb.workspace.clone());
         driver_labels.insert(LABEL_MANAGED_BY.into(), "openshell".into());
         driver_labels.insert(LABEL_KAGENTI.into(), "agent".into());
 
@@ -403,9 +492,31 @@ impl KymaProvisioner {
             .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
             .collect();
 
-        let mut obj = DynamicObject::new(&sb.name, &self.sandbox_ar);
+        // Identity is also written as annotations. Label *values* are capped
+        // at 63 chars and restricted to `[A-Za-z0-9._-]`; annotations have no
+        // such limit, so they are the lossless copy `object_to_driver_sandbox`
+        // prefers when reading identity back.
+        let annotations: std::collections::BTreeMap<String, String> = [
+            (ANNOTATION_SANDBOX_ID.to_string(), sb.id.clone()),
+            (LABEL_SANDBOX_ID.to_string(), sb.id.clone()),
+            (LABEL_SANDBOX_NAME.to_string(), sb.name.clone()),
+            (
+                LABEL_SANDBOX_NAMESPACE.to_string(),
+                self.cfg.namespace.clone(),
+            ),
+            (LABEL_SANDBOX_WORKSPACE.to_string(), sb.workspace.clone()),
+        ]
+        .into_iter()
+        .collect();
+
+        // The CR is named `{workspace}--{name}` so sandboxes of the same name
+        // in different workspaces cannot collide in a shared namespace. The
+        // bare logical name lives in the labels/annotations above.
+        let kube_name = kube_resource_name(&sb.workspace, &sb.name);
+        let mut obj = DynamicObject::new(&kube_name, &self.sandbox_ar);
         obj.metadata.namespace = Some(self.cfg.namespace.clone());
         obj.metadata.labels = Some(labels);
+        obj.metadata.annotations = Some(annotations);
         obj.data = json!({ "spec": self.build_sandbox_spec(sb) });
         obj
     }
@@ -426,8 +537,10 @@ impl SandboxProvisioner for KymaProvisioner {
         // PVC by claim name; if the PVC isn't there yet the agent-sandbox
         // controller's pod stays Pending until it appears. Failing here
         // is preferable to that visible-but-broken state.
+        validate_kube_resource_name(&sb.workspace, &sb.name)?;
+
         if !self.cfg.sandbox_storage_size.is_empty() {
-            self.ensure_workspace_pvc(&sb.name).await?;
+            self.ensure_sandbox_pvc(sb).await?;
         }
 
         let obj = self.build_dynamic_object(sb);
@@ -443,15 +556,21 @@ impl SandboxProvisioner for KymaProvisioner {
         Ok(())
     }
 
-    async fn delete(&self, name: &str) -> Result<(), DriverError> {
+    async fn delete(&self, sandbox_id: &str) -> Result<(), DriverError> {
+        // Resolve id -> CR name first: the gateway knows nothing about our
+        // `{workspace}--{name}` object naming, so the id label is the only
+        // stable handle we can delete by.
+        let kube_name = self.resolve_cr_name(sandbox_id).await?;
+
         let result = match self
             .sandboxes_api()
-            .delete(name, &DeleteParams::default())
+            .delete(&kube_name, &DeleteParams::default())
             .await
         {
             Ok(_) => Ok(()),
+            // Lost a race with another delete between resolve and delete.
             Err(kube::Error::Api(s)) if s.code == 404 => {
-                Err(DriverError::NotFound(name.to_string()))
+                Err(DriverError::NotFound(sandbox_id.to_string()))
             }
             Err(e) => Err(e.into()),
         };
@@ -463,13 +582,15 @@ impl SandboxProvisioner for KymaProvisioner {
         if !self.cfg.sandbox_storage_size.is_empty() {
             let pvc_api: Api<k8s_openapi::api::core::v1::PersistentVolumeClaim> =
                 Api::namespaced(self.client.clone(), &self.cfg.namespace);
-            let claim_name = format!("{name}-workspace");
+            // Derived from the resolved CR name, not the bare sandbox name,
+            // so it matches what `ensure_sandbox_pvc` actually created.
+            let claim_name = format!("{kube_name}-workspace");
             match pvc_api.delete(&claim_name, &DeleteParams::default()).await {
                 Ok(_) => {}
                 Err(kube::Error::Api(s)) if s.code == 404 => {}
                 Err(e) if result.is_ok() => return Err(e.into()),
                 Err(e) => {
-                    tracing::warn!(error = %e, sandbox_name = %name, "PVC cleanup failed; sandbox-CR delete error takes precedence");
+                    tracing::warn!(error = %e, sandbox_id = %sandbox_id, "PVC cleanup failed; sandbox-CR delete error takes precedence");
                 }
             }
         }
@@ -477,20 +598,27 @@ impl SandboxProvisioner for KymaProvisioner {
         result
     }
 
-    async fn get(&self, name: &str) -> Result<DriverSandbox, DriverError> {
-        match self.sandboxes_api().get(name).await {
-            Ok(obj) => Ok(object_to_driver_sandbox(&obj)),
-            Err(kube::Error::Api(s)) if s.code == 404 => {
-                Err(DriverError::NotFound(name.to_string()))
-            }
-            Err(e) => Err(e.into()),
-        }
+    async fn get(&self, sandbox_id: &str) -> Result<DriverSandbox, DriverError> {
+        let obj = self.find_by_sandbox_id(sandbox_id).await?;
+        object_to_driver_sandbox(&obj).map_err(DriverError::InvalidArgument)
     }
 
     async fn list(&self) -> Result<Vec<DriverSandbox>, DriverError> {
         let lp = ListParams::default().labels(&format!("{LABEL_MANAGED_BY}=openshell"));
         let list = self.sandboxes_api().list(&lp).await?;
-        Ok(list.items.iter().map(object_to_driver_sandbox).collect())
+        // Mirror upstream: one malformed CR must not break `list` for every
+        // other sandbox, so unconvertible objects are logged and skipped.
+        Ok(list
+            .items
+            .iter()
+            .filter_map(|obj| match object_to_driver_sandbox(obj) {
+                Ok(sb) => Some(sb),
+                Err(e) => {
+                    tracing::warn!(error = %e, "skipping unconvertible sandbox CR in list");
+                    None
+                }
+            })
+            .collect())
     }
 
     async fn watch(&self) -> Result<mpsc::Receiver<WatchEvent>, DriverError> {
@@ -527,7 +655,16 @@ impl SandboxProvisioner for KymaProvisioner {
                         if !name.is_empty() && !id.is_empty() {
                             cr_cache.write().await.insert(name, id);
                         }
-                        WatchEvent::Updated(Box::new(object_to_driver_sandbox(&obj)))
+                        // Skip, don't abort: a single CR missing the id/name/
+                        // workspace labels must not tear down the watch for
+                        // every other sandbox.
+                        match object_to_driver_sandbox(&obj) {
+                            Ok(sb) => WatchEvent::Updated(Box::new(sb)),
+                            Err(e) => {
+                                tracing::warn!(error = %e, "skipping unconvertible sandbox CR in watch");
+                                continue;
+                            }
+                        }
                     }
                     Event::Delete(obj) => {
                         let name = obj.metadata.name.clone().unwrap_or_default();
@@ -607,12 +744,17 @@ impl SandboxProvisioner for KymaProvisioner {
     }
 
     async fn validate_create(&self, sb: &DriverSandbox) -> Result<(), DriverError> {
+        // Reject a name that cannot become a DNS-1123 object name before the
+        // gateway commits to the create — the API server would otherwise
+        // reject it far later with a much less actionable message.
+        validate_kube_resource_name(&sb.workspace, &sb.name)?;
+
         if let Some(spec) = sb.spec.as_ref() {
-            if spec.gpu {
-                let ok = self.has_gpu_capacity().await?;
-                if !ok {
+            // `count: 0` is an invalid request and surfaces as InvalidArgument.
+            if let Some(count) = effective_gpu_count(spec.resource_requirements.as_ref())? {
+                if !self.has_gpu_capacity(count).await? {
                     return Err(DriverError::FailedPrecondition(format!(
-                        "no nodes with {GPU_RESOURCE} allocatable in the cluster"
+                        "no node has {count} allocatable {GPU_RESOURCE}"
                     )));
                 }
             }
@@ -620,7 +762,13 @@ impl SandboxProvisioner for KymaProvisioner {
         Ok(())
     }
 
-    async fn has_gpu_capacity(&self) -> Result<bool, DriverError> {
+    /// Whether any *single* node can satisfy a request for `count` GPUs.
+    ///
+    /// Deliberately per-node rather than a cluster-wide sum: a pod is
+    /// scheduled onto one node, so two nodes with one GPU each cannot host a
+    /// two-GPU sandbox. Summing would let such a request through validation
+    /// only for the pod to sit Pending forever.
+    async fn has_gpu_capacity(&self, count: u32) -> Result<bool, DriverError> {
         if !self.cfg.gpu_support {
             return Ok(false);
         }
@@ -628,8 +776,10 @@ impl SandboxProvisioner for KymaProvisioner {
         let list = nodes.list(&ListParams::default()).await?;
         for node in list.items {
             if let Some(alloc) = node.status.as_ref().and_then(|s| s.allocatable.as_ref()) {
+                // Allocatable GPU counts are plain integers — no SI suffixes,
+                // unlike cpu/memory — so a direct parse is sound here.
                 if let Some(q) = alloc.get(GPU_RESOURCE) {
-                    if q.0 != "0" {
+                    if q.0.parse::<u32>().unwrap_or(0) >= count {
                         return Ok(true);
                     }
                 }
@@ -702,6 +852,9 @@ mod tests {
         DriverSandbox {
             id: id.into(),
             name: name.into(),
+            // Every sandbox the gateway sends carries a workspace since
+            // v0.0.91; an empty one is rejected by `validate_kube_resource_name`.
+            workspace: "default".into(),
             spec: Some(DriverSandboxSpec {
                 template: Some(DriverSandboxTemplate {
                     image: image.into(),
@@ -845,9 +998,10 @@ mod tests {
 
         let vols = spec["podTemplate"]["spec"]["volumes"].as_array().unwrap();
         let ws = vols.iter().find(|v| v["name"] == "workspace").unwrap();
+        // Workspace-qualified, matching what `ensure_sandbox_pvc` creates.
         assert_eq!(
             ws["persistentVolumeClaim"]["claimName"],
-            "my-sandbox-workspace"
+            "default--my-sandbox-workspace"
         );
 
         let mounts = spec["podTemplate"]["spec"]["containers"][0]["volumeMounts"]
@@ -1020,14 +1174,83 @@ mod tests {
         let client = Client::new(svc, "test-ns");
         let p = KymaProvisioner::new(client, cfg);
         // No HTTP request is made because the flag short-circuits.
-        assert!(!p.has_gpu_capacity().await.unwrap());
+        assert!(!p.has_gpu_capacity(1).await.unwrap());
     }
 
     #[tokio::test]
     async fn validate_create_passes_when_no_gpu_requested() {
         let p = make_provisioner();
         let sb = make_sandbox("sb-1", "x", "img");
-        // gpu=false in the spec; no node check should be needed.
+        // No resource_requirements.gpu in the spec; no node check needed.
         p.validate_create(&sb).await.unwrap();
+    }
+
+    /// A zero GPU count must fail as a malformed request, and must do so
+    /// *before* any node listing — otherwise the mock client would be hit.
+    #[tokio::test]
+    async fn validate_create_rejects_zero_gpu_count() {
+        use computev1::pb::{GpuResourceRequirements, ResourceRequirements};
+
+        let p = make_provisioner();
+        let mut sb = make_sandbox("sb-1", "x", "img");
+        sb.spec.as_mut().unwrap().resource_requirements = Some(ResourceRequirements {
+            gpu: Some(GpuResourceRequirements { count: Some(0) }),
+        });
+        let err = p
+            .validate_create(&sb)
+            .await
+            .expect_err("count 0 is invalid");
+        assert!(matches!(err, DriverError::InvalidArgument(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn validate_create_rejects_overlong_object_name() {
+        let p = make_provisioner();
+        // 54 chars is the cap under the `default` workspace (63 - len - 2).
+        let sb = make_sandbox("sb-1", &"a".repeat(55), "img");
+        let err = p
+            .validate_create(&sb)
+            .await
+            .expect_err("name should exceed DNS-1123 limit");
+        assert!(matches!(err, DriverError::InvalidArgument(_)), "{err:?}");
+    }
+
+    #[test]
+    fn kube_resource_name_is_workspace_qualified() {
+        assert_eq!(kube_resource_name("default", "hello"), "default--hello");
+        // The separator is two dashes so a single-dash workspace or sandbox
+        // name cannot forge a collision (`a-b` + `c` vs `a` + `b-c`).
+        assert_ne!(
+            kube_resource_name("a-b", "c"),
+            kube_resource_name("a", "b-c")
+        );
+    }
+
+    #[test]
+    fn validate_kube_resource_name_boundaries() {
+        // Exactly 63 is allowed; 64 is not.
+        let at_limit = "a".repeat(63 - "default".len() - 2);
+        assert!(validate_kube_resource_name("default", &at_limit).is_ok());
+        let over = format!("{at_limit}a");
+        assert!(validate_kube_resource_name("default", &over).is_err());
+        // An empty workspace would produce a leading `--`, which is not a
+        // valid DNS-1123 label.
+        assert!(validate_kube_resource_name("", "hello").is_err());
+    }
+
+    /// The CR must carry every label `object_to_driver_sandbox` reads back,
+    /// or a sandbox we create becomes one we cannot list.
+    #[tokio::test]
+    async fn build_dynamic_object_round_trips_through_object_to_driver_sandbox() {
+        let p = make_provisioner();
+        let sb = make_sandbox("id-9", "round-trip", "img");
+        let obj = p.build_dynamic_object(&sb);
+
+        assert_eq!(obj.metadata.name.as_deref(), Some("default--round-trip"));
+
+        let back = object_to_driver_sandbox(&obj).expect("CR should be convertible");
+        assert_eq!(back.id, "id-9");
+        assert_eq!(back.name, "round-trip");
+        assert_eq!(back.workspace, "default");
     }
 }

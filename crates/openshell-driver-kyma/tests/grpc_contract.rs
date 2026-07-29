@@ -41,12 +41,12 @@ mock! {
     #[async_trait]
     impl SandboxProvisioner for Provisioner {
         async fn create(&self, sb: &DriverSandbox) -> Result<(), DriverError>;
-        async fn delete(&self, name: &str) -> Result<(), DriverError>;
-        async fn get(&self, name: &str) -> Result<DriverSandbox, DriverError>;
+        async fn delete(&self, sandbox_id: &str) -> Result<(), DriverError>;
+        async fn get(&self, sandbox_id: &str) -> Result<DriverSandbox, DriverError>;
         async fn list(&self) -> Result<Vec<DriverSandbox>, DriverError>;
         async fn watch(&self) -> Result<mpsc::Receiver<WatchEvent>, DriverError>;
         async fn validate_create(&self, sb: &DriverSandbox) -> Result<(), DriverError>;
-        async fn has_gpu_capacity(&self) -> Result<bool, DriverError>;
+        async fn has_gpu_capacity(&self, count: u32) -> Result<bool, DriverError>;
         async fn apply_apirule(&self, manifest: serde_json::Value) -> Result<(), DriverError>;
     }
 }
@@ -61,7 +61,13 @@ mock! {
             template: serde_json::Value,
             namespace: &str,
         ) -> Result<serde_json::Value, DriverError>;
-        fn render_apirule(&self, sandbox_id: &str, sandbox_name: &str) -> Option<serde_json::Value>;
+        fn render_apirule(
+            &self,
+            sandbox_id: &str,
+            kube_name: &str,
+            sandbox_name: &str,
+            workspace: &str,
+        ) -> Option<serde_json::Value>;
     }
 }
 
@@ -165,7 +171,11 @@ async fn grpc_get_capabilities_returns_kyma() {
         .unwrap()
         .into_inner();
     assert_eq!(r.driver_name, "kyma");
-    assert!(r.supports_gpu);
+    // `supports_gpu` was reserved upstream in v0.0.91 and no longer exists on
+    // the response. GPU capability is now surfaced at ValidateSandboxCreate
+    // instead — see `validate_create_rejects_gpu_without_capacity`.
+    assert!(!r.driver_version.is_empty());
+    assert!(!r.default_image.is_empty());
 
     drop(shutdown);
     let _ = handle.await;

@@ -2,35 +2,74 @@
 //! proto messages, plus small map/env helpers shared by the provisioner
 //! and the enricher.
 
+use crate::error::DriverError;
 use computev1::pb::{
     DriverCondition, DriverResourceRequirements, DriverSandbox, DriverSandboxStatus,
+    ResourceRequirements,
 };
 use kube::core::DynamicObject;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 
-const LABEL_SANDBOX_ID: &str = "openshell.ai/sandbox-id";
+pub const LABEL_SANDBOX_ID: &str = "openshell.ai/sandbox-id";
+pub const LABEL_SANDBOX_NAME: &str = "openshell.ai/sandbox-name";
+pub const LABEL_SANDBOX_NAMESPACE: &str = "openshell.ai/sandbox-namespace";
+pub const LABEL_SANDBOX_WORKSPACE: &str = "openshell.ai/sandbox-workspace";
+
+/// Read an identity value from the CR, preferring the annotation over the
+/// label. Mirrors upstream's `annotation_or_label`: label *values* are capped
+/// at 63 chars and restricted to `[A-Za-z0-9._-]`, so the annotation copy is
+/// the lossless one when a value would not survive as a label.
+fn annotation_or_label(obj: &DynamicObject, key: &str) -> Option<String> {
+    obj.metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get(key).cloned())
+        .filter(|v| !v.is_empty())
+        .or_else(|| {
+            obj.metadata
+                .labels
+                .as_ref()
+                .and_then(|l| l.get(key).cloned())
+                .filter(|v| !v.is_empty())
+        })
+}
 
 /// Convert a Sandbox CR `DynamicObject` into a `DriverSandbox` proto message.
 ///
-/// The CR carries the stable sandbox id in the `openshell.ai/sandbox-id`
-/// label (set by the driver at create time) and exposes status fields under
-/// `status.{sandboxName,agentPod,agentFd,sandboxFd,conditions}`. A non-nil
-/// `metadata.deletionTimestamp` means the controller has begun teardown;
-/// surface that as `status.deleting = true`.
-#[must_use]
-pub fn object_to_driver_sandbox(obj: &DynamicObject) -> DriverSandbox {
-    let sandbox_id = obj
-        .metadata
-        .labels
-        .as_ref()
-        .and_then(|l| l.get(LABEL_SANDBOX_ID).cloned())
-        .unwrap_or_default();
+/// Identity (`id`, `name`, `workspace`) comes from the CR's labels/annotations,
+/// **not** from `metadata.name`. Since v0.0.91 the CR is named
+/// `{workspace}--{name}` for collision safety across workspaces, so
+/// `metadata.name` is a derived object name and reporting it as the sandbox
+/// name would hand the gateway `default--foo` instead of `foo`. Upstream's
+/// `sandbox_from_object` reads the labels for exactly this reason.
+///
+/// Status fields come from `status.{sandboxName,agentPod,agentFd,sandboxFd,
+/// conditions}`. A non-nil `metadata.deletionTimestamp` means the controller
+/// has begun teardown; surface that as `status.deleting = true`.
+///
+/// # Errors
+/// Returns `Err` when a required identity label is missing — including CRs
+/// created before the v0.0.91 workspace migration, which carry no workspace.
+/// Callers list/watch should skip such objects rather than fail outright.
+pub fn object_to_driver_sandbox(obj: &DynamicObject) -> Result<DriverSandbox, String> {
+    let kube_name = obj.metadata.name.clone().unwrap_or_default();
+
+    let Some(sandbox_id) = annotation_or_label(obj, LABEL_SANDBOX_ID) else {
+        return Err(format!("object {kube_name} missing sandbox id"));
+    };
+    let Some(name) = annotation_or_label(obj, LABEL_SANDBOX_NAME) else {
+        return Err(format!("object {kube_name} missing sandbox name"));
+    };
+    let Some(workspace) = annotation_or_label(obj, LABEL_SANDBOX_WORKSPACE) else {
+        return Err(format!("object {kube_name} missing sandbox workspace"));
+    };
 
     let mut sb = DriverSandbox {
         id: sandbox_id,
-        name: obj.metadata.name.clone().unwrap_or_default(),
+        name,
         namespace: obj.metadata.namespace.clone().unwrap_or_default(),
+        workspace,
         ..Default::default()
     };
 
@@ -46,7 +85,7 @@ pub fn object_to_driver_sandbox(obj: &DynamicObject) -> DriverSandbox {
             .deleting = true;
     }
 
-    sb
+    Ok(sb)
 }
 
 fn status_from_map(status: &Map<String, Value>) -> DriverSandboxStatus {
@@ -123,10 +162,43 @@ pub fn build_env_list(
     out
 }
 
-/// Convert proto `DriverResourceRequirements` and a GPU flag into a JSON
-/// `resources` map for a Kubernetes container spec.
+/// Resolve the effective GPU count from a spec's `resource_requirements`.
+///
+/// Mirrors upstream's `openshell_core::gpu::{driver_gpu_requirements,
+/// effective_driver_gpu_count}` (NVIDIA/OpenShell v0.0.91) exactly, including
+/// the error string, so gateway-side UX matches the in-tree drivers:
+///
+/// - no `resource_requirements`, or no `gpu` inside it, => `None` (no GPU)
+/// - `gpu` present with `count` omitted                 => `Some(1)`
+/// - `gpu` present with `count == 0`                    => error
+///
+/// Upstream replaced the old `bool gpu = 9` with `ResourceRequirements` at the
+/// same field number in v0.0.91 — a wire-breaking change, which is why this
+/// must be read as a message and never as a bool.
+///
+/// # Errors
+/// Returns `DriverError::InvalidArgument` when a GPU is requested with count 0.
+pub fn effective_gpu_count(
+    resources: Option<&ResourceRequirements>,
+) -> Result<Option<u32>, DriverError> {
+    let Some(gpu) = resources.and_then(|r| r.gpu.as_ref()) else {
+        return Ok(None);
+    };
+    let count = gpu.count.unwrap_or(1);
+    if count == 0 {
+        return Err(DriverError::InvalidArgument(
+            "gpu count must be greater than 0".to_string(),
+        ));
+    }
+    Ok(Some(count))
+}
+
+/// Convert proto `DriverResourceRequirements` and a GPU count into a JSON
+/// `resources` map for a Kubernetes container spec. A `gpu_count` of `None`
+/// (or `Some(0)`, which callers should have rejected earlier) emits no
+/// `nvidia.com/gpu` limit.
 #[must_use]
-pub fn build_resources(res: &DriverResourceRequirements, gpu: bool) -> Value {
+pub fn build_resources(res: &DriverResourceRequirements, gpu_count: Option<u32>) -> Value {
     let mut requests = Map::new();
     let mut limits = Map::new();
 
@@ -142,8 +214,8 @@ pub fn build_resources(res: &DriverResourceRequirements, gpu: bool) -> Value {
     if !res.memory_limit.is_empty() {
         limits.insert("memory".into(), Value::String(res.memory_limit.clone()));
     }
-    if gpu {
-        limits.insert("nvidia.com/gpu".into(), Value::String("1".into()));
+    if let Some(count) = gpu_count.filter(|c| *c > 0) {
+        limits.insert("nvidia.com/gpu".into(), Value::String(count.to_string()));
     }
 
     let mut out = Map::new();
@@ -199,28 +271,49 @@ mod tests {
         obj
     }
 
+    /// The bare sandbox name comes from the label, NOT from `metadata.name`
+    /// — the CR is named `{workspace}--{name}` and the gateway only ever
+    /// knows the bare name. Reporting `ws-a--sb-1` here would make every
+    /// subsequent gateway lookup miss.
     #[test]
-    fn id_extracted_from_label() {
+    fn identity_extracted_from_labels_not_object_name() {
         let obj = dynamic_object_from_json(json!({
             "metadata": {
-                "name": "sb-1",
+                "name": "ws-a--sb-1",
                 "namespace": "ns-1",
-                "labels": { "openshell.ai/sandbox-id": "id-123" }
+                "labels": {
+                    "openshell.ai/sandbox-id": "id-123",
+                    "openshell.ai/sandbox-name": "sb-1",
+                    "openshell.ai/sandbox-workspace": "ws-a"
+                }
             }
         }));
-        let sb = object_to_driver_sandbox(&obj);
+        let sb = object_to_driver_sandbox(&obj).unwrap();
         assert_eq!(sb.id, "id-123");
         assert_eq!(sb.name, "sb-1");
+        assert_eq!(sb.workspace, "ws-a");
         assert_eq!(sb.namespace, "ns-1");
+    }
+
+    #[test]
+    fn missing_identity_labels_are_an_error_not_a_panic() {
+        let obj = dynamic_object_from_json(json!({
+            "metadata": { "name": "orphan", "namespace": "ns-1" }
+        }));
+        let err = object_to_driver_sandbox(&obj).expect_err("should reject unlabelled CR");
+        assert!(
+            err.contains("orphan"),
+            "error should name the object: {err}"
+        );
     }
 
     #[test]
     fn agent_pod_becomes_instance_id() {
         let obj = dynamic_object_from_json(json!({
-            "metadata": { "name": "sb-2", "namespace": "ns" },
+            "metadata": { "name": "sb-2", "namespace": "ns", "labels": { "openshell.ai/sandbox-id": "id-sb-2", "openshell.ai/sandbox-name": "sb-2", "openshell.ai/sandbox-workspace": "default" } },
             "status": { "agentPod": "pod-xyz", "sandboxName": "sb-2-cr" }
         }));
-        let sb = object_to_driver_sandbox(&obj);
+        let sb = object_to_driver_sandbox(&obj).unwrap();
         let st = sb.status.unwrap();
         assert_eq!(st.instance_id, "pod-xyz");
         assert_eq!(st.sandbox_name, "sb-2-cr");
@@ -229,7 +322,7 @@ mod tests {
     #[test]
     fn conditions_array_is_extracted() {
         let obj = dynamic_object_from_json(json!({
-            "metadata": { "name": "sb-3", "namespace": "ns" },
+            "metadata": { "name": "sb-3", "namespace": "ns", "labels": { "openshell.ai/sandbox-id": "id-sb-3", "openshell.ai/sandbox-name": "sb-3", "openshell.ai/sandbox-workspace": "default" } },
             "status": {
                 "conditions": [
                     {
@@ -246,7 +339,7 @@ mod tests {
                 ]
             }
         }));
-        let sb = object_to_driver_sandbox(&obj);
+        let sb = object_to_driver_sandbox(&obj).unwrap();
         let st = sb.status.unwrap();
         assert_eq!(st.conditions.len(), 2);
         assert_eq!(st.conditions[0].r#type, "Ready");
@@ -262,10 +355,15 @@ mod tests {
             "metadata": {
                 "name": "sb-4",
                 "namespace": "ns",
-                "deletionTimestamp": "2026-05-27T00:00:00Z"
+                "deletionTimestamp": "2026-05-27T00:00:00Z",
+                "labels": {
+                    "openshell.ai/sandbox-id": "id-sb-4",
+                    "openshell.ai/sandbox-name": "sb-4",
+                    "openshell.ai/sandbox-workspace": "default"
+                }
             }
         }));
-        let sb = object_to_driver_sandbox(&obj);
+        let sb = object_to_driver_sandbox(&obj).unwrap();
         let st = sb.status.unwrap();
         assert!(st.deleting);
     }
@@ -285,6 +383,40 @@ mod tests {
         assert_eq!(bar["value"], "tmpl-bar");
     }
 
+    /// Upstream's `effective_driver_gpu_count` semantics, pinned. The
+    /// omitted-count-means-one rule is easy to get wrong in the direction of
+    /// silently allocating zero GPUs for a request that asked for a GPU.
+    #[test]
+    fn effective_gpu_count_matches_upstream_semantics() {
+        use computev1::pb::{GpuResourceRequirements, ResourceRequirements};
+
+        // No resource_requirements at all -> no GPU.
+        assert_eq!(effective_gpu_count(None).unwrap(), None);
+
+        // resource_requirements present but no gpu block -> no GPU.
+        let no_gpu = ResourceRequirements::default();
+        assert_eq!(effective_gpu_count(Some(&no_gpu)).unwrap(), None);
+
+        // gpu block with no count -> exactly one GPU.
+        let implicit = ResourceRequirements {
+            gpu: Some(GpuResourceRequirements::default()),
+        };
+        assert_eq!(effective_gpu_count(Some(&implicit)).unwrap(), Some(1));
+
+        // Explicit count is honoured.
+        let explicit = ResourceRequirements {
+            gpu: Some(GpuResourceRequirements { count: Some(4) }),
+        };
+        assert_eq!(effective_gpu_count(Some(&explicit)).unwrap(), Some(4));
+
+        // count == 0 is a malformed request, not "no GPU".
+        let zero = ResourceRequirements {
+            gpu: Some(GpuResourceRequirements { count: Some(0) }),
+        };
+        let err = effective_gpu_count(Some(&zero)).expect_err("count 0 must be rejected");
+        assert!(matches!(err, DriverError::InvalidArgument(_)), "{err:?}");
+    }
+
     #[test]
     fn build_resources_emits_requests_and_limits() {
         let res = DriverResourceRequirements {
@@ -293,7 +425,7 @@ mod tests {
             cpu_limit: "500m".into(),
             memory_limit: "512Mi".into(),
         };
-        let r = build_resources(&res, false);
+        let r = build_resources(&res, None);
         assert_eq!(r["requests"]["cpu"], "100m");
         assert_eq!(r["requests"]["memory"], "128Mi");
         assert_eq!(r["limits"]["cpu"], "500m");
@@ -304,8 +436,15 @@ mod tests {
     #[test]
     fn build_resources_adds_gpu_limit_when_requested() {
         let res = DriverResourceRequirements::default();
-        let r = build_resources(&res, true);
+        let r = build_resources(&res, Some(1));
         assert_eq!(r["limits"]["nvidia.com/gpu"], "1");
+    }
+
+    #[test]
+    fn build_resources_emits_requested_gpu_count() {
+        let res = DriverResourceRequirements::default();
+        let r = build_resources(&res, Some(4));
+        assert_eq!(r["limits"]["nvidia.com/gpu"], "4");
     }
 
     #[test]

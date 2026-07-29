@@ -61,11 +61,15 @@ impl ComputeDriver for Driver {
         &self,
         _req: Request<GetCapabilitiesRequest>,
     ) -> Result<Response<GetCapabilitiesResponse>, Status> {
+        // `supports_gpu` (field 4) was reserved upstream in v0.0.91 — the
+        // gateway no longer learns GPU capability from capabilities. A GPU
+        // request is now rejected at ValidateSandboxCreate instead, which
+        // moves the failure from list-time to create-time. `cfg.gpu_support`
+        // still gates that validation; see `has_gpu_capacity`.
         Ok(Response::new(GetCapabilitiesResponse {
             driver_name: DRIVER_NAME.to_string(),
             driver_version: env!("CARGO_PKG_VERSION").to_string(),
             default_image: DEFAULT_SANDBOX_IMAGE.to_string(),
-            supports_gpu: self.cfg.gpu_support,
         }))
     }
 
@@ -113,19 +117,28 @@ impl ComputeDriver for Driver {
         }
 
         let start = Instant::now();
-        let gpu = spec.gpu;
+        // GPU is now a message (`resource_requirements`), not a bool. Resolve
+        // it up front so a `count: 0` request fails before we touch the cluster.
+        let gpu_count = crate::helpers::effective_gpu_count(spec.resource_requirements.as_ref())
+            .map_err(Status::from)?;
         let name = sb.name.clone();
         let id = sb.id.clone();
+        let workspace = sb.workspace.clone();
+        let kube_name = crate::provisioner::kube_resource_name(&workspace, &name);
         match self.provisioner.create(&sb).await {
             Ok(()) => {
-                self.metrics.sandbox_created(&name, gpu, start.elapsed());
+                self.metrics
+                    .sandbox_created(&name, gpu_count.is_some(), start.elapsed());
 
                 // Optional APIRule post — gated by --enable-apirule. Failure
                 // here does NOT roll back the Sandbox CR; we surface it as
                 // a metric and log so operators can investigate. Returning
                 // the create-success keeps the gateway happy.
                 if self.cfg.enable_apirule {
-                    if let Some(manifest) = self.enricher.render_apirule(&id, &name) {
+                    if let Some(manifest) = self
+                        .enricher
+                        .render_apirule(&id, &kube_name, &name, &workspace)
+                    {
                         if let Err(e) = self.provisioner.apply_apirule(manifest).await {
                             self.metrics.sandbox_failed(&name, "apirule_failed");
                             tracing::warn!(
@@ -150,8 +163,10 @@ impl ComputeDriver for Driver {
         &self,
         req: Request<GetSandboxRequest>,
     ) -> Result<Response<GetSandboxResponse>, Status> {
-        let name = req.into_inner().sandbox_name;
-        let sandbox = self.provisioner.get(&name).await.map_err(Status::from)?;
+        // Keyed by id, not name — the CR is named `{workspace}--{name}` and
+        // the gateway only ever sends the bare name.
+        let id = req.into_inner().sandbox_id;
+        let sandbox = self.provisioner.get(&id).await.map_err(Status::from)?;
         Ok(Response::new(GetSandboxResponse {
             sandbox: Some(sandbox),
         }))
@@ -182,7 +197,7 @@ impl ComputeDriver for Driver {
         let name = inner.sandbox_name;
         let id = inner.sandbox_id;
 
-        match self.provisioner.delete(&name).await {
+        match self.provisioner.delete(&id).await {
             Ok(()) => {
                 self.metrics.sandbox_deleted(&name);
                 tracing::info!(sandbox_id = %id, sandbox_name = %name, "sandbox deleted");
@@ -289,7 +304,7 @@ mod tests {
     // ---------- GetCapabilities + StopSandbox ----------
 
     #[tokio::test]
-    async fn get_capabilities_reports_kyma_and_gpu_flag() {
+    async fn get_capabilities_reports_kyma() {
         let cfg = Config {
             gpu_support: true,
             ..Config::default()
@@ -303,27 +318,36 @@ mod tests {
             .into_inner();
         assert_eq!(r.driver_name, "kyma");
         assert!(!r.driver_version.is_empty());
-        assert!(r.supports_gpu);
         assert_eq!(
             r.default_image,
             "ghcr.io/nvidia/openshell-community/sandboxes/base:latest"
         );
     }
 
+    /// v0.0.91 reserved `supports_gpu`, so capabilities no longer vary with
+    /// `--gpu-support`. Pinning that here keeps anyone from reintroducing a
+    /// GPU signal on a response field the gateway stopped reading.
     #[tokio::test]
-    async fn get_capabilities_reports_no_gpu_when_disabled() {
-        let cfg = Config {
-            gpu_support: false,
-            ..Config::default()
-        };
-        let d =
-            make_driver_with_mocks(cfg, MockSandboxProvisioner::new(), MockDriverMetrics::new());
-        let r = d
-            .get_capabilities(Request::new(GetCapabilitiesRequest {}))
-            .await
-            .unwrap()
-            .into_inner();
-        assert!(!r.supports_gpu);
+    async fn get_capabilities_is_independent_of_gpu_support() {
+        let mut responses = Vec::new();
+        for gpu_support in [true, false] {
+            let cfg = Config {
+                gpu_support,
+                ..Config::default()
+            };
+            let d = make_driver_with_mocks(
+                cfg,
+                MockSandboxProvisioner::new(),
+                MockDriverMetrics::new(),
+            );
+            responses.push(
+                d.get_capabilities(Request::new(GetCapabilitiesRequest {}))
+                    .await
+                    .unwrap()
+                    .into_inner(),
+            );
+        }
+        assert_eq!(responses[0], responses[1]);
     }
 
     #[tokio::test]
