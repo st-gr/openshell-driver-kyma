@@ -120,6 +120,27 @@ osh sandbox create --name "$SB_NAME" \
 CREATE_PID=$!
 trap 'kill "$PF_PID" "$CREATE_PID" 2>/dev/null || true' EXIT
 
+# 6b. Resolve the Kubernetes object name. Since driver v0.0.91-sync the CR is
+#     named `{workspace}--{name}`, and the pod inherits that name — so the
+#     bare `$SB_NAME` is NOT a valid kubectl target. Resolve by label rather
+#     than reconstructing the name, so this keeps working if the naming
+#     scheme changes again.
+log "resolving Sandbox CR for '$SB_NAME'..."
+SB_CR=""
+deadline=$(( $(date +%s) + 60 ))
+while [ "$(date +%s)" -lt "$deadline" ]; do
+  SB_CR=$(kubectl -n "$NS" get sandbox \
+    -l "openshell.ai/sandbox-name=$SB_NAME" \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+  [ -n "$SB_CR" ] && break
+  sleep 2
+done
+[ -n "$SB_CR" ] || {
+  kubectl -n "$NS" get sandbox --show-labels 2>&1 | tail -10 >&2 || true
+  die "no Sandbox CR labelled openshell.ai/sandbox-name=$SB_NAME appeared"
+}
+log "Sandbox CR is '$SB_CR' (sandbox name '$SB_NAME')"
+
 # 7. Wait until the sandbox pod is Running AND its container reports
 #    Ready=true. Container readiness only flips true after the supervisor
 #    successfully completes IssueSandboxToken, fetches its policy, and
@@ -128,17 +149,17 @@ log "waiting up to ${TIMEOUT_READY}s for sandbox pod Ready..."
 deadline=$(( $(date +%s) + TIMEOUT_READY ))
 ready=0
 while [ "$(date +%s)" -lt "$deadline" ]; do
-  phase=$(kubectl -n "$NS" get pod "$SB_NAME" -o jsonpath='{.status.phase}' 2>/dev/null || true)
-  cready=$(kubectl -n "$NS" get pod "$SB_NAME" -o jsonpath='{.status.containerStatuses[0].ready}' 2>/dev/null || true)
+  phase=$(kubectl -n "$NS" get pod "$SB_CR" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+  cready=$(kubectl -n "$NS" get pod "$SB_CR" -o jsonpath='{.status.containerStatuses[0].ready}' 2>/dev/null || true)
   if [ "$phase" = "Running" ] && [ "$cready" = "true" ]; then ready=1; break; fi
   sleep 3
 done
 [ "$ready" = 1 ] || {
   log "Sandbox CR + Pod state on failure:"
-  kubectl -n "$NS" get sandbox "$SB_NAME" -o yaml 2>&1 | tail -30 >&2 || true
-  kubectl -n "$NS" describe pod "$SB_NAME" 2>&1 | tail -25 >&2 || true
+  kubectl -n "$NS" get sandbox "$SB_CR" -o yaml 2>&1 | tail -30 >&2 || true
+  kubectl -n "$NS" describe pod "$SB_CR" 2>&1 | tail -25 >&2 || true
   log "Supervisor (agent) logs:"
-  kubectl -n "$NS" logs "$SB_NAME" -c agent --tail=20 2>&1 >&2 || true
+  kubectl -n "$NS" logs "$SB_CR" -c agent --tail=20 2>&1 >&2 || true
   die "sandbox pod did not reach Ready in ${TIMEOUT_READY}s"
 }
 log "pod is Ready (supervisor IssueSandboxToken bootstrap succeeded)"
@@ -158,5 +179,5 @@ log "exec returned: OK"
 
 # 9. Cleanup. Trap kills port-forward + the background CLI.
 log "cleaning up sandbox '$SB_NAME'..."
-kubectl -n "$NS" delete sandbox "$SB_NAME" --wait=false >/dev/null 2>&1 || true
+kubectl -n "$NS" delete sandbox "$SB_CR" --wait=false >/dev/null 2>&1 || true
 log "DONE: full end-to-end chain (CLI -> gateway -> driver -> CR -> pod -> supervisor -> CLI exec) is operational"

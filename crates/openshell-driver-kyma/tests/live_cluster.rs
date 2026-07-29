@@ -237,11 +237,22 @@ fn unique_name(prefix: &str) -> String {
     format!("{prefix}-{nanos}")
 }
 
+/// Workspace every test sandbox is created in. Since v0.0.91 the gateway
+/// always sends one, and the driver rejects an empty workspace.
+const TEST_WORKSPACE: &str = "default";
+
+/// The Kubernetes object name the driver derives for a sandbox. Tests that
+/// read the CR directly must use this, not the bare sandbox name.
+fn cr_name(sandbox_name: &str) -> String {
+    format!("{TEST_WORKSPACE}--{sandbox_name}")
+}
+
 fn make_create_request(name: &str, image: &str) -> CreateSandboxRequest {
     CreateSandboxRequest {
         sandbox: Some(DriverSandbox {
             id: format!("id-{name}"),
             name: name.into(),
+            workspace: TEST_WORKSPACE.into(),
             spec: Some(DriverSandboxSpec {
                 template: Some(DriverSandboxTemplate {
                     image: image.into(),
@@ -322,9 +333,42 @@ async fn test_get_sandbox() {
         .expect("get")
         .into_inner();
     let sb = got.sandbox.expect("sandbox in response");
+    // The CR on the cluster is named `default--get-<nanos>`, but the gateway
+    // must get the BARE name back. Returning the qualified object name here
+    // would make every subsequent gateway-side lookup miss.
     assert_eq!(sb.name, name);
     assert_eq!(sb.id, format!("id-{name}"));
     assert_eq!(sb.namespace, ns);
+    assert_eq!(sb.workspace, TEST_WORKSPACE);
+
+    cleanup_sandboxes(&client, &ns).await;
+}
+
+/// `get` must resolve through the `sandbox-id` label, not the name. Sending a
+/// deliberately wrong `sandbox_name` proves the name is not consulted — if a
+/// direct name lookup ever creeps back in, this fails.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_get_sandbox_resolves_by_id_not_name() {
+    let Some((driver, client, ns)) = setup_integration().await else {
+        return;
+    };
+    let name = unique_name("byid");
+
+    driver
+        .create_sandbox(Request::new(make_create_request(&name, "agent:1.0")))
+        .await
+        .expect("create");
+
+    let got = driver
+        .get_sandbox(Request::new(GetSandboxRequest {
+            sandbox_id: format!("id-{name}"),
+            sandbox_name: "totally-wrong-name".into(),
+        }))
+        .await
+        .expect("get should succeed on id alone")
+        .into_inner();
+    let sb = got.sandbox.expect("sandbox in response");
+    assert_eq!(sb.name, name);
 
     cleanup_sandboxes(&client, &ns).await;
 }
@@ -380,7 +424,7 @@ async fn test_verify_labels_and_supervisor_init_container() {
     // Read raw CR via the dynamic client to inspect the label set + spec.
     let ar = sandbox_api_resource();
     let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), &ns, &ar);
-    let obj = api.get(&name).await.expect("read CR");
+    let obj = api.get(&cr_name(&name)).await.expect("read CR");
 
     // Required labels.
     let labels = obj.metadata.labels.expect("labels present");
@@ -395,6 +439,19 @@ async fn test_verify_labels_and_supervisor_init_container() {
     assert_eq!(
         labels.get("openshell.ai/sandbox-id").map(|s| s.as_str()),
         Some(format!("id-{name}").as_str())
+    );
+    // Identity labels the gateway-facing conversion reads back. The CR is
+    // named `{workspace}--{name}`, so without these the bare sandbox name and
+    // workspace would be unrecoverable from the object.
+    assert_eq!(
+        labels.get("openshell.ai/sandbox-name").map(|s| s.as_str()),
+        Some(name.as_str())
+    );
+    assert_eq!(
+        labels
+            .get("openshell.ai/sandbox-workspace")
+            .map(|s| s.as_str()),
+        Some(TEST_WORKSPACE)
     );
 
     // Supervisor init container.
@@ -444,7 +501,7 @@ async fn test_e2e_sandbox_reaches_ready_or_records_status() {
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut observed_status = false;
     while Instant::now() < deadline {
-        if let Ok(obj) = api.get(&name).await {
+        if let Ok(obj) = api.get(&cr_name(&name)).await {
             if obj.data.get("status").is_some() {
                 observed_status = true;
                 break;
