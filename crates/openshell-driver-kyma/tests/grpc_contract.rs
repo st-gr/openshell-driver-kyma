@@ -14,8 +14,9 @@ use async_trait::async_trait;
 use computev1::pb::{
     compute_driver_client::ComputeDriverClient, compute_driver_server::ComputeDriverServer,
     watch_sandboxes_event::Payload, CreateSandboxRequest, DeleteSandboxRequest, DriverSandbox,
-    DriverSandboxSpec, DriverSandboxTemplate, GetCapabilitiesRequest, GetSandboxRequest,
-    ListSandboxesRequest, StopSandboxRequest, ValidateSandboxCreateRequest, WatchSandboxesRequest,
+    DriverSandboxSpec, DriverSandboxTemplate, GetCapabilitiesRequest,
+    GetGatewayListenerRequirementsRequest, GetSandboxRequest, ListSandboxesRequest,
+    StopSandboxRequest, ValidateSandboxCreateRequest, WatchSandboxesRequest,
 };
 use mockall::mock;
 use openshell_driver_kyma::{
@@ -176,6 +177,30 @@ async fn grpc_get_capabilities_returns_kyma() {
     // instead — see `validate_create_rejects_gpu_without_capacity`.
     assert!(!r.driver_version.is_empty());
     assert!(!r.default_image.is_empty());
+
+    drop(shutdown);
+    let _ = handle.await;
+}
+
+/// Over the real wire, not just the trait: proves a v0.0.97 gateway calling
+/// this RPC gets a valid empty response rather than `Unimplemented`.
+#[tokio::test]
+async fn grpc_gateway_listener_requirements_returns_empty() {
+    let (_dir, socket) = temp_socket();
+    let (mut client, shutdown, handle) = start_server(
+        socket,
+        MockProvisioner::new(),
+        MockEnricher::new(),
+        MockMetrics::new(),
+    )
+    .await;
+
+    let r = client
+        .get_gateway_listener_requirements(GetGatewayListenerRequirementsRequest {})
+        .await
+        .expect("RPC must be implemented, not Unimplemented")
+        .into_inner();
+    assert!(r.requirements.is_empty());
 
     drop(shutdown);
     let _ = handle.await;

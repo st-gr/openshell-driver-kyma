@@ -94,3 +94,84 @@ EOF
 fi
 
 printf 'All vendored protos match upstream %s.\n' "$ref"
+
+# ---------------------------------------------------------------------------
+# Advisory: is upstream ahead of the pin?
+#
+# Everything above compares against the PINNED ref, so it stays green forever
+# while upstream moves on — by design, since bumping the pin must be a
+# deliberate commit. The cost is that "six releases behind" is invisible.
+# That is the same blind spot that let the original vendoring drift for two
+# months, so report it here.
+#
+# Deliberately non-fatal: an upstream release is not a defect in this repo,
+# and failing the build on someone else's tag push would make CI red for
+# reasons no PR can fix. It escalates the *wording* — not the exit code —
+# when the contract actually differs.
+# ---------------------------------------------------------------------------
+echo
+latest=$(latest_upstream_tag || true)
+
+if [[ -z $latest ]]; then
+	printf 'Note: could not reach upstream to check for newer releases.\n'
+	printf '      The pinned-ref check above still passed.\n'
+	exit 0
+fi
+
+if [[ $latest == "$ref" ]]; then
+	printf 'Pin is current: %s is the latest upstream release.\n' "$ref"
+	exit 0
+fi
+
+# `sort -V | tail -1` picking $ref means the pin is at or ahead of $latest —
+# e.g. pinned to a release candidate upstream has not tagged as latest yet.
+newest=$(printf '%s\n%s\n' "$ref" "$latest" | sort -V | tail -1)
+if [[ $newest == "$ref" ]]; then
+	printf 'Pin (%s) is at or ahead of the latest upstream tag (%s).\n' "$ref" "$latest"
+	exit 0
+fi
+
+behind=$(git ls-remote --tags "$UPSTREAM_REPO_DEFAULT" 'v*' 2>/dev/null |
+	awk '{print $2}' | sed 's#refs/tags/##; s/\^{}$//' |
+	grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V -u |
+	awk -v a="$ref" -v b="$latest" '$0>a && $0<=b' | wc -l | tr -d ' ')
+
+printf 'ADVISORY: upstream is at %s; this repo is pinned to %s (%s release(s) behind).\n' \
+	"$latest" "$ref" "$behind"
+
+# Does the contract actually differ, or is it just a version number?
+latest_commit=$(upstream_tag_commit "$latest")
+contract_changed=0
+if [[ -n $latest_commit ]]; then
+	while read -r upstream_path local_path recorded_sha; do
+		[[ -n $upstream_path ]] || continue
+		if ! fetch_upstream "$latest_commit" "$upstream_path" >"$tmp/latest" 2>/dev/null; then
+			continue
+		fi
+		if [[ "$(sha256_of "$tmp/latest")" != "$recorded_sha" ]]; then
+			printf '          CHANGED: %s differs at %s\n' "$upstream_path" "$latest"
+			contract_changed=1
+		fi
+	done < <(awk '
+		/^\[\[files\]\]/ { u=""; l=""; s=""; next }
+		/^upstream_path/ { gsub(/.*= *"|"/, ""); u=$0; next }
+		/^local_path/    { gsub(/.*= *"|"/, ""); l=$0; next }
+		/^sha256/        { gsub(/.*= *"|"/, ""); s=$0; print u, l, s; next }
+	' "$LOCK")
+fi
+
+if [[ $contract_changed -eq 1 ]]; then
+	cat <<EOF
+
+          The driver contract itself changed between ${ref} and ${latest}.
+          Review the diff before upgrading the gateway past ${ref}:
+              git diff ${ref}..${latest} -- proto/    # in an OpenShell clone
+          Adopt with:
+              make proto-vendor TAG=${latest} && make proto && make test
+EOF
+else
+	printf '          Vendored protos are byte-identical at %s — no contract change.\n' "$latest"
+	printf '          Bumping the pin is optional; nothing here is at risk.\n'
+fi
+
+exit 0

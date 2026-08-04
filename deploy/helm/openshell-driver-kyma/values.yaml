@@ -38,14 +38,12 @@ sandboxServiceAccount:
 # binary; see openshell-driver-kyma --help for the authoritative list.
 driver:
   socket: /var/run/openshell-driver.sock
-  # Supervisor OCI image. The chart default tracks `:latest` upstream so
-  # `make e2e-cli` keeps working without a values change every time NVIDIA
-  # bumps the supervisor. PRODUCTION DEPLOYMENTS MUST PIN BY DIGEST: the
-  # supervisor runs as root with SYS_ADMIN inside every sandbox, so a
-  # rolling `:latest` is unsafe. The driver passes `--supervisor-image`
-  # straight through to the Sandbox CR, so any reference (`:tag` or
-  # `@sha256:...`) the kubelet accepts works here. To resolve the current
-  # digest:
+  # Supervisor OCI image, PINNED BY DIGEST. The supervisor runs as root
+  # with SYS_ADMIN inside every sandbox, so a rolling `:latest` would let
+  # every new sandbox pick up an unreviewed privileged binary. The driver
+  # passes `--supervisor-image` straight through to the Sandbox CR, so any
+  # reference (`:tag` or `@sha256:...`) the kubelet accepts works here.
+  # To re-resolve after a deliberate upstream bump:
   #   docker buildx imagetools inspect \
   #     ghcr.io/nvidia/openshell/supervisor:latest \
   #     --format '{{json .Manifest.Digest}}'
@@ -57,7 +55,12 @@ driver:
   # gateway.image.tag) also accept digests directly — set tag to a value
   # starting with `sha256:` and the helper emits `<repo>@sha256:<digest>`
   # automatically.
-  supervisorImage: ghcr.io/nvidia/openshell/supervisor:latest
+  #
+  # This digest is supervisor v0.0.97, version-matched to gateway.image
+  # below. It tracked `:latest` until chart 0.3.0 — that tag moved twice
+  # in one week, so sandboxes were silently picking up new privileged
+  # binaries. Re-pin both together when bumping upstream.
+  supervisorImage: ghcr.io/nvidia/openshell/supervisor@sha256:523e0565f8957362d8f3c70c6ef7a221d92b10f32b96fbc76821febfb01bae8e
   supervisorBinaryPath: /openshell-sandbox
   supervisorMountPath: /opt/openshell/bin
   gatewayEndpoint: ""
@@ -160,17 +163,19 @@ podLabels: {}
 gateway:
   enabled: false
   image:
-    # Pinned to upstream `0.0.91` (commit 21da343c). Includes the
-    # external-compute-driver work (NVIDIA/OpenShell#1703), the AWS
-    # Bedrock provider plumbing (NVIDIA/OpenShell#1704), and the TUI
-    # provider config-key form (NVIDIA/OpenShell#2224 / #1798).
+    # Pinned to upstream `0.0.97` (commit fde96f04). Adds the
+    # GetGatewayListenerRequirements RPC the driver now implements.
+    # Carries forward the external-compute-driver work
+    # (NVIDIA/OpenShell#1703), the AWS Bedrock provider plumbing
+    # (NVIDIA/OpenShell#1704), and the TUI provider config-key form
+    # (NVIDIA/OpenShell#2224 / #1798).
     # Keep this in lockstep with the `openshell` CLI version operators
     # install — a newer CLI against an older gateway can fail on
     # commands whose response shape changed (e.g. `inference get`).
     # Bump via
     # https://github.com/NVIDIA/OpenShell/pkgs/container/openshell%2Fgateway
     repository: ghcr.io/nvidia/openshell/gateway
-    tag: "sha256:92e73acabfa3d99cc66cc4e2610de5c78617e690db1aac6d3e965c168ac7f6e7"
+    tag: "sha256:736e9f53b975ef81e1d68ec0d959a7ee936d6f7c155511c8a795189b852d2802"
     pullPolicy: IfNotPresent
   grpcPort: 8080
   metricsPort: 9091

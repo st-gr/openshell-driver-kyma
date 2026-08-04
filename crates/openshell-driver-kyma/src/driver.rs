@@ -9,6 +9,7 @@ use crate::interfaces::{DriverMetrics, PlatformEnricher, SandboxProvisioner, Wat
 use computev1::pb::{
     compute_driver_server::ComputeDriver, CreateSandboxRequest, CreateSandboxResponse,
     DeleteSandboxRequest, DeleteSandboxResponse, GetCapabilitiesRequest, GetCapabilitiesResponse,
+    GetGatewayListenerRequirementsRequest, GetGatewayListenerRequirementsResponse,
     GetSandboxRequest, GetSandboxResponse, ListSandboxesRequest, ListSandboxesResponse,
     StopSandboxRequest, StopSandboxResponse, ValidateSandboxCreateRequest,
     ValidateSandboxCreateResponse, WatchSandboxesDeletedEvent, WatchSandboxesEvent,
@@ -70,6 +71,28 @@ impl ComputeDriver for Driver {
             driver_name: DRIVER_NAME.to_string(),
             driver_version: env!("CARGO_PKG_VERSION").to_string(),
             default_image: DEFAULT_SANDBOX_IMAGE.to_string(),
+        }))
+    }
+
+    /// Added upstream in v0.0.97 so a driver can ask the gateway to bind
+    /// extra listeners. We return none, which is what upstream's own
+    /// Kubernetes driver does.
+    ///
+    /// The feature exists for runtimes whose host forwarder terminates on a
+    /// gateway-local address — rootless pasta under the Docker/Podman/VM
+    /// drivers. A Kyma sandbox is a Pod reached over cluster networking, so
+    /// there is no host-side listener to request.
+    ///
+    /// Implementing it explicitly rather than leaving it unimplemented: the
+    /// gateway does tolerate `Unimplemented` here (it maps it to an empty
+    /// list), but relying on that makes "we have no requirements" and "this
+    /// driver predates the RPC" indistinguishable in the gateway's logs.
+    async fn get_gateway_listener_requirements(
+        &self,
+        _req: Request<GetGatewayListenerRequirementsRequest>,
+    ) -> Result<Response<GetGatewayListenerRequirementsResponse>, Status> {
+        Ok(Response::new(GetGatewayListenerRequirementsResponse {
+            requirements: Vec::new(),
         }))
     }
 
@@ -321,6 +344,31 @@ mod tests {
         assert_eq!(
             r.default_image,
             "ghcr.io/nvidia/openshell-community/sandboxes/base:latest"
+        );
+    }
+
+    /// A Kyma sandbox is a Pod on cluster networking, so the driver must
+    /// never ask the gateway to open a host-side listener. Asserting empty
+    /// keeps a future change from silently widening the gateway's bind
+    /// surface — the gateway trusts this list enough to act on it.
+    #[tokio::test]
+    async fn gateway_listener_requirements_is_empty() {
+        let d = make_driver_with_mocks(
+            Config::default(),
+            MockSandboxProvisioner::new(),
+            MockDriverMetrics::new(),
+        );
+        let r = d
+            .get_gateway_listener_requirements(Request::new(
+                GetGatewayListenerRequirementsRequest {},
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(
+            r.requirements.is_empty(),
+            "kyma driver must not request gateway listeners, got {:?}",
+            r.requirements
         );
     }
 

@@ -6,6 +6,46 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-08-04
+
+### Added
+
+- **Synced the `ComputeDriver` contract to upstream v0.0.97** and implemented
+  the new `GetGatewayListenerRequirements` RPC, returning an empty list —
+  the same thing upstream's own Kubernetes driver returns. The RPC lets a
+  driver ask the gateway to bind extra listeners; it exists for runtimes
+  whose host forwarder terminates on a gateway-local address (rootless pasta
+  under the Docker/Podman/VM drivers). A Kyma sandbox is a Pod reached over
+  cluster networking, so there is no host-side listener to request.
+
+  This was **not** an outage waiting to happen. A v0.0.97 gateway calling the
+  RPC against a v0.0.91-built driver gets `Unimplemented` from tonic's
+  fallback route, and the gateway maps that to an empty list rather than
+  treating it as an error. Implementing it explicitly is still worth doing:
+  it stops "we have no requirements" and "this driver predates the RPC" from
+  looking identical in the gateway's logs.
+
+- **Upstream-ahead advisory in `scripts/check-proto-drift.sh`.** The drift
+  check compares against the *pinned* ref, which is deliberate — bumping the
+  pin should be a reviewable commit, and failing CI on someone else's tag
+  push would make the build red for reasons no PR could fix. The cost was
+  that being six releases behind was invisible, which is the same blind spot
+  that let the original vendoring drift for two months.
+
+  The check now also reports how far behind the pin is, and distinguishes
+  "upstream released" (informational) from "upstream released **and** the
+  contract changed" (actionable, with the diff command). It stays non-fatal
+  in both cases, and treats an unreachable network as "unknown" rather than
+  "up to date".
+
+### Changed
+
+- `driver.supervisorImage` is now **pinned by digest** in the chart default
+  instead of tracking `:latest`. The supervisor runs as root with
+  `SYS_ADMIN` inside every sandbox, so a rolling tag meant every sandbox
+  silently picked up whatever upstream last pushed — the chart's own comment
+  already warned against exactly this.
+
 ## [0.2.0] — 2026-07-29
 
 ### Changed — BREAKING

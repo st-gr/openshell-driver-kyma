@@ -46,6 +46,29 @@ strip_header() {
 	}
 }
 
+# Highest `v*` tag upstream, by version sort. Uses `git ls-remote` rather than
+# the GitHub API: no auth, no rate limit, and it works in CI without a token.
+# Prints nothing (and returns non-zero) if the network is unavailable — callers
+# must treat that as "unknown", never as "up to date".
+latest_upstream_tag() {
+	git ls-remote --tags "$UPSTREAM_REPO_DEFAULT" 'v*' 2>/dev/null |
+		awk '{print $2}' |
+		sed 's#refs/tags/##; s/\^{}$//' |
+		grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' |
+		sort -V |
+		tail -1
+}
+
+# Commit SHA a tag resolves to. Prefers the dereferenced (`^{}`) entry so
+# annotated tags yield the commit, not the tag object.
+upstream_tag_commit() {
+	local tag=$1
+	git ls-remote "$UPSTREAM_REPO_DEFAULT" "refs/tags/${tag}" "refs/tags/${tag}^{}" 2>/dev/null |
+		sort -k2 |
+		tail -1 |
+		awk '{print $1}'
+}
+
 # Fetch one proto from a pinned upstream commit to stdout.
 fetch_upstream() {
 	local commit=$1 path=$2
