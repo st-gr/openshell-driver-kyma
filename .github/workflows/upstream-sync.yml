@@ -8,13 +8,15 @@ name: upstream-sync
 # default branch — so a PR that edits this file cannot run the edited
 # version until it is merged.
 #
-# NEVER add the PR-target-flavored pull-request trigger, or any trigger that
-# fires on posting a comment, to this file. Both run in the base-repository
-# context WITH secrets while taking outside input; an @claude-on-comment
-# trigger would hand subscription access to any commenter. (Deliberately not
-# spelling out those two trigger names literally here: a plain-text grep for
-# them is one of this file's CI guards, and a warning comment that quotes the
-# very strings it warns against would trip its own check.)
+# NEVER add `pull_request_target` or `issue_comment` triggers to this file.
+# Both run in the base-repository context WITH secrets while taking outside
+# input; an @claude-on-comment trigger would hand subscription access to any
+# commenter. This is enforced by the `upstream-sync-trigger-guard` job in
+# .github/workflows/branch-checks.yml, which parses this file's `on:` block
+# with PyYAML and fails the moment its trigger keys are anything other than
+# exactly {schedule, workflow_dispatch} — so it is safe to name the two
+# forbidden triggers here in plain text instead of relying on a comment that
+# dares not say what it warns against.
 #
 # Every `run:` block below passes values through `env:` rather than
 # interpolating `${{ ... }}` into the script text — Actions expands such
@@ -57,6 +59,14 @@ jobs:
 
       - name: Check proto drift
         id: drift
+        # shell: bash is NOT decorative here either — see the same-named
+        # comment on "Resolve upstream references" above. Without it, `tee`
+        # swallows check-proto-drift.sh's exit 1 on REAL drift, the
+        # `^ADVISORY:` grep below finds nothing (that text is only printed on
+        # the advisory path, never the failure path), behind=false gets
+        # reported, and this job would tell you "no upstream movement" while
+        # the vendored protos are actually corrupt.
+        shell: bash
         run: |
           ./scripts/check-proto-drift.sh | tee /tmp/drift.txt
           if grep -q "^ADVISORY:" /tmp/drift.txt; then
@@ -67,6 +77,11 @@ jobs:
 
       - name: Compare pinned images against upstream
         id: images
+        # shell: bash for the same pipefail reason as the other steps in this
+        # file: cur_gw/cur_sup below are each populated through a two-stage
+        # `grep | grep` pipeline, and without pipefail a failure in the first
+        # grep of either pipeline would be masked by the second.
+        shell: bash
         run: |
           # values.yaml pins these by digest; drift means upstream published
           # a newer release than the chart references.
@@ -111,6 +126,7 @@ jobs:
           echo "VERDICT: changed=$changed — $summary"
 
       - name: Upload evidence
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: drift-evidence
@@ -131,7 +147,20 @@ jobs:
     needs: [detect, smoke]
     # Invoke Claude only when something actually moved or the smoke broke.
     # Token spend tracks how often upstream changes, not how often cron fires.
-    if: always() && (needs.detect.outputs.changed == 'true' || needs.smoke.result == 'failure')
+    #
+    # !cancelled() rather than plain success(): the implicit success() that
+    # `needs:` bakes into every job's condition would skip this job whenever
+    # `smoke` fails — but "smoke failed" is exactly one of the two cases this
+    # job exists to handle, so a bare success()-based condition would defeat
+    # its own purpose. always() would fix that, but always() is ALSO true
+    # when the whole run is cancelled — so cancelling a Sunday run partway
+    # through, after detect already reported changed=true, would still
+    # invoke Claude, push a branch, and open a PR. !cancelled() runs on both
+    # success and failure of upstream jobs, but not on cancellation.
+    # Quoted because a bare leading `!` is a YAML tag indicator, not just an
+    # Actions operator -- unquoted, this is invalid YAML, not merely bad
+    # style.
+    if: "!cancelled() && (needs.detect.outputs.changed == 'true' || needs.smoke.result == 'failure')"
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -173,7 +202,12 @@ jobs:
       - name: Let Claude perform the sync
         uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # claude-code-action@v1 exposes two DISTINCT inputs: anthropic_api_key
+          # (a raw sk-ant-api... key, exported as ANTHROPIC_API_KEY for direct
+          # API auth) and claude_code_oauth_token (a Claude subscription OAuth
+          # token, sk-ant-oat...). CLAUDE_CODE_OAUTH_TOKEN holds the latter —
+          # feeding it to anthropic_api_key gets it rejected at auth.
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           claude_args: --max-turns 40 --allowedTools "Bash,Read,Edit,Write,Glob,Grep"
           prompt: |
             Sync this driver to upstream OpenShell ${{ env.GATEWAY_TAG }}.
@@ -188,8 +222,13 @@ jobs:
                exists to catch exactly that, and it will catch you.
             2. Run `cargo build --workspace --all-targets` and fix every compile
                error the new contract causes. If upstream added an RPC, implement
-               it. Match what upstream's own Kubernetes driver does
-               (crates/openshell-driver-kubernetes) rather than inventing behaviour.
+               it based on the vendored proto contract and this repo's existing
+               conventions in crates/openshell-driver-kyma/src/driver.rs. You have
+               no network access and there is no upstream Kubernetes driver source
+               vendored into this repo to copy from — if you cannot determine how
+               upstream expects new or changed behaviour to work, say so explicitly
+               (a TODO comment at the call site, plus a note in your final summary)
+               rather than guessing.
             3. Add or update tests for anything new. Follow the existing style in
                crates/openshell-driver-kyma/src/driver.rs and tests/grpc_contract.rs.
             4. Update the pinned digests in
@@ -276,6 +315,7 @@ jobs:
           | Local gate | ${gate} |
           | Gateway digest | \`${GATEWAY_IMAGE##*@}\` |
           | Supervisor digest | \`${SUPERVISOR_IMAGE##*@}\` |
+          | Proto pin before this sync | \`${PINNED_PROTO_REF}\` |
 
           Because this PR was created with \`GITHUB_TOKEN\`, GitHub will not
           auto-run \`branch-checks\` on it. The same checks already ran in this

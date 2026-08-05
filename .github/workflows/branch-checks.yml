@@ -5,6 +5,47 @@ on:
     branches: [main]
 
 jobs:
+  # Guards upstream-sync.yml's trigger surface. That workflow holds
+  # CLAUDE_CODE_OAUTH_TOKEN and its header comment forbids ever adding
+  # `pull_request_target` or `issue_comment` — both run in the
+  # base-repository context WITH secrets while taking outside input, and
+  # would hand subscription access to any commenter or fork PR author. A
+  # plain-text grep is not a trustworthy guard here: it would also match the
+  # warning comment itself (which is why an earlier draft of that comment
+  # avoided naming the triggers at all). Parse the YAML instead so renaming,
+  # reordering, or hiding a trigger behind an anchor/alias cannot slip past.
+  upstream-sync-trigger-guard:
+    name: upstream-sync.yml triggers stay locked down
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Assert upstream-sync.yml triggers are exactly schedule + workflow_dispatch
+        run: |
+          pip install --quiet pyyaml
+          python3 - <<'PY'
+          import sys
+          import yaml
+
+          with open(".github/workflows/upstream-sync.yml") as f:
+              doc = yaml.safe_load(f)
+
+          # PyYAML (YAML 1.1 core schema) parses the bare scalar key `on` as
+          # the boolean True, not the string "on" -- look it up accordingly.
+          triggers = set(doc[True].keys())
+          allowed = {"schedule", "workflow_dispatch"}
+          if triggers != allowed:
+              sys.exit(
+                  "upstream-sync.yml triggers changed: got {}, expected {}. "
+                  "This workflow holds CLAUDE_CODE_OAUTH_TOKEN; pull_request_target, "
+                  "issue_comment, or any other trigger must never be added -- see "
+                  "the header comment in that file.".format(sorted(triggers), sorted(allowed))
+              )
+          print("OK: upstream-sync.yml triggers are exactly", sorted(allowed))
+          PY
+
   # Guards the vendored ComputeDriver contract. The protos drifted six
   # upstream changes (two wire-breaking) before anything noticed, because
   # nothing compared them against upstream. This job is that comparison.

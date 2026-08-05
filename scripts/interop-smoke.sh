@@ -61,8 +61,15 @@ helm install "$RELEASE" deploy/helm/openshell-driver-kyma \
 	--set gateway.image.repository="${GATEWAY_IMAGE%%@*}" \
 	--set gateway.image.tag="${GATEWAY_IMAGE##*@}" \
 	--set gatewayService.enabled=true \
+	--set gateway.sandboxJwt.enabled=true \
 	--set driver.supervisorImage="$SUPERVISOR_IMAGE" \
-	--wait --timeout 5m
+	--wait --timeout 5m \
+	|| fail "helm install failed"
+# gateway.sandboxJwt.enabled=true is required: templates/gateway-config.yaml
+# is gated `if gateway.enabled AND gateway.sandboxJwt.enabled`, and that
+# ConfigMap is the only place `allow_unauthenticated_users = true` is set.
+# Without it the gateway container gets no --config at all and rejects every
+# gRPC call from the CLI with Unauthenticated.
 
 log "waiting for the driver+gateway pod"
 kubectl -n "$NS" rollout status "deploy/${RELEASE}-openshell-driver-kyma" --timeout=3m \
@@ -76,8 +83,25 @@ log "port-forwarding the gateway"
 kubectl -n "$NS" port-forward "svc/${RELEASE}-openshell-driver-kyma" 8080:8080 >/tmp/pf.log 2>&1 &
 PF_PID=$!
 trap 'kill "$PF_PID" 2>/dev/null || true' EXIT
-sleep 8
-export OPENSHELL_ENDPOINT=http://127.0.0.1:8080
+# Poll for the forwarded port instead of a fixed sleep. e2e-cli.sh uses the
+# same /dev/tcp probe; a fixed sleep is exactly the kind of flake-prone guess
+# that made ASSERT 1 unreliable before.
+for i in $(seq 1 20); do
+	if (echo > /dev/tcp/127.0.0.1/8080) >/dev/null 2>&1; then
+		log "port-forward is up"
+		break
+	fi
+	sleep 0.5
+	[[ $i == 20 ]] && fail "port-forward never became ready (see /tmp/pf.log)"
+done
+
+# The CLI's endpoint env var is OPENSHELL_GATEWAY_ENDPOINT (see
+# docs/install-cli.md) -- OPENSHELL_ENDPOINT is a different variable
+# entirely, the one the DRIVER injects into sandbox pods. Pass
+# --gateway-endpoint explicitly on every call instead of relying on env,
+# matching e2e-cli.sh's osh() helper: it also keeps the test stateless (no
+# $HOME/.config/openshell registration to leak between CI runs).
+osh() { openshell --gateway-endpoint "http://127.0.0.1:8080" "$@"; }
 
 # --- Assertion 1: the gateway accepted the driver ------------------------
 #
@@ -86,7 +110,8 @@ export OPENSHELL_ENDPOINT=http://127.0.0.1:8080
 # GetGatewayListenerRequirements — a non-Unimplemented error there aborts
 # driver initialisation outright. A broken contract cannot produce Connected.
 log "ASSERT 1: openshell status reports Connected"
-status_out=$(openshell status 2>&1) || fail "openshell status failed:\n${status_out}"
+status_out=$(osh status 2>&1) || fail "openshell status failed:
+${status_out}"
 printf '%s\n' "$status_out"
 grep -qi "Connected" <<<"$status_out" || fail "gateway did not report Connected"
 grep -qi "kyma"      <<<"$status_out" || fail "gateway did not report the kyma driver"
@@ -97,7 +122,7 @@ grep -qi "kyma"      <<<"$status_out" || fail "gateway did not report the kyma d
 # is Ready, so run it backgrounded and poll kubectl. A naive run-and-wait
 # hangs until the job timeout.
 log "ASSERT 2: sandbox CR is created with the expected name and labels"
-openshell sandbox create --name "$SB" --from ghcr.io/nvidia/openshell-community/sandboxes/base:latest \
+osh sandbox create --name "$SB" --from ghcr.io/nvidia/openshell-community/sandboxes/base:latest \
 	-- sleep infinity >/tmp/create.log 2>&1 &
 CREATE_PID=$!
 cr=""
@@ -126,7 +151,8 @@ done
 
 # --- Assertion 3: the gateway resolves what the driver created -----------
 log "ASSERT 3: openshell sandbox list round-trips the bare name"
-list_out=$(openshell sandbox list 2>&1) || fail "openshell sandbox list failed:\n${list_out}"
+list_out=$(osh sandbox list 2>&1) || fail "openshell sandbox list failed:
+${list_out}"
 printf '%s\n' "$list_out"
 grep -q "$SB" <<<"$list_out" || fail "gateway did not list ${SB} by its bare name"
 
