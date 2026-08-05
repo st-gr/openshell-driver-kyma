@@ -241,6 +241,13 @@ what must be verified by hand; it does not eliminate it.
 Neither is a Personal Access Token, satisfying the standing no-PATs-in-CI
 rule. GitHub permissions required: `contents: write`, `pull-requests: write`.
 
+**Exactly one of these is a repository secret you maintain.** `GITHUB_TOKEN`
+is minted automatically for each workflow run and expires when the job ends —
+nothing to create, store, or rotate. `CLAUDE_CODE_OAUTH_TOKEN` is created once
+with `claude setup-token` and **does expire**; its expiry date is recorded in
+the runbook at setup time so renewal is a calendar item rather than a
+surprise, and an expired token fails the job loudly rather than silently.
+
 ### GITHUB_TOKEN does not trigger downstream workflows
 
 GitHub deliberately suppresses workflow triggers for events raised by
@@ -259,6 +266,75 @@ and trigger everything. Costs an App registration and two more secrets for no
 additional verification. Available as a later upgrade if the missing check
 marks prove annoying in review.
 
+## Security model
+
+The concern: this repo is public, so anyone can open a pull request. A weekly
+job holding a subscription credential must not become a way to steal it.
+
+### Safe by construction, not by policy
+
+| Workflow | Secrets it holds | Fork-triggerable? |
+|---|---|---|
+| `interop-smoke.yml` | **none** | yes — and there is nothing to steal |
+| `branch-checks.yml` | none | yes |
+| `upstream-sync.yml` | `CLAUDE_CODE_OAUTH_TOKEN` | **no** |
+
+The important property is the first row: the interop smoke needs no secrets
+whatsoever. It builds an image, runs `kind`, installs the chart. Its safety
+does not depend on GitHub's fork rules holding.
+
+`upstream-sync.yml` is the only workflow with the Claude token, and it runs
+only on `schedule` and `workflow_dispatch`. Scheduled workflows always execute
+from the **default branch**, so a pull request that modifies that file cannot
+cause the modified version to run until it is merged. `workflow_dispatch`
+requires write access.
+
+### Prohibited triggers
+
+`upstream-sync.yml` must **never** use `pull_request_target` or
+`issue_comment`. Both run in the base-repository context *with* secrets while
+being influenced by outside input — `pull_request_target` by fork code,
+`issue_comment` by anyone who can type `@claude`. Neither appears in this repo
+today, and this design does not introduce them. Adding an `@claude`-on-comment
+trigger would hand subscription access to any commenter.
+
+### Defence in depth
+
+GitHub does not pass repository secrets to workflows triggered by a fork pull
+request, and grants those runs a read-only `GITHUB_TOKEN`
+(<https://docs.github.com/en/actions/reference/security/secure-use>). This
+backstops the structural argument above rather than carrying it.
+
+Repository hardening to keep in place:
+
+- default workflow permissions `read` (already set), with `contents: write`
+  and `pull-requests: write` requested explicitly in `upstream-sync.yml` only,
+  where the escalation is visible in the file and reviewable
+- "Send write tokens to workflows from pull requests" left **off** — enabling
+  it would defeat the read-only guarantee for fork PRs
+- "Approve pull request reviews" left off (already set)
+
+### Residual risk: prompt injection
+
+The real exposure is not credential theft but **prompt injection from
+upstream**. On Sunday, Claude reads upstream release notes, proto diffs, and
+smoke logs — content this repository does not control — while holding write
+access to a branch. A compromised or malicious upstream release note could
+contain text crafted as instructions.
+
+Bounded by the existing guardrails, which exist for this reason as much as for
+runaway-loop protection:
+
+- branch-only; `main` is never written
+- every sync PR is reviewed by a human before merge
+- `--max-turns` capped
+- no cluster credentials on the runner, so the blast radius stops at a PR
+- fetched upstream content is to be framed in the prompt as **data to
+  analyse, never as instructions to follow**
+
+This is a real risk that is mitigated, not eliminated. The mitigation that
+actually matters is the human review gate.
+
 ## Failure handling
 
 | Condition | Behaviour |
@@ -275,6 +351,38 @@ marks prove annoying in review.
 Public repo, so runner minutes are free. Claude runs only in weeks where
 something moved; the drift check and smoke are plain scripts. Expected to be a
 handful of Claude invocations per year, well inside a Max subscription.
+
+## Operational documentation
+
+The automation is useless if the maintainer cannot tell what it wants from
+them. A runbook is a **deliverable of this work**, not an afterthought:
+`docs/internal/runbook-upstream-sync.md`.
+
+It lives under `docs/internal/` because it is maintainer tooling. It must not
+be cross-linked from the reader-facing tutorials
+(`docs/tutorial-anthropic-direct.md`, `docs/getting-started.md`) — those are
+for someone installing the driver, who has no use for CI internals.
+
+The runbook covers, for each situation, what the maintainer does:
+
+| Situation | What the maintainer does |
+|---|---|
+| Sunday PR is green | Review the diff, merge, then roll out to the cluster manually (`helm upgrade` + inference check). CI never touches the cluster. |
+| Sunday PR is a **draft** | Claude hit `--max-turns` or could not get tests green. Body says where it stopped. Finish by hand or close it. |
+| Smoke red, protos unchanged | Behavioural break upstream with no proto diff. Decide: fix forward, or set `GATEWAY_REF` to the last good version to unblock PRs. |
+| PRs suddenly red after an upstream release | Upstream is broken. Set `GATEWAY_REF=v0.0.NN` (last good), commit, revert once upstream is fixed. This is the documented escape hatch. |
+| Job fails with an auth error | `CLAUDE_CODE_OAUTH_TOKEN` expired. Re-run `claude setup-token`, update the secret, record the new expiry. |
+| Job reports an infrastructure flake | `kind`/CRD failure, not an upstream break. Re-run. Escalate only if it repeats. |
+| Nothing happened for weeks | Expected. No PR means nothing moved. Confirm liveness via the run history, which shows a green no-op each Sunday. |
+
+It also records the setup steps, because they are one-time and easily
+forgotten: generating the OAuth token, adding the secret, **noting its expiry
+date**, and the repository hardening settings listed under Security model.
+
+The "nothing happened" row matters more than it looks. The dangerous failure
+of a weekly job is silence that means "broken" being read as silence that
+means "fine" — the same failure that let the protos drift for two months. The
+green no-op run is the liveness signal.
 
 ## Testing the automation itself
 
