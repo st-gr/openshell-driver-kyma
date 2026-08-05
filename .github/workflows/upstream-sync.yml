@@ -46,6 +46,13 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Resolve upstream references
+        # shell: bash is NOT decorative. GitHub's default run: shell is
+        # `bash -e {0}` — pipefail is only added when a step declares
+        # `shell: bash` explicitly. Without it, `foo | tee x` reports tee's
+        # exit status (always 0), so a `die()` inside resolve-upstream-refs.sh
+        # would be silently swallowed and the job would carry on with empty
+        # GATEWAY_IMAGE/SUPERVISOR_IMAGE — see the sync job's digest compare.
+        shell: bash
         run: ./scripts/resolve-upstream-refs.sh | tee -a "$GITHUB_ENV"
 
       - name: Check proto drift
@@ -151,6 +158,10 @@ jobs:
           shared-key: upstream-sync
 
       - name: Resolve upstream references
+        # See the same-named step in the detect job: without an explicit
+        # `shell: bash`, the default run: shell has no pipefail and `tee`
+        # would mask a failed resolve here too.
+        shell: bash
         run: ./scripts/resolve-upstream-refs.sh | tee -a "$GITHUB_ENV"
 
       - name: Create the working branch
@@ -216,7 +227,13 @@ jobs:
           SMOKE_RESULT: ${{ needs.smoke.result }}
           GATE_OUTCOME: ${{ steps.gate.outcome }}
         run: |
-          if git diff --quiet && git diff --cached --quiet; then
+          # `git diff --quiet` only sees modifications to already-tracked
+          # files, so a sync that added only new files (e.g. a brand-new RPC
+          # handler module) would report "no changes" here and silently
+          # discard the work. `git status --porcelain` sees new, modified,
+          # and deleted paths alike; empty output means genuinely nothing
+          # changed.
+          if [[ -z "$(git status --porcelain)" ]]; then
             echo "Claude produced no changes; nothing to open."
             exit 0
           fi

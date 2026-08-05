@@ -63,6 +63,15 @@ jobs:
           cat .github/upstream-compat.env
 
       - name: Resolve upstream references
+        # shell: bash is NOT decorative. GitHub's default run: shell is
+        # `bash -e {0}` — pipefail is only added when a step declares
+        # `shell: bash` explicitly. Without it, `foo | tee x` reports tee's
+        # exit status (always 0), so a `die()` inside resolve-upstream-refs.sh
+        # would be silently swallowed instead of failing the job. (interop-
+        # smoke.sh does independently guard its required env vars, so this
+        # path fails safe today — but late, after kind setup, with a
+        # confusing message. Fixing it here for a clean, early failure.)
+        shell: bash
         run: ./scripts/resolve-upstream-refs.sh | tee -a "$GITHUB_ENV"
 
       - name: Install uv
