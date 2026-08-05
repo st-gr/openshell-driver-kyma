@@ -1,0 +1,66 @@
+name: interop-smoke
+
+# Reusable. Proves a real upstream gateway accepts this driver.
+#
+# SECURITY: this workflow holds NO secrets. It is called from branch-checks,
+# which runs on pull_request and is therefore reachable from forks. Because
+# there is nothing here to exfiltrate, its safety does not depend on GitHub's
+# fork rules holding. Do not add secrets to this file.
+on:
+  workflow_call:
+    inputs:
+      gateway_ref:
+        description: "Upstream gateway ref: 'latest' or a vN.N.NN tag"
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      gateway_ref:
+        description: "Upstream gateway ref: 'latest' or a vN.N.NN tag"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: driver works against upstream gateway
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Override GATEWAY_REF when one was supplied
+        if: inputs.gateway_ref != ''
+        run: |
+          sed -i "s/^GATEWAY_REF=.*/GATEWAY_REF=${{ inputs.gateway_ref }}/" .github/upstream-compat.env
+          cat .github/upstream-compat.env
+
+      - name: Resolve upstream references
+        run: ./scripts/resolve-upstream-refs.sh | tee -a "$GITHUB_ENV"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: interop
+
+      - name: Build the driver image
+        run: docker build -f deploy/Dockerfile -t openshell-driver-kyma:smoke .
+
+      - name: Load the driver image into kind
+        run: kind load docker-image openshell-driver-kyma:smoke --name interop
+
+      - name: Run the interop smoke
+        env:
+          DRIVER_IMAGE: openshell-driver-kyma:smoke
+        run: ./scripts/interop-smoke.sh
+
+      - name: Tear down
+        if: always()
+        run: kind delete cluster --name interop || true
