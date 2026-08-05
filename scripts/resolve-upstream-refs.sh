@@ -22,7 +22,7 @@ GATEWAY_REF=$(sed -n 's/^GATEWAY_REF=//p' "$KNOB" | tail -1 | tr -d '[:space:]')
 [[ -n $GATEWAY_REF ]] || die "GATEWAY_REF is not set in $KNOB"
 
 if [[ $GATEWAY_REF == latest ]]; then
-	tag=$(latest_upstream_tag)
+	tag=$(latest_upstream_tag) || die "could not reach upstream to resolve 'latest'"
 	[[ -n $tag ]] || die "could not reach upstream to resolve 'latest'"
 else
 	tag=$GATEWAY_REF
@@ -33,8 +33,19 @@ fi
 # Container tags upstream publishes have no leading `v`.
 image_tag=${tag#v}
 
+gateway_image=$(resolve_image_digest ghcr.io/nvidia/openshell/gateway "$image_tag") \
+	|| die "failed to resolve the gateway image digest for ${image_tag}"
+[[ -n $gateway_image ]] || die "gateway image digest resolved empty for ${image_tag}"
+
+supervisor_image=$(resolve_image_digest ghcr.io/nvidia/openshell/supervisor "$image_tag") \
+	|| die "failed to resolve the supervisor image digest for ${image_tag}"
+[[ -n $supervisor_image ]] || die "supervisor image digest resolved empty for ${image_tag}"
+
+pinned_proto_ref=$(lock_get ref) || die "failed to read the pinned proto ref from UPSTREAM.lock"
+[[ -n $pinned_proto_ref ]] || die "pinned proto ref resolved empty"
+
 printf 'GATEWAY_TAG=%s\n' "$tag"
-printf 'GATEWAY_IMAGE=%s\n' "$(resolve_image_digest ghcr.io/nvidia/openshell/gateway "$image_tag")"
-printf 'SUPERVISOR_IMAGE=%s\n' "$(resolve_image_digest ghcr.io/nvidia/openshell/supervisor "$image_tag")"
+printf 'GATEWAY_IMAGE=%s\n' "$gateway_image"
+printf 'SUPERVISOR_IMAGE=%s\n' "$supervisor_image"
 printf 'CLI_VERSION=%s\n' "$image_tag"
-printf 'PINNED_PROTO_REF=%s\n' "$(lock_get ref)"
+printf 'PINNED_PROTO_REF=%s\n' "$pinned_proto_ref"
