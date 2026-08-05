@@ -144,7 +144,7 @@ GATEWAY_REF=$(sed -n 's/^GATEWAY_REF=//p' "$KNOB" | tail -1 | tr -d '[:space:]')
 [[ -n $GATEWAY_REF ]] || die "GATEWAY_REF is not set in $KNOB"
 
 if [[ $GATEWAY_REF == latest ]]; then
-	tag=$(latest_upstream_tag)
+	tag=$(latest_upstream_tag) || die "could not reach upstream to resolve 'latest'"
 	[[ -n $tag ]] || die "could not reach upstream to resolve 'latest'"
 else
 	tag=$GATEWAY_REF
@@ -155,11 +155,36 @@ fi
 # Container tags upstream publishes have no leading `v`.
 image_tag=${tag#v}
 
+# Resolve EVERYTHING into variables before printing anything.
+#
+# Two reasons, both learned by shipping the bug first:
+#   1. `printf '%s' "$(resolve_image_digest ...)"` swallows failure. die()
+#      exits only the $(...) subshell; `set -e` then inspects printf's status,
+#      which is 0. The script emitted an EMPTY digest into $GITHUB_ENV and
+#      reported success — the exact "test the wrong version while appearing to
+#      pass" failure this script exists to prevent. Assignments ARE subject to
+#      `set -e`, so capture first.
+#   2. Resolving all values before emitting any means a late failure cannot
+#      leave partial KEY=VALUE lines already appended to $GITHUB_ENV.
+#
+# The `|| die` and the emptiness check are both needed: a pipeline whose last
+# stage succeeds can return 0 with empty output.
+gateway_image=$(resolve_image_digest ghcr.io/nvidia/openshell/gateway "$image_tag") \
+	|| die "failed to resolve the gateway image digest for ${image_tag}"
+[[ -n $gateway_image ]] || die "gateway image digest resolved empty for ${image_tag}"
+
+supervisor_image=$(resolve_image_digest ghcr.io/nvidia/openshell/supervisor "$image_tag") \
+	|| die "failed to resolve the supervisor image digest for ${image_tag}"
+[[ -n $supervisor_image ]] || die "supervisor image digest resolved empty for ${image_tag}"
+
+pinned_proto_ref=$(lock_get ref) || die "failed to read the pinned proto ref from UPSTREAM.lock"
+[[ -n $pinned_proto_ref ]] || die "pinned proto ref resolved empty"
+
 printf 'GATEWAY_TAG=%s\n' "$tag"
-printf 'GATEWAY_IMAGE=%s\n' "$(resolve_image_digest ghcr.io/nvidia/openshell/gateway "$image_tag")"
-printf 'SUPERVISOR_IMAGE=%s\n' "$(resolve_image_digest ghcr.io/nvidia/openshell/supervisor "$image_tag")"
+printf 'GATEWAY_IMAGE=%s\n' "$gateway_image"
+printf 'SUPERVISOR_IMAGE=%s\n' "$supervisor_image"
 printf 'CLI_VERSION=%s\n' "$image_tag"
-printf 'PINNED_PROTO_REF=%s\n' "$(lock_get ref)"
+printf 'PINNED_PROTO_REF=%s\n' "$pinned_proto_ref"
 ```
 
 - [ ] **Step 4: Make both scripts executable in the index**
@@ -203,6 +228,25 @@ mv .github/upstream-compat.env.bak .github/upstream-compat.env
 ```
 
 Expected: `error: resolved gateway tag looks wrong: 'not-a-tag'` and `exit=1`. A typo must stop the job, never silently fall back to a default.
+
+- [ ] **Step 7b: Verify a digest-resolution failure also fails loudly**
+
+Step 7 alone is not enough — a bad knob value fails on an *assignment*, which
+`set -e` already catches. The dangerous path is a failure inside
+`resolve_image_digest`, which the original code swallowed. `v0.0.1` is a real
+git tag with no published container image, so this forces a genuine registry
+404:
+
+```bash
+sed -i.bak 's/^GATEWAY_REF=.*/GATEWAY_REF=v0.0.1/' .github/upstream-compat.env
+./scripts/resolve-upstream-refs.sh; echo "exit=$?"
+mv .github/upstream-compat.env.bak .github/upstream-compat.env
+```
+
+Expected: `exit=1`, a stderr message naming which image failed, and **zero
+`KEY=VALUE` lines on stdout**. Partial output is a defect too — the caller
+pipes stdout into `$GITHUB_ENV`, so any line printed before the failure is
+already committed.
 
 - [ ] **Step 8: Commit**
 
