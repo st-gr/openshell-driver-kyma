@@ -131,12 +131,20 @@ printf '%s\n' "$list_out"
 grep -q "$SB" <<<"$list_out" || fail "gateway did not list ${SB} by its bare name"
 
 # --- Assertion 4: nothing errored ----------------------------------------
+#
+# Capture the logs into a variable and check kubectl's own exit status
+# before grepping. Piping `kubectl logs` straight into `grep` inside an
+# `if` masks a kubectl failure (container name mismatch, evicted pod,
+# crash-restart with no previous logs): grep would just see empty input,
+# return 1, and the branch would be skipped — reporting "no ERRORs" without
+# ever having read a log line. "Could not check" must fail, not pass.
 log "ASSERT 4: no ERROR in driver or gateway logs"
 for c in driver gateway; do
-	if kubectl -n "$NS" logs "deploy/${RELEASE}-openshell-driver-kyma" -c "$c" --tail=500 2>/dev/null \
-		| grep -E '"level":"ERROR"|[[:space:]]ERROR[[:space:]]'; then
-		fail "${c} logged an ERROR"
-	fi
+	c_logs=$(kubectl -n "$NS" logs "deploy/${RELEASE}-openshell-driver-kyma" -c "$c" --tail=500 2>&1) \
+		|| fail "could not read ${c} logs:\n${c_logs}"
+	grep -E '"level":"ERROR"|[[:space:]]ERROR[[:space:]]' <<<"$c_logs" \
+		&& fail "${c} logged an ERROR"
+	true
 done
 
 log "INTEROP SMOKE PASSED (gateway ${GATEWAY_IMAGE##*@})"

