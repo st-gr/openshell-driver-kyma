@@ -508,6 +508,11 @@ jobs:
           cat .github/upstream-compat.env
 
       - name: Resolve upstream references
+        # `shell: bash` is NOT decorative. The default run: shell is
+        # `bash -e {0}` with NO pipefail, so `tee` (which succeeds) would mask
+        # the resolver's die() and let empty digests reach $GITHUB_ENV.
+        # Declaring it yields `bash --noprofile --norc -eo pipefail {0}`.
+        shell: bash
         run: ./scripts/resolve-upstream-refs.sh | tee -a "$GITHUB_ENV"
 
       - name: Install uv
@@ -715,9 +720,12 @@ name: upstream-sync
 # default branch — so a PR that edits this file cannot run the edited
 # version until it is merged.
 #
-# NEVER add `pull_request_target` or `issue_comment` here. Both run in the
-# base-repository context WITH secrets while taking outside input; an
-# @claude-on-comment trigger would hand subscription access to any commenter.
+# NEVER add a PR-target-flavoured pull-request trigger, or any trigger that
+# fires on posting a comment. Both run in the base-repository context WITH
+# secrets while taking outside input; a comment-triggered variant would hand
+# subscription access to anyone who can comment. (The literal trigger names
+# are avoided here on purpose: Step 5 greps this file for them, and naming
+# them in a comment would make that assertion fail against its own docs.)
 on:
   schedule:
     - cron: "0 3 * * 0"   # Sundays, 03:00 UTC
@@ -743,6 +751,11 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Resolve upstream references
+        # `shell: bash` is NOT decorative. The default run: shell is
+        # `bash -e {0}` with NO pipefail, so `tee` (which succeeds) would mask
+        # the resolver's die() and let empty digests reach $GITHUB_ENV.
+        # Declaring it yields `bash --noprofile --norc -eo pipefail {0}`.
+        shell: bash
         run: ./scripts/resolve-upstream-refs.sh | tee -a "$GITHUB_ENV"
 
       - name: Check proto drift
@@ -760,7 +773,11 @@ jobs:
         run: |
           # values.yaml pins these by digest; drift means upstream published
           # a newer release than the chart references.
-          cur_gw=$(grep -oE 'sha256:[0-9a-f]{64}' deploy/helm/openshell-driver-kyma/values.yaml | head -1)
+          # Anchor to `tag: "sha256:..."`. An unanchored grep piped to `head -1`
+          # returns the SUPERVISOR digest, because supervisorImage appears
+          # earlier in values.yaml than the gateway tag — which would make the
+          # comparison mismatch on every run and open a spurious PR weekly.
+          cur_gw=$(grep -oE 'tag: "sha256:[0-9a-f]{64}"' deploy/helm/openshell-driver-kyma/values.yaml | grep -oE 'sha256:[0-9a-f]{64}')
           cur_sup=$(grep -oE 'supervisor@sha256:[0-9a-f]{64}' deploy/helm/openshell-driver-kyma/values.yaml | grep -oE 'sha256:[0-9a-f]{64}')
           new_gw=${GATEWAY_IMAGE##*@}
           new_sup=${SUPERVISOR_IMAGE##*@}
@@ -838,6 +855,11 @@ jobs:
           shared-key: upstream-sync
 
       - name: Resolve upstream references
+        # `shell: bash` is NOT decorative. The default run: shell is
+        # `bash -e {0}` with NO pipefail, so `tee` (which succeeds) would mask
+        # the resolver's die() and let empty digests reach $GITHUB_ENV.
+        # Declaring it yields `bash --noprofile --norc -eo pipefail {0}`.
+        shell: bash
         run: ./scripts/resolve-upstream-refs.sh | tee -a "$GITHUB_ENV"
 
       - name: Create the working branch
@@ -900,7 +922,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if git diff --quiet && git diff --cached --quiet; then
+          # `git diff --quiet` sees only TRACKED files; a sync that produced
+          # only new files would be reported as "no changes" and discarded.
+          if [[ -z "$(git status --porcelain)" ]]; then
             echo "Claude produced no changes; nothing to open."
             exit 0
           fi
