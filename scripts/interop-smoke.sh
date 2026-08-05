@@ -40,7 +40,25 @@ done
 
 log "installing the agent-sandbox CRD"
 # The chart's pre-install-crd-check Job aborts the install without this.
-kubectl apply -f "$CRD_URL"
+kubectl apply -f "$CRD_URL" || fail "could not install the agent-sandbox CRD"
+
+# Disable the CRD's conversion webhook.
+#
+# Upstream ships the CRD with `conversion.strategy: Webhook` pointing at
+# `agent-sandbox-webhook-service` in `agent-sandbox-system` — part of the
+# full agent-sandbox controller install, which we deliberately do NOT deploy.
+# Without that service the API server rejects every Sandbox create with a
+# 500 "conversion webhook ... service not found", so the driver's create
+# never lands.
+#
+# Installing the whole controller just to satisfy this would add a large
+# moving part for no coverage: this smoke stops at "CR created" on purpose
+# and never needs the controller to reconcile a pod. Setting the strategy to
+# None makes the API server store the submitted version as-is, which is all
+# the assertion requires.
+kubectl patch crd sandboxes.agents.x-k8s.io --type=merge \
+	-p '{"spec":{"conversion":{"strategy":"None"}}}' \
+	|| fail "could not disable the Sandbox CRD conversion webhook"
 
 log "creating namespace with PSA privileged"
 # The driver refuses to start without this label; it is a real precondition,
