@@ -23,28 +23,38 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Assert upstream-sync.yml triggers are exactly schedule + workflow_dispatch
+        shell: bash
         run: |
-          pip install --quiet pyyaml
-          python3 - <<'PY'
-          import sys
-          import yaml
+          # Parse the trigger block with yq (YAML 1.2) to ensure pull_request_target
+          # and issue_comment can never be added. yq is pre-installed on ubuntu-latest.
+          #
+          # Both forbidden triggers run in the base-repository context WITH secrets
+          # while taking outside input; a comment-triggered variant would hand
+          # subscription access to any commenter or fork PR author.
 
-          with open(".github/workflows/upstream-sync.yml") as f:
-              doc = yaml.safe_load(f)
+          triggers=$(yq '.on | keys | .[]' .github/workflows/upstream-sync.yml | sort)
 
-          # PyYAML (YAML 1.1 core schema) parses the bare scalar key `on` as
-          # the boolean True, not the string "on" -- look it up accordingly.
-          triggers = set(doc[True].keys())
-          allowed = {"schedule", "workflow_dispatch"}
-          if triggers != allowed:
-              sys.exit(
-                  "upstream-sync.yml triggers changed: got {}, expected {}. "
-                  "This workflow holds CLAUDE_CODE_OAUTH_TOKEN; pull_request_target, "
-                  "issue_comment, or any other trigger must never be added -- see "
-                  "the header comment in that file.".format(sorted(triggers), sorted(allowed))
-              )
-          print("OK: upstream-sync.yml triggers are exactly", sorted(allowed))
-          PY
+          if [[ -z "$triggers" ]]; then
+            echo "ERROR: on: block is missing or empty" >&2
+            exit 1
+          fi
+
+          expected=$(printf "schedule\nworkflow_dispatch")
+
+          if [[ "$triggers" != "$expected" ]]; then
+            echo "ERROR: upstream-sync.yml triggers changed: got:" >&2
+            echo "$triggers" >&2
+            echo "" >&2
+            echo "expected:" >&2
+            echo "$expected" >&2
+            echo "" >&2
+            echo "This workflow holds CLAUDE_CODE_OAUTH_TOKEN; pull_request_target, " >&2
+            echo "issue_comment, or any other trigger must never be added -- see " >&2
+            echo "the header comment in that file." >&2
+            exit 1
+          fi
+
+          echo "OK: upstream-sync.yml triggers are exactly schedule and workflow_dispatch"
 
   # Guards the vendored ComputeDriver contract. The protos drifted six
   # upstream changes (two wire-breaking) before anything noticed, because
