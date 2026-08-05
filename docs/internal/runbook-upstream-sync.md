@@ -51,9 +51,14 @@ openshell sandbox exec --name <sandbox> -- claude -p --model claude-opus-4-7 "Re
 
 ### Sunday PR is a draft
 
-Claude either hit `--max-turns` or could not get the gate green. The PR body's
-"Local gate" row says which. Finish it by hand or close it — do not merge a
-draft.
+The PR body's "Local gate" row tells you the gate failed (it only ever renders
+`passed` or `FAILED — see the 'Run the full gate' step`; it cannot tell you
+*why*). To find out whether Claude hit `--max-turns` mid-task or finished but
+left the gate red, read the "Let Claude perform the sync" step's log in the
+run — a turn-cap cutoff ends abruptly mid-transcript, a completed-but-failing
+attempt runs to the end of the prompt and then the separate "Run the full
+gate" step reports the failure. Finish it by hand or close it — do not merge
+a draft.
 
 ### Interop smoke red, protos unchanged
 
@@ -141,6 +146,21 @@ for two months.
    ```
 3. Leave **"Send write tokens to workflows from pull requests" off.** Enabling
    it would give fork PRs a writable `GITHUB_TOKEN`.
+4. **Turn on branch protection for `main`, with required pull-request
+   reviews.** As of this writing it is not on:
+   ```bash
+   gh api repos/st-gr/openshell-driver-kyma/branches/main/protection --jq '{
+     required_signatures, enforce_admins, required_linear_history,
+     allow_force_pushes, allow_deletions
+   }'
+   gh api repos/st-gr/openshell-driver-kyma/rulesets --jq 'length'
+   ```
+   The only things currently blocked are force-pushes and deletions — there
+   is no required review and no ruleset. See the "do not commit/push" bullet
+   under Security notes below for why this specific gap matters here:
+   without it, "the sync job only pushes to its own branch" is a property of
+   the workflow's own steps, not something GitHub enforces. Adding a required
+   review on `main` converts it into an actual guarantee.
 
 ## Security notes
 
@@ -163,11 +183,28 @@ for two months.
   but nothing structurally stops the `Bash` tool from running `git commit` or
   `git push` itself: `actions/checkout` leaves credentials for `GITHUB_TOKEN`
   configured in git, and the job's own token has write scope. This is a
-  prompt-level constraint, not a permissions-level one. What actually bounds
-  the blast radius: the job only ever works on a throwaway
-  `upstream-sync/<tag>-<run-id>` branch and never touches `main` directly;
-  every resulting PR is reviewed by a human before merge; and `--max-turns 40`
-  caps how much the step can do in one run. Treat this as a known,
-  accepted limitation of the current design, not something to react to —
-  but do not casually add more tools or more permissions to that step without
+  prompt-level constraint, not a permissions-level one.
+
+  That the workflow's own steps only ever commit and push to
+  `upstream-sync/<tag>-<run-id>` is a property of the code as written, **not
+  a control that's enforced.** Nothing currently stops the `Bash` tool from
+  running `git checkout main && git push origin main` with the same
+  `GITHUB_TOKEN` — verified live: `main` has no required pull-request
+  reviews and no ruleset (`gh api repos/st-gr/openshell-driver-kyma/branches/main/protection`
+  blocks only force-pushes and deletions; `gh api .../rulesets` returns
+  `[]`). A misbehaving or successfully-injected run could push straight to
+  `main`.
+
+  The controls that ARE real today: every sync PR is reviewed by a human
+  before merge (repo-level `allow_auto_merge` is `false` and nothing in this
+  repo auto-merges), and `--max-turns 40` bounds how much the step can do in
+  one run. Neither of those depends on the branch-only behaviour holding.
+
+  **Remedy:** turn on branch protection for `main` with required
+  pull-request reviews (see One-time setup, step 4). That is what would turn
+  "the sync job only pushes to its own branch" from a convention in the code
+  into an actual guarantee GitHub enforces regardless of what the `Bash`
+  tool does. This is a known, bounded limitation with a clear fix, not
+  something to be alarmed about — but until that step is done, do not
+  casually add more tools or more permissions to the sync step without
   re-checking this reasoning still holds.
