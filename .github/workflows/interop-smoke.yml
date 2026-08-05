@@ -55,13 +55,10 @@ jobs:
           # Still validate its shape: the resolver only accepts 'latest' or
           # vN.N.NN, and an unvalidated value could otherwise carry sed
           # metacharacters that corrupt the knob file even without malice.
-          case "$GATEWAY_REF_INPUT" in
-            latest|v[0-9]*.[0-9]*.[0-9]*) ;;
-            *)
-              echo "error: gateway_ref must be 'latest' or vN.N.NN, got: $GATEWAY_REF_INPUT" >&2
-              exit 1
-              ;;
-          esac
+          if [[ "$GATEWAY_REF_INPUT" != "latest" && ! "$GATEWAY_REF_INPUT" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "error: gateway_ref must be 'latest' or vN.N.NN, got: $GATEWAY_REF_INPUT" >&2
+            exit 1
+          fi
           sed -i "s/^GATEWAY_REF=.*/GATEWAY_REF=${GATEWAY_REF_INPUT}/" .github/upstream-compat.env
           cat .github/upstream-compat.env
 

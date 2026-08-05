@@ -141,7 +141,7 @@ grep -q "$SB" <<<"$list_out" || fail "gateway did not list ${SB} by its bare nam
 log "ASSERT 4: no ERROR in driver or gateway logs"
 for c in driver gateway; do
 	c_logs=$(kubectl -n "$NS" logs "deploy/${RELEASE}-openshell-driver-kyma" -c "$c" --tail=500 2>&1) \
-		|| fail "could not read ${c} logs:\n${c_logs}"
+		|| fail "could not read ${c} logs: ${c_logs}"
 	grep -E '"level":"ERROR"|[[:space:]]ERROR[[:space:]]' <<<"$c_logs" \
 		&& fail "${c} logged an ERROR"
 	true
