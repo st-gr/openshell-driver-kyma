@@ -14,7 +14,7 @@
 - **`latest` means the newest upstream semver release tag** (`vN.N.NN`) discovered via `git ls-remote --tags`, resolved to an **immutable digest** before use. Never the mutable `:latest` container tag.
 - **`interop-smoke.yml` must hold no secrets.** Its safety must not depend on GitHub's fork rules.
 - **`upstream-sync.yml` must never use `pull_request_target` or `issue_comment`.** Only `schedule` and `workflow_dispatch`.
-- **Never push to `main`.** The sync job works on a branch and opens a PR.
+- **The sync job must never write to `main` at runtime.** It works on a branch and opens a PR. (This constrains the *automation's behaviour*. It does not restrict development: implementation happens on a feature branch, and the workflow files reach `main` through a reviewed PR — which is also how `workflow_dispatch` becomes available for the validation steps.)
 - **No Personal Access Tokens.** Only the built-in `GITHUB_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN`.
 - **No cluster credentials in CI.** Only a throwaway `kind` cluster. The real Kyma rollout stays manual.
 - **`proto/` is never hand-edited.** All re-vendoring goes through `make proto-vendor TAG=<tag>`.
@@ -495,7 +495,7 @@ supervisor privileged with SYS_ADMIN inside kind-in-Docker, and a weekly job
 that cries wolf gets ignored.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
-git push origin main
+git push origin ci/upstream-compat
 ```
 
 - [ ] **Step 6: MUST PASS — run against the current pin**
@@ -598,7 +598,7 @@ Expected: three checks, including `interop smoke`, all green.
 ```bash
 gh pr close ci/verify-interop-on-pr --delete-branch
 git checkout main
-git push origin main
+git push origin ci/upstream-compat
 ```
 
 ---
@@ -934,7 +934,7 @@ pull_request_target or issue_comment: both run in base context with secrets
 while taking outside input.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
-git push origin main
+git push origin ci/upstream-compat
 ```
 
 - [ ] **Step 7: MUST NOT FALSE-POSITIVE — dispatch with nothing moved**
@@ -965,7 +965,7 @@ Temporarily make detection fire by pinning the knob backwards, which makes the d
 sed -i.bak 's/^GATEWAY_REF=.*/GATEWAY_REF=v0.0.91/' .github/upstream-compat.env
 git add .github/upstream-compat.env
 git -c user.name="st-gr" -c user.email="38470677+st-gr@users.noreply.github.com" commit -m "test: temporarily pin GATEWAY_REF to exercise the sync path"
-git push origin main
+git push origin ci/upstream-compat
 gh workflow run upstream-sync.yml
 ```
 
@@ -975,7 +975,7 @@ Revert immediately — the pin must not be left in place:
 
 ```bash
 git revert --no-edit HEAD
-git push origin main
+git push origin ci/upstream-compat
 gh pr list --state open   # close the test PR
 ```
 
@@ -1157,7 +1157,7 @@ Maintainer-facing, so it lives under docs/internal/ and is deliberately not
 linked from the reader-facing tutorials.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
-git push origin main
+git push origin ci/upstream-compat
 ```
 
 ---
