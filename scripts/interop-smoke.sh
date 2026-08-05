@@ -103,18 +103,45 @@ done
 # $HOME/.config/openshell registration to leak between CI runs).
 osh() { openshell --gateway-endpoint "http://127.0.0.1:8080" "$@"; }
 
-# --- Assertion 1: the gateway accepted the driver ------------------------
+# --- Assertion 1: the gateway is up and serving --------------------------
 #
-# Load-bearing. Reaching Connected proves the gateway completed
-# GetCapabilities AND got a tolerable answer to
-# GetGatewayListenerRequirements — a non-Unimplemented error there aborts
-# driver initialisation outright. A broken contract cannot produce Connected.
+# `openshell status` reports the endpoint and the gateway version. It does
+# NOT name the compute driver: its `Gateway:` field is the CLI's endpoint
+# (or a locally-registered profile name), which is why asserting on "kyma"
+# here failed on the first real CI run while passing on a workstation that
+# happened to have a profile called "kyma" saved. Driver acceptance is
+# asserted separately, in ASSERT 1b, against the gateway's own log.
 log "ASSERT 1: openshell status reports Connected"
 status_out=$(osh status 2>&1) || fail "openshell status failed:
 ${status_out}"
 printf '%s\n' "$status_out"
 grep -qi "Connected" <<<"$status_out" || fail "gateway did not report Connected"
-grep -qi "kyma"      <<<"$status_out" || fail "gateway did not report the kyma driver"
+
+# --- Assertion 1b: the gateway accepted THIS driver ----------------------
+#
+# The load-bearing one, and the reason this smoke exists.
+#
+# The gateway logs "Compute driver connected" only after GetCapabilities
+# returns AND GetGatewayListenerRequirements answers tolerably — a
+# non-Unimplemented error there aborts driver initialisation outright
+# (openshell-server/src/compute/mod.rs). So this line cannot appear if the
+# contract is broken, which is precisely the compatibility claim under test.
+log "ASSERT 1b: the gateway logged 'Compute driver connected' for kyma"
+gw_logs_raw=$(kubectl -n "$NS" logs "deploy/${RELEASE}-openshell-driver-kyma" -c gateway --tail=500 2>&1) \
+	|| fail "could not read gateway logs:
+${gw_logs_raw}"
+
+# The gateway emits ANSI colour codes even without a TTY, and they land
+# BETWEEN the field name, the `=`, and the value — a literal
+# `advertised_driver=kyma` never matches. Strip them before asserting, which
+# also makes the failure output readable.
+gw_logs=$(sed $'s/\033\\[[0-9;]*m//g' <<<"$gw_logs_raw")
+
+grep -q "Compute driver connected" <<<"$gw_logs" || fail "gateway never accepted the compute driver:
+${gw_logs}"
+grep -qE "advertised_driver=kyma|driver\.name=kyma" <<<"$gw_logs" \
+	|| fail "gateway connected a driver, but not one advertising itself as kyma:
+${gw_logs}"
 
 # --- Assertion 2: the driver creates a well-formed CR --------------------
 #
