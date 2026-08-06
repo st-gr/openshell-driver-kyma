@@ -208,6 +208,12 @@ jobs:
           git checkout -b "upstream-sync/${GATEWAY_TAG}-${GITHUB_RUN_ID}"
 
       - name: Let Claude perform the sync
+        id: claude
+        # Must not abort the job. If Claude runs out of turns or errors,
+        # the steps below still run and turn whatever it produced into a
+        # draft PR. Discarding partial work is the worst outcome: it burns
+        # subscription usage and leaves nothing to inspect or resume from.
+        continue-on-error: true
         uses: anthropics/claude-code-action@v1
         with:
           # claude-code-action@v1 exposes two DISTINCT inputs: anthropic_api_key
@@ -225,7 +231,11 @@ jobs:
           # requiring the App (and the Claude org/Team plan its install flow
           # steers you toward) on a repo that only needs branch + PR access.
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          claude_args: --max-turns 40 --allowedTools "Bash,Read,Edit,Write,Glob,Grep"
+          # 40 was not enough: a real sync (vendor protos, build, fix
+          # compile errors, fmt + clippy + test, digests, version bump,
+          # CHANGELOG) hit the cap at turn 41 having produced nothing
+          # retrievable. Each cargo cycle costs several turns.
+          claude_args: --max-turns 120 --allowedTools "Bash,Read,Edit,Write,Glob,Grep"
           prompt: |
             Sync this driver to upstream OpenShell ${{ env.GATEWAY_TAG }}.
 
@@ -270,6 +280,7 @@ jobs:
 
       - name: Run the full gate
         id: gate
+        if: ${{ !cancelled() }}
         continue-on-error: true
         run: |
           cargo fmt --all -- --check
@@ -277,11 +288,13 @@ jobs:
           cargo test --workspace
 
       - name: Commit and open the pull request
+        if: ${{ !cancelled() }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DETECT_SUMMARY: ${{ needs.detect.outputs.summary }}
           SMOKE_RESULT: ${{ needs.smoke.result }}
           GATE_OUTCOME: ${{ steps.gate.outcome }}
+          CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
         run: |
           # `git diff --quiet` only sees modifications to already-tracked
           # files, so a sync that added only new files (e.g. a brand-new RPC
@@ -307,11 +320,18 @@ jobs:
 
           # Draft when the gate is red, so a half-finished sync can never be
           # mistaken for one that is ready to merge.
+          # Draft whenever ANY part is incomplete. A half-finished sync
+          # must never look ready to merge.
           draft=""
           gate="passed"
+          claude="completed"
           if [[ "$GATE_OUTCOME" != "success" ]]; then
             draft="--draft"
             gate="FAILED — see the 'Run the full gate' step"
+          fi
+          if [[ "$CLAUDE_OUTCOME" != "success" ]]; then
+            draft="--draft"
+            claude="DID NOT FINISH — likely hit --max-turns; see the 'Let Claude perform the sync' step"
           fi
 
           # Assign the heredoc to a variable first rather than passing
@@ -348,8 +368,12 @@ jobs:
             --title "chore: sync to upstream ${GATEWAY_TAG}" \
             --body "$body"
 
-      - name: Fail the job if the gate failed
-        if: steps.gate.outcome != 'success'
+      - name: Fail the job if the sync did not complete cleanly
+        if: steps.claude.outcome != 'success' || steps.gate.outcome != 'success'
+        env:
+          CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
+          GATE_OUTCOME: ${{ steps.gate.outcome }}
         run: |
-          echo "A draft PR was opened, but the gate did not pass." >&2
+          echo "Sync incomplete. claude=${CLAUDE_OUTCOME} gate=${GATE_OUTCOME}." >&2
+          echo "A draft PR was opened if there was anything to commit." >&2
           exit 1
