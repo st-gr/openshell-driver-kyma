@@ -1,84 +1,35 @@
-# Runbook: weekly upstream-compatibility sync
+**What a real incompatibility looks like** (exercised 2026-08-05 with a
+deliberately broken driver, not guessed):
 
-Maintainer documentation for `.github/workflows/upstream-sync.yml` and
-`.github/workflows/interop-smoke.yml`.
+The gateway container fails to start, crashloops, and `helm install --wait`
+times out. The smoke reports:
 
-**Not for driver users.** Do not link this from `docs/tutorial-anthropic-direct.md`
-or `docs/getting-started.md` — those are for someone installing the driver,
-who has no use for CI internals.
-
-## What runs, and when
-
-| Workflow | Trigger | Holds secrets? |
-|---|---|---|
-| `interop-smoke` | called by `branch-checks` on every PR; manual | **no** |
-| `upstream-sync` | Sundays 03:00 UTC; manual | `CLAUDE_CODE_OAUTH_TOKEN` |
-
-`upstream-sync` invokes Claude **only** when the protos are behind, the
-pinned image digests are stale, or the interop smoke failed. Most Sundays it
-is a green no-op costing no tokens.
-
-## Situations
-
-### Sunday PR is green
-
-Review the diff as you would any PR — pay attention to whatever upstream
-added, since that is the part Claude wrote from scratch. Merge.
-
-Then **roll out to the cluster manually.** CI holds no cluster credentials, so
-this step is never automated:
-
-```bash
-helm -n openshell-system upgrade ods deploy/helm/openshell-driver-kyma \
-  --reuse-values \
-  --set image.tag=sha256:<new driver digest> \
-  --set gateway.image.tag=sha256:<new gateway digest> \
-  --set driver.supervisorImage=ghcr.io/nvidia/openshell/supervisor@sha256:<new supervisor digest>
+```
+=== installing the chart (gateway sha256:...)
+Error: INSTALLATION FAILED: context deadline exceeded
+FAIL: helm install failed
+--- pods ---
+ods-openshell-driver-kyma-...  1/2  CrashLoopBackOff
+--- gateway log ---
+... Compute driver connected  configured_driver=kyma advertised_driver=kyma
+Error: × execution error: failed to create compute runtime: <the driver's error>
 ```
 
-Pass all three explicitly. `--reuse-values` carries forward the **old chart's**
-defaults, so a changed default in `values.yaml` is silently ignored — this has
-already happened once, where the driver kept injecting `supervisor:latest`
-after an upgrade that appeared to succeed.
+So a contract break surfaces at the **helm install** step, before any ASSERT
+runs. Look at the `--- gateway log ---` block in the failure output: the line
+after "Compute driver connected" names the actual cause.
 
-Verify:
+Two traps this exercise exposed, worth knowing before you debug:
 
-```bash
-kubectl -n openshell-system get deploy ods-openshell-driver-kyma \
-  -o jsonpath='{range .spec.template.spec.containers[*]}{.name}: {.image}{"\n"}{end}'
-openshell sandbox exec --name <sandbox> -- claude -p --model claude-opus-4-7 "Reply with exactly OK"
-```
-
-### Sunday PR is a draft
-
-The PR body's "Local gate" row tells you the gate failed (it only ever renders
-`passed` or `FAILED — see the 'Run the full gate' step`; it cannot tell you
-*why*). To find out whether Claude hit `--max-turns` mid-task or finished but
-left the gate red, read the "Let Claude perform the sync" step's log in the
-run — a turn-cap cutoff ends abruptly mid-transcript, a completed-but-failing
-attempt runs to the end of the prompt and then the separate "Run the full
-gate" step reports the failure. Finish it by hand or close it — do not merge
-a draft.
-
-### Interop smoke red, protos unchanged
-
-The interesting case: a behavioural break upstream with no proto diff. Decide:
-
-- fix forward (usually a driver change), or
-- pin `GATEWAY_REF` to the last good version to unblock PRs while you work.
-
-The signature of a real incompatibility should be recorded here once the
-must-fail guard has actually been exercised against a known-broken gateway.
-That has not happened yet — it requires `interop-smoke.yml` to be present on
-the default branch first. When you run it, capture the exact failing
-assertion and its message and replace this paragraph with it:
-
-```bash
-gh workflow run interop-smoke.yml -f gateway_ref=v0.0.91
-```
-
-> **TODO:** run the command above once these workflows are merged, then
-> paste the `ASSERT n: ...` line and failure message from the run log here.
+- **"Compute driver connected" is not proof the contract is satisfied.** The
+  gateway logs it *before* calling `GetGatewayListenerRequirements`
+  (`openshell-server/src/compute/mod.rs:608` vs `:617`). A driver that breaks
+  that RPC still produces the line, then kills the gateway a moment later.
+- **`gateway_ref=v0.0.91` is NOT a negative test.** It passes, because the
+  driver is genuinely backward compatible: v0.0.97 only *added* an RPC, and an
+  older gateway never calls it. Verified — the smoke is green against v0.0.91
+  and v0.0.99 alike. To exercise the failure path, break the driver on a
+  scratch branch and dispatch the smoke against that branch instead.
 
 ### Unrelated PRs suddenly red after an upstream release
 

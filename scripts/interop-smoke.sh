@@ -139,13 +139,19 @@ grep -qi "Connected" <<<"$status_out" || fail "gateway did not report Connected"
 
 # --- Assertion 1b: the gateway accepted THIS driver ----------------------
 #
-# The load-bearing one, and the reason this smoke exists.
+# Proves the gateway completed GetCapabilities and accepted the driver's
+# advertised identity.
 #
-# The gateway logs "Compute driver connected" only after GetCapabilities
-# returns AND GetGatewayListenerRequirements answers tolerably — a
-# non-Unimplemented error there aborts driver initialisation outright
-# (openshell-server/src/compute/mod.rs). So this line cannot appear if the
-# contract is broken, which is precisely the compatibility claim under test.
+# What it does NOT prove, verified by a deliberate-break test rather than by
+# reading: the gateway logs this line BEFORE calling
+# GetGatewayListenerRequirements (openshell-server/src/compute/mod.rs:608 vs
+# :617). Breaking that RPC still produces this line.
+#
+# That contract break is caught earlier instead — a non-Unimplemented error
+# there aborts driver initialisation, the gateway container exits, and
+# `helm install --wait` above fails with "failed to create compute runtime".
+# So the helm step is the real gate for the listener-requirements contract;
+# this assertion covers capabilities and identity.
 log "ASSERT 1b: the gateway logged 'Compute driver connected' for kyma"
 gw_logs_raw=$(kubectl -n "$NS" logs "deploy/${RELEASE}-openshell-driver-kyma" -c gateway --tail=500 2>&1) \
 	|| fail "could not read gateway logs:
