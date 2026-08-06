@@ -121,8 +121,11 @@ claude setup-token
 gh secret set CLAUDE_CODE_OAUTH_TOKEN --repo st-gr/openshell-driver-kyma
 ```
 
-Token created: **TODO — fill in from the `claude setup-token` run that set
-the current secret** · Expires: **TODO — same run**
+Token created: **2026-08-05** · Expires: **2026-08-05 + 1 year (2027-08-05)**
+
+Put a calendar reminder a couple of weeks before that date. An expired token
+fails the job loudly by design, but "loudly" still means a red run nobody is
+watching at 03:00 on a Sunday.
 
 `claude setup-token` prints both dates when it runs; neither is recoverable
 from `gh secret list` after the fact (it only reports when the secret value
