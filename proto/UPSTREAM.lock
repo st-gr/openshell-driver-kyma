@@ -6,9 +6,9 @@
 # copy with our provenance header stripped. The check script strips it the
 # same way before hashing, so local edits to the body still fail the check.
 repo = "https://github.com/NVIDIA/OpenShell"
-ref = "v0.0.97"
-commit = "fde96f0488d09d34472521d0dd59bdf20c5bdf61"
-vendored_at = "2026-08-04"
+ref = "v0.0.99"
+commit = "8c7dd148a9e6360c9d5b2830e339a0dc4b3f3032"
+vendored_at = "2026-08-06"
 header_lines = 7
 
 [[files]]
