@@ -6,6 +6,23 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-08-06
+
+### Changed
+
+- **Synced the `ComputeDriver` contract to upstream v0.0.99.** The vendored
+  protos are **byte-identical** to v0.0.97 (`proto/UPSTREAM.lock` records the
+  same per-file checksums under the new ref/commit) — `scripts/check-proto-drift.sh`
+  confirms this and no driver code changed as a result. Upstream's v0.0.98 and
+  v0.0.99 releases were test/build/perf/docs work (system CA root build mode,
+  OCI image working-directory handling, `TCP_NODELAY` on latency-sensitive
+  hops, VM driver OTLP tracing) that does not touch the driver-facing RPCs, so
+  this was a pin bump rather than a contract migration.
+- **Re-pinned `gateway.image.tag` and `driver.supervisorImage` by digest** to
+  the v0.0.99 builds:
+  - gateway: `sha256:1909b9d7d3f8486b4f770c1670f26db05722ed7b42f54991664fa59f016db8c3`
+  - supervisor: `sha256:ea3632b6e9528e2309103af5b6949606fcdc83ca1f69e8db81482a25bea84bb6`
+
 ## [0.3.0] — 2026-08-04
 
 ### Added
