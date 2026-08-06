@@ -43,7 +43,7 @@ jobs:
     timeout-minutes: 25
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Override GATEWAY_REF when one was supplied
         if: inputs.gateway_ref != ''
@@ -75,7 +75,13 @@ jobs:
         run: ./scripts/resolve-upstream-refs.sh | tee -a "$GITHUB_ENV"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v9
+        with:
+          # This is a Rust repo: there is no uv.lock or requirements*.txt
+          # for setup-uv to key a cache on, so the cache would never be
+          # invalidated. We install exactly one pinned package
+          # (openshell==<resolved version>), so caching buys nothing.
+          enable-cache: false
 
       - name: Create kind cluster
         uses: helm/kind-action@v1
