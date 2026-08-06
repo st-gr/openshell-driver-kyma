@@ -1,11 +1,79 @@
+# Runbook: weekly upstream-compatibility sync
+
+Maintainer documentation for `.github/workflows/upstream-sync.yml` and
+`.github/workflows/interop-smoke.yml`.
+
+**Not for driver users.** Do not link this from `docs/tutorial-anthropic-direct.md`
+or `docs/getting-started.md` — those are for someone installing the driver,
+who has no use for CI internals.
+
+## What runs, and when
+
+| Workflow | Trigger | Holds secrets? |
+|---|---|---|
+| `interop-smoke` | called by `branch-checks` on every PR; manual | **no** |
+| `upstream-sync` | Sundays 03:00 UTC; manual | `CLAUDE_CODE_OAUTH_TOKEN` |
+
+`upstream-sync` invokes Claude **only** when the protos are behind, the
+pinned image digests are stale, or the interop smoke failed. Most Sundays it
+is a green no-op costing no tokens.
+
+## Situations
+
+### Sunday PR is green
+
+Review the diff as you would any PR — pay attention to whatever upstream
+added, since that is the part Claude wrote from scratch. Merge.
+
+Then **roll out to the cluster manually.** CI holds no cluster credentials, so
+this step is never automated:
+
+```bash
+helm -n openshell-system upgrade ods deploy/helm/openshell-driver-kyma \
+  --reuse-values \
+  --set image.tag=sha256:<new driver digest> \
+  --set gateway.image.tag=sha256:<new gateway digest> \
+  --set driver.supervisorImage=ghcr.io/nvidia/openshell/supervisor@sha256:<new supervisor digest>
+```
+
+Pass all three explicitly. `--reuse-values` carries forward the **old chart's**
+defaults, so a changed default in `values.yaml` is silently ignored — this has
+already happened once, where the driver kept injecting `supervisor:latest`
+after an upgrade that appeared to succeed.
+
+Verify:
+
+```bash
+kubectl -n openshell-system get deploy ods-openshell-driver-kyma \
+  -o jsonpath='{range .spec.template.spec.containers[*]}{.name}: {.image}{"\n"}{end}'
+openshell sandbox exec --name <sandbox> -- claude -p --model claude-opus-4-7 "Reply with exactly OK"
+```
+
+### Sunday PR is a draft
+
+The PR body's "Local gate" row tells you the gate failed (it only ever renders
+`passed` or `FAILED — see the 'Run the full gate' step`; it cannot tell you
+*why*). To find out whether Claude hit `--max-turns` mid-task or finished but
+left the gate red, read the "Let Claude perform the sync" step's log in the
+run — a turn-cap cutoff ends abruptly mid-transcript, a completed-but-failing
+attempt runs to the end of the prompt and then the separate "Run the full
+gate" step reports the failure. Finish it by hand or close it — do not merge
+a draft.
+
+### Interop smoke red, protos unchanged
+
+The interesting case: a behavioural break upstream with no proto diff. Decide:
+
+- fix forward (usually a driver change), or
+- pin `GATEWAY_REF` to the last good version to unblock PRs while you work.
+
 **What a real incompatibility looks like** (exercised 2026-08-05 with a
 deliberately broken driver, not guessed):
 
 The gateway container fails to start, crashloops, and `helm install --wait`
-times out. The smoke reports:
+times out:
 
 ```
-=== installing the chart (gateway sha256:...)
 Error: INSTALLATION FAILED: context deadline exceeded
 FAIL: helm install failed
 --- pods ---
@@ -15,21 +83,21 @@ ods-openshell-driver-kyma-...  1/2  CrashLoopBackOff
 Error: × execution error: failed to create compute runtime: <the driver's error>
 ```
 
-So a contract break surfaces at the **helm install** step, before any ASSERT
-runs. Look at the `--- gateway log ---` block in the failure output: the line
-after "Compute driver connected" names the actual cause.
+A contract break surfaces at the **helm install** step, before any ASSERT
+runs. Read the `--- gateway log ---` block: the line after "Compute driver
+connected" names the cause.
 
-Two traps this exercise exposed, worth knowing before you debug:
+Two traps this exposed:
 
-- **"Compute driver connected" is not proof the contract is satisfied.** The
-  gateway logs it *before* calling `GetGatewayListenerRequirements`
+- **"Compute driver connected" does not prove the contract is satisfied.**
+  The gateway logs it *before* calling `GetGatewayListenerRequirements`
   (`openshell-server/src/compute/mod.rs:608` vs `:617`). A driver that breaks
-  that RPC still produces the line, then kills the gateway a moment later.
-- **`gateway_ref=v0.0.91` is NOT a negative test.** It passes, because the
-  driver is genuinely backward compatible: v0.0.97 only *added* an RPC, and an
-  older gateway never calls it. Verified — the smoke is green against v0.0.91
-  and v0.0.99 alike. To exercise the failure path, break the driver on a
-  scratch branch and dispatch the smoke against that branch instead.
+  that RPC still emits the line, then kills the gateway moments later.
+- **`gateway_ref=v0.0.91` is NOT a negative test.** It passes: v0.0.97 only
+  *added* an RPC and an older gateway never calls it, so the driver is
+  genuinely backward compatible. Verified green against v0.0.91 and v0.0.99
+  alike. To exercise the failure path, break the driver on a scratch branch
+  and dispatch the smoke against that branch.
 
 ### Unrelated PRs suddenly red after an upstream release
 
@@ -86,23 +154,18 @@ for two months.
 
 ## One-time setup
 
-1. **Install the Claude Code GitHub App on this repository:**
-   <https://github.com/apps/claude>
+1. **No Claude GitHub App is needed.** `upstream-sync.yml` passes
+   `github_token` to `claude-code-action`; `action.yml` documents that input
+   as "optional if using GitHub App" — the App is the *alternative* to a
+   token, not a prerequisite.
 
-   This is separate from the token and BOTH are required. The action fetches
-   a GitHub OIDC token, then exchanges it for an app token; without the App
-   installed the exchange returns:
+   Omit it and the action tries to exchange its OIDC token for a Claude-App
+   token, failing with `Claude Code is not installed on this repository`.
+   Installing the App instead steers a personal account into Claude org
+   settings that demand a Team/Enterprise plan. Don't; keep passing the token.
 
-   ```
-   App token exchange failed: 401 Unauthorized - Claude Code is not installed
-   on this repository.
-   ```
-
-   It fails at auth, before Claude runs, so a missing App costs no
-   subscription tokens — it just means the Sunday job never does anything.
-   Verify by dispatching `upstream-sync` manually; you cannot check the
-   installation with a normal `gh` token (the API needs an app-authorised
-   one).
+   The job also needs `id-token: write` (already set), or it fails earlier
+   with `Could not fetch an OIDC token`.
 
 2. `claude setup-token` locally; store as `CLAUDE_CODE_OAUTH_TOKEN` via
    `gh secret set`. Record the expiry above.
@@ -110,13 +173,26 @@ for two months.
    ```bash
    gh api repos/st-gr/openshell-driver-kyma/actions/permissions/workflow \
      --jq '{default_workflow_permissions, can_approve_pull_request_reviews}'
-   # expect: {"can_approve_pull_request_reviews": false,
+   # expect: {"can_approve_pull_request_reviews": true,
    #          "default_workflow_permissions": "read"}
    ```
+
+   `can_approve_pull_request_reviews` must be **true**, despite the name. The
+   single GitHub toggle "Allow GitHub Actions to create and approve pull
+   requests" governs both creating and approving. With it off, the sync job
+   does all its work, pushes the branch, then dies on the final step with
+   `GitHub Actions is not permitted to create or approve pull requests` —
+   which is exactly what happened on 2026-08-05.
+
+   Trade-off: it also lets Actions *approve* PRs. Harmless while `main`
+   requires no reviews. **If you enable required-review branch protection
+   (step 5), revisit this** — Actions could otherwise self-approve through it.
+   `default_workflow_permissions` stays `read`; only the sync job escalates,
+   and only to `contents` / `pull-requests` / `id-token`.
 4. Leave **"Send write tokens to workflows from pull requests" off.** Enabling
    it would give fork PRs a writable `GITHUB_TOKEN`.
 5. **Turn on branch protection for `main`, requiring changes to go through a
-   pull request.** As of this writing (recheck with the commands in step 5b
+   pull request.** As of this writing (recheck with the commands in step 4b
    below if you're reading this later) it is not on — the only things
    currently blocked are force-pushes and deletions; there is no required
    review and no ruleset. See the "do not commit/push" bullet under Security
@@ -188,7 +264,7 @@ for two months.
   a control that's enforced.** Nothing currently stops the `Bash` tool from
   running `git checkout main && git push origin main` with the same
   `GITHUB_TOKEN`. **As of this writing** — recheck with the commands in
-  One-time setup step 5b, since this is a fact about live repo
+  One-time setup step 4b, since this is a fact about live repo
   configuration and not this document: `main` has no required pull-request
   reviews and no ruleset (`gh api repos/st-gr/openshell-driver-kyma/branches/main/protection`
   blocks only force-pushes and deletions; `gh api .../rulesets` returns
@@ -206,7 +282,7 @@ for two months.
   which makes the first of these two controls meaningfully stronger.
 
   **Remedy:** turn on branch protection for `main`, requiring pull requests
-  (see One-time setup, step 5). That is what would turn "the sync job only
+  (see One-time setup, step 4). That is what would turn "the sync job only
   pushes to its own branch" from a convention in the code into an actual
   guarantee GitHub enforces regardless of what the `Bash` tool does. This is
   a known, bounded limitation with a clear fix, not something to be alarmed
