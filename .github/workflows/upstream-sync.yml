@@ -216,6 +216,15 @@ jobs:
           # token, sk-ant-oat...). CLAUDE_CODE_OAUTH_TOKEN holds the latter —
           # feeding it to anthropic_api_key gets it rejected at auth.
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Supplying github_token makes the action use the built-in token
+          # directly. Without it, the action tries to exchange its OIDC token
+          # for a Claude-GitHub-App token and fails with "Claude Code is not
+          # installed on this repository". action.yml documents this input as
+          # "optional if using GitHub App" — i.e. the App is the ALTERNATIVE
+          # to passing a token, not a prerequisite. Passing it avoids
+          # requiring the App (and the Claude org/Team plan its install flow
+          # steers you toward) on a repo that only needs branch + PR access.
+          github_token: ${{ secrets.GITHUB_TOKEN }}
           claude_args: --max-turns 40 --allowedTools "Bash,Read,Edit,Write,Glob,Grep"
           prompt: |
             Sync this driver to upstream OpenShell ${{ env.GATEWAY_TAG }}.
