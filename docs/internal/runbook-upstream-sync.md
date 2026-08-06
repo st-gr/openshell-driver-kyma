@@ -86,19 +86,37 @@ for two months.
 
 ## One-time setup
 
-1. `claude setup-token` locally; store as `CLAUDE_CODE_OAUTH_TOKEN` via
+1. **Install the Claude Code GitHub App on this repository:**
+   <https://github.com/apps/claude>
+
+   This is separate from the token and BOTH are required. The action fetches
+   a GitHub OIDC token, then exchanges it for an app token; without the App
+   installed the exchange returns:
+
+   ```
+   App token exchange failed: 401 Unauthorized - Claude Code is not installed
+   on this repository.
+   ```
+
+   It fails at auth, before Claude runs, so a missing App costs no
+   subscription tokens — it just means the Sunday job never does anything.
+   Verify by dispatching `upstream-sync` manually; you cannot check the
+   installation with a normal `gh` token (the API needs an app-authorised
+   one).
+
+2. `claude setup-token` locally; store as `CLAUDE_CODE_OAUTH_TOKEN` via
    `gh secret set`. Record the expiry above.
-2. Keep repository hardening in place:
+3. Keep repository hardening in place:
    ```bash
    gh api repos/st-gr/openshell-driver-kyma/actions/permissions/workflow \
      --jq '{default_workflow_permissions, can_approve_pull_request_reviews}'
    # expect: {"can_approve_pull_request_reviews": false,
    #          "default_workflow_permissions": "read"}
    ```
-3. Leave **"Send write tokens to workflows from pull requests" off.** Enabling
+4. Leave **"Send write tokens to workflows from pull requests" off.** Enabling
    it would give fork PRs a writable `GITHUB_TOKEN`.
-4. **Turn on branch protection for `main`, requiring changes to go through a
-   pull request.** As of this writing (recheck with the commands in step 4b
+5. **Turn on branch protection for `main`, requiring changes to go through a
+   pull request.** As of this writing (recheck with the commands in step 5b
    below if you're reading this later) it is not on — the only things
    currently blocked are force-pushes and deletions; there is no required
    review and no ruleset. See the "do not commit/push" bullet under Security
@@ -170,7 +188,7 @@ for two months.
   a control that's enforced.** Nothing currently stops the `Bash` tool from
   running `git checkout main && git push origin main` with the same
   `GITHUB_TOKEN`. **As of this writing** — recheck with the commands in
-  One-time setup step 4b, since this is a fact about live repo
+  One-time setup step 5b, since this is a fact about live repo
   configuration and not this document: `main` has no required pull-request
   reviews and no ruleset (`gh api repos/st-gr/openshell-driver-kyma/branches/main/protection`
   blocks only force-pushes and deletions; `gh api .../rulesets` returns
@@ -188,7 +206,7 @@ for two months.
   which makes the first of these two controls meaningfully stronger.
 
   **Remedy:** turn on branch protection for `main`, requiring pull requests
-  (see One-time setup, step 4). That is what would turn "the sync job only
+  (see One-time setup, step 5). That is what would turn "the sync job only
   pushes to its own branch" from a convention in the code into an actual
   guarantee GitHub enforces regardless of what the `Bash` tool does. This is
   a known, bounded limitation with a clear fix, not something to be alarmed
