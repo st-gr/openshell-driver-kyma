@@ -5,6 +5,57 @@ on:
     branches: [main]
 
 jobs:
+  # Guards upstream-sync.yml's trigger surface. That workflow holds
+  # CLAUDE_CODE_OAUTH_TOKEN and its header comment forbids ever adding
+  # `pull_request_target` or `issue_comment` — both run in the
+  # base-repository context WITH secrets while taking outside input, and
+  # would hand subscription access to any commenter or fork PR author. A
+  # plain-text grep is not a trustworthy guard here: it would also match the
+  # warning comment itself (which is why an earlier draft of that comment
+  # avoided naming the triggers at all). Parse the YAML instead so renaming,
+  # reordering, or hiding a trigger behind an anchor/alias cannot slip past.
+  upstream-sync-trigger-guard:
+    name: upstream-sync.yml triggers stay locked down
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Assert upstream-sync.yml triggers are exactly schedule + workflow_dispatch
+        shell: bash
+        run: |
+          # Parse the trigger block with yq (YAML 1.2) to ensure pull_request_target
+          # and issue_comment can never be added. yq is pre-installed on ubuntu-latest.
+          #
+          # Both forbidden triggers run in the base-repository context WITH secrets
+          # while taking outside input; a comment-triggered variant would hand
+          # subscription access to any commenter or fork PR author.
+
+          triggers=$(yq '.on | keys | .[]' .github/workflows/upstream-sync.yml | sort)
+
+          if [[ -z "$triggers" ]]; then
+            echo "ERROR: on: block is missing or empty" >&2
+            exit 1
+          fi
+
+          expected=$(printf "schedule\nworkflow_dispatch")
+
+          if [[ "$triggers" != "$expected" ]]; then
+            echo "ERROR: upstream-sync.yml triggers changed: got:" >&2
+            echo "$triggers" >&2
+            echo "" >&2
+            echo "expected:" >&2
+            echo "$expected" >&2
+            echo "" >&2
+            echo "This workflow holds CLAUDE_CODE_OAUTH_TOKEN; pull_request_target, " >&2
+            echo "issue_comment, or any other trigger must never be added -- see " >&2
+            echo "the header comment in that file." >&2
+            exit 1
+          fi
+
+          echo "OK: upstream-sync.yml triggers are exactly schedule and workflow_dispatch"
+
   # Guards the vendored ComputeDriver contract. The protos drifted six
   # upstream changes (two wire-breaking) before anything noticed, because
   # nothing compared them against upstream. This job is that comparison.
@@ -54,3 +105,17 @@ jobs:
 
       - name: cargo test (lib + Tier-2 integration)
         run: cargo test --workspace --lib --tests
+
+  # Proves a real upstream gateway still accepts this driver. Runs on every
+  # PR because a contract break should surface at review time, not on Sunday.
+  #
+  # Uses GATEWAY_REF from .github/upstream-compat.env, which is `latest` by
+  # default. Consequence, accepted deliberately: a broken upstream release
+  # reddens unrelated PRs until GATEWAY_REF is pinned. That is the cost of
+  # tracking bleeding edge, and the knob is the one-commit remedy.
+  # See docs/internal/runbook-upstream-sync.md.
+  interop:
+    name: interop smoke
+    uses: ./.github/workflows/interop-smoke.yml
+    with:
+      gateway_ref: ""
