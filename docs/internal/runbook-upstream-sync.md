@@ -12,15 +12,15 @@ who has no use for CI internals.
 | Workflow | Trigger | Holds secrets? |
 |---|---|---|
 | `interop-smoke` | called by `branch-checks` on every PR; manual | **no** |
-| `upstream-sync` | Sundays 03:00 UTC; manual | `CLAUDE_CODE_OAUTH_TOKEN` |
+| `upstream-sync` | **Mondays 09:30 UTC**; manual | `CLAUDE_CODE_OAUTH_TOKEN` |
 
 `upstream-sync` invokes Claude **only** when the protos are behind, the
-pinned image digests are stale, or the interop smoke failed. Most Sundays it
+pinned image digests are stale, or the interop smoke failed. Most weeks it
 is a green no-op costing no tokens.
 
 ## Situations
 
-### Sunday PR is green
+### Weekly PR is green
 
 Review the diff as you would any PR — pay attention to whatever upstream
 added, since that is the part Claude wrote from scratch. Merge.
@@ -49,7 +49,7 @@ kubectl -n openshell-system get deploy ods-openshell-driver-kyma \
 openshell sandbox exec --name <sandbox> -- claude -p --model claude-opus-4-7 "Reply with exactly OK"
 ```
 
-### Sunday PR is a draft
+### Weekly PR is a draft
 
 The PR body's "Local gate" row tells you the gate failed (it only ever renders
 `passed` or `FAILED — see the 'Run the full gate' step`; it cannot tell you
@@ -125,7 +125,7 @@ Token created: **2026-08-05** · Expires: **2026-08-05 + 1 year (2027-08-05)**
 
 Put a calendar reminder a couple of weeks before that date. An expired token
 fails the job loudly by design, but "loudly" still means a red run nobody is
-watching at 03:00 on a Sunday.
+watching at 09:30 UTC on a Monday.
 
 `claude setup-token` prints both dates when it runs; neither is recoverable
 from `gh secret list` after the fact (it only reports when the secret value
@@ -136,6 +136,39 @@ consulted.
 Update those dates here whenever you rotate. The job fails loudly on an
 expired token by design: a silently-dead weekly check is worse than none,
 because you would believe you were covered.
+
+### Job fails but every step looks green
+
+Seen 2026-08-09. The step list shows Claude, the gate and the PR step all
+succeeded, and only "Fail the job if the sync did not complete cleanly" is red.
+
+**The step list is lying to you.** `continue-on-error: true` on the Claude step
+means GitHub reports its *conclusion* as success while its *outcome* — what the
+guard actually tests — was failure. Read the guard's message: it prints
+`claude=<outcome> gate=<outcome>`.
+
+**Then read the Claude step's log, not its status.** The telltale signature of
+a subscription usage limit:
+
+```
+"is_error": true,
+"duration_ms": 381,
+"num_turns": 1,
+"total_cost_usd": 0
+```
+
+One turn, sub-second, zero cost — Claude was refused before doing any work.
+Nothing in this repository is broken. **Re-dispatch after the quota resets**
+(1:00 AM America/Los_Angeles). The schedule already targets Monday 09:30 UTC
+for that reason.
+
+Contrast with a genuine cutoff, which spends real money and turns:
+`subtype: error_max_turns`, `num_turns: 41`, `total_cost_usd: 1.40`. That one
+needs a higher `--max-turns` or a smaller task — not a retry.
+
+Note the gate no longer runs when Claude fails. It used to, and it passed —
+because an untouched tree naturally passes fmt/clippy/test. That "success" said
+nothing about the sync and made this failure harder to read.
 
 ### Job reports an infrastructure flake
 
@@ -151,7 +184,7 @@ a flake never reads as an upstream break.
 gh run list --workflow=upstream-sync.yml --limit 5
 ```
 
-You should see a green run each Sunday. Silence that means "broken" being read
+You should see a green run each Monday. Silence that means "broken" being read
 as silence that means "fine" is the exact failure that let the protos drift
 for two months.
 

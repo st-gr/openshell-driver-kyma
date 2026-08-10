@@ -1,3 +1,11 @@
+> [!NOTE]
+> **Schedule superseded 2026-08-10.** This document says "Sunday 03:00 UTC".
+> That is UTC — it fired Saturday 20:00 America/Los_Angeles, which read as a
+> day early, and it landed before the operator's subscription quota reset.
+> The job now runs **Mondays 09:30 UTC** (`30 9 * * 1`), chosen to sit after a
+> 01:00 PT reset in BOTH PST and PDT. See
+> `docs/internal/runbook-upstream-sync.md`.
+
 # Weekly upstream-compatibility automation — design
 
 **Date:** 2026-08-05

@@ -25,7 +25,17 @@ name: upstream-sync
 # of defect in interop-smoke.yml.
 on:
   schedule:
-    - cron: "0 3 * * 0"   # Sundays, 03:00 UTC
+    # Mondays 09:30 UTC. Chosen against a subscription quota that resets
+    # 01:00 America/Los_Angeles:
+    #   PDT (UTC-7) -> 02:30 local, 1h30 after the reset
+    #   PST (UTC-8) -> 01:30 local, 0h30 after the reset
+    # 08:30 UTC would look correct in summer but lands 00:30 local in
+    # winter — BEFORE the reset — so it must not be used. GitHub cron is
+    # UTC-only and does not follow DST.
+    #
+    # The previous "0 3 * * 0" was Sunday 03:00 UTC = Saturday 20:00 PT,
+    # which is why it appeared to run a day early.
+    - cron: "30 9 * * 1"
   workflow_dispatch:
 
 permissions:
@@ -153,7 +163,7 @@ jobs:
     # `smoke` fails — but "smoke failed" is exactly one of the two cases this
     # job exists to handle, so a bare success()-based condition would defeat
     # its own purpose. always() would fix that, but always() is ALSO true
-    # when the whole run is cancelled — so cancelling a Sunday run partway
+    # when the whole run is cancelled — so cancelling a scheduled run partway
     # through, after detect already reported changed=true, would still
     # invoke Claude, push a branch, and open a PR. !cancelled() runs on both
     # success and failure of upstream jobs, but not on cancellation.
@@ -280,7 +290,10 @@ jobs:
 
       - name: Run the full gate
         id: gate
-        if: ${{ !cancelled() }}
+        # Only meaningful if Claude actually changed something. When Claude
+        # fails, the tree is untouched, so fmt/clippy/test pass and the step
+        # reports success — a false all-clear that hides the real failure.
+        if: ${{ !cancelled() && steps.claude.outcome == 'success' }}
         continue-on-error: true
         run: |
           cargo fmt --all -- --check
@@ -376,4 +389,13 @@ jobs:
         run: |
           echo "Sync incomplete. claude=${CLAUDE_OUTCOME} gate=${GATE_OUTCOME}." >&2
           echo "A draft PR was opened if there was anything to commit." >&2
+          if [[ "$CLAUDE_OUTCOME" != "success" ]]; then
+            echo "" >&2
+            echo "NOTE: the 'Let Claude perform the sync' step shows green in the" >&2
+            echo "UI because continue-on-error masks its conclusion. Read its LOG." >&2
+            echo "If it reports num_turns=1, total_cost_usd=0 and sub-second" >&2
+            echo "duration, Claude was refused before doing any work — almost" >&2
+            echo "always the subscription usage limit. Re-dispatch after the" >&2
+            echo "quota resets; nothing needs fixing in this repo." >&2
+          fi
           exit 1

@@ -20,7 +20,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Assert upstream-sync.yml triggers are exactly schedule + workflow_dispatch
         shell: bash
@@ -65,7 +65,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Check proto drift
         run: ./scripts/check-proto-drift.sh
@@ -76,7 +76,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install protoc
         run: |
@@ -107,7 +107,7 @@ jobs:
         run: cargo test --workspace --lib --tests
 
   # Proves a real upstream gateway still accepts this driver. Runs on every
-  # PR because a contract break should surface at review time, not on Sunday.
+  # PR because a contract break should surface at review time, not on the weekly run.
   #
   # Uses GATEWAY_REF from .github/upstream-compat.env, which is `latest` by
   # default. Consequence, accepted deliberately: a broken upstream release
