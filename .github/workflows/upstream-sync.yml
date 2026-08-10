@@ -25,7 +25,7 @@ name: upstream-sync
 # of defect in interop-smoke.yml.
 on:
   schedule:
-    # Mondays 09:30 UTC. Chosen against a subscription quota that resets
+    # 09:30 UTC. Chosen against a subscription quota that resets
     # 01:00 America/Los_Angeles:
     #   PDT (UTC-7) -> 02:30 local, 1h30 after the reset
     #   PST (UTC-8) -> 01:30 local, 0h30 after the reset
@@ -35,7 +35,12 @@ on:
     #
     # The previous "0 3 * * 0" was Sunday 03:00 UTC = Saturday 20:00 PT,
     # which is why it appeared to run a day early.
-    - cron: "30 9 * * 1"
+    # TEMPORARY: Tuesdays, to observe the first unattended run without
+    # waiting a full week. Revert to "30 9 * * 1" (Mondays) once it has
+    # been seen working end to end — Monday sits right after the 01:00 PT
+    # quota reset, so it has the most subscription headroom. A Tuesday run
+    # competes with whatever the operator has already used on Monday.
+    - cron: "30 9 * * 2"
   workflow_dispatch:
 
 permissions:
