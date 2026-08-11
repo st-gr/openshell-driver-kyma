@@ -56,11 +56,11 @@ driver:
   # starting with `sha256:` and the helper emits `<repo>@sha256:<digest>`
   # automatically.
   #
-  # This digest is supervisor v0.0.99, version-matched to gateway.image
+  # This digest is supervisor v0.0.102, version-matched to gateway.image
   # below. It tracked `:latest` until chart 0.3.0 — that tag moved twice
   # in one week, so sandboxes were silently picking up new privileged
   # binaries. Re-pin both together when bumping upstream.
-  supervisorImage: ghcr.io/nvidia/openshell/supervisor@sha256:ea3632b6e9528e2309103af5b6949606fcdc83ca1f69e8db81482a25bea84bb6
+  supervisorImage: ghcr.io/nvidia/openshell/supervisor@sha256:5e33ec485b9e05a00431a23faabf4a49376b8351d90664d585922e148fb18fa4
   supervisorBinaryPath: /openshell-sandbox
   supervisorMountPath: /opt/openshell/bin
   gatewayEndpoint: ""
@@ -163,14 +163,11 @@ podLabels: {}
 gateway:
   enabled: false
   image:
-    # Pinned to upstream `0.0.99` (commit 8c7dd148). The ComputeDriver
-    # proto contract is byte-identical to `0.0.97` (see proto/UPSTREAM.lock
-    # and scripts/check-proto-drift.sh) — the 0.0.98/0.0.99 upstream
-    # releases were test/build/perf/docs work (system CA root build mode,
-    # OCI image working-directory handling, TCP_NODELAY on latency-sensitive
-    # hops, VM driver OTLP tracing) that does not touch the driver-facing
-    # RPCs. Still carries forward the external-compute-driver work
-    # (NVIDIA/OpenShell#1703), the AWS Bedrock provider plumbing
+    # Pinned to upstream `0.0.102` (commit f48b05e3). The ComputeDriver
+    # proto contract is byte-identical to `0.0.99` (see proto/UPSTREAM.lock
+    # and scripts/check-proto-drift.sh) — this was a pin bump, not a
+    # contract migration. Still carries forward the external-compute-driver
+    # work (NVIDIA/OpenShell#1703), the AWS Bedrock provider plumbing
     # (NVIDIA/OpenShell#1704), and the TUI provider config-key form
     # (NVIDIA/OpenShell#2224 / #1798) introduced in earlier releases.
     # Keep this in lockstep with the `openshell` CLI version operators
@@ -179,7 +176,7 @@ gateway:
     # Bump via
     # https://github.com/NVIDIA/OpenShell/pkgs/container/openshell%2Fgateway
     repository: ghcr.io/nvidia/openshell/gateway
-    tag: "sha256:1909b9d7d3f8486b4f770c1670f26db05722ed7b42f54991664fa59f016db8c3"
+    tag: "sha256:47f5ca7b3c368841fe0ab8ef33d409ffedc6b937019d2a187b0cc4380f8ad976"
     pullPolicy: IfNotPresent
   grpcPort: 8080
   metricsPort: 9091
