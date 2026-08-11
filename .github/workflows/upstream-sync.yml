@@ -35,12 +35,10 @@ on:
     #
     # The previous "0 3 * * 0" was Sunday 03:00 UTC = Saturday 20:00 PT,
     # which is why it appeared to run a day early.
-    # TEMPORARY: Tuesdays, to observe the first unattended run without
-    # waiting a full week. Revert to "30 9 * * 1" (Mondays) once it has
-    # been seen working end to end — Monday sits right after the 01:00 PT
-    # quota reset, so it has the most subscription headroom. A Tuesday run
-    # competes with whatever the operator has already used on Monday.
-    - cron: "30 9 * * 2"
+    # Mondays: immediately after the 01:00 PT quota reset, so the run has the
+    # most subscription headroom. (Ran on Tuesdays 2026-08-11 only, to observe
+    # the first unattended execution without waiting a week.)
+    - cron: "30 9 * * 1"
   workflow_dispatch:
 
 permissions:
@@ -311,6 +309,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DETECT_SUMMARY: ${{ needs.detect.outputs.summary }}
           SMOKE_RESULT: ${{ needs.smoke.result }}
+          SMOKE_GATEWAY_TAG: ${{ needs.smoke.outputs.tested_gateway_tag }}
           GATE_OUTCOME: ${{ steps.gate.outcome }}
           CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
         run: |
@@ -366,7 +365,7 @@ jobs:
           |---|---|
           | Upstream tag | \`${GATEWAY_TAG}\` |
           | Detection | ${DETECT_SUMMARY} |
-          | Interop smoke | \`${SMOKE_RESULT}\` |
+          | Interop smoke | \`${SMOKE_RESULT}\` against gateway \`${SMOKE_GATEWAY_TAG}\` |
           | Local gate | ${gate} |
           | Gateway digest | \`${GATEWAY_IMAGE##*@}\` |
           | Supervisor digest | \`${SUPERVISOR_IMAGE##*@}\` |

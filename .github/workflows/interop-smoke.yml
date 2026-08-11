@@ -25,6 +25,10 @@ on:
         description: "Upstream gateway ref: 'latest' or a vN.N.NN tag"
         required: true
         type: string
+    outputs:
+      tested_gateway_tag:
+        description: "Gateway tag this run actually resolved and tested against"
+        value: ${{ jobs.smoke.outputs.tested_gateway_tag }}
   workflow_dispatch:
     inputs:
       gateway_ref:
@@ -41,6 +45,8 @@ jobs:
     name: driver works against upstream gateway
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    outputs:
+      tested_gateway_tag: ${{ steps.refs.outputs.tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -63,6 +69,7 @@ jobs:
           cat .github/upstream-compat.env
 
       - name: Resolve upstream references
+        id: refs
         # shell: bash is NOT decorative. GitHub's default run: shell is
         # `bash -e {0}` — pipefail is only added when a step declares
         # `shell: bash` explicitly. Without it, `foo | tee x` reports tee's
@@ -72,7 +79,13 @@ jobs:
         # path fails safe today — but late, after kind setup, with a
         # confusing message. Fixing it here for a clean, early failure.)
         shell: bash
-        run: ./scripts/resolve-upstream-refs.sh | tee -a "$GITHUB_ENV"
+        run: |
+          ./scripts/resolve-upstream-refs.sh | tee -a "$GITHUB_ENV"
+          # Publish the resolved tag so callers can state WHICH gateway was
+          # tested. `latest` resolves at RUN TIME, so a sync job and a later
+          # smoke on its PR can legitimately land on different upstream
+          # releases if one ships in between.
+          grep "^GATEWAY_TAG=" "$GITHUB_ENV" | tail -1 | sed "s/^GATEWAY_TAG=/tag=/" >> "$GITHUB_OUTPUT"
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7

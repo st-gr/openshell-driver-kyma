@@ -12,7 +12,7 @@ who has no use for CI internals.
 | Workflow | Trigger | Holds secrets? |
 |---|---|---|
 | `interop-smoke` | called by `branch-checks` on every PR; manual | **no** |
-| `upstream-sync` | **Tuesdays 09:30 UTC** (temporary — revert to Mondays after the first observed run); manual | `CLAUDE_CODE_OAUTH_TOKEN` |
+| `upstream-sync` | **Mondays 09:30 UTC**; manual | `CLAUDE_CODE_OAUTH_TOKEN` |
 
 `upstream-sync` invokes Claude **only** when the protos are behind, the
 pinned image digests are stale, or the interop smoke failed. Most weeks it
@@ -169,6 +169,24 @@ needs a higher `--max-turns` or a smaller task — not a retry.
 Note the gate no longer runs when Claude fails. It used to, and it passed —
 because an untouched tree naturally passes fmt/clippy/test. That "success" said
 nothing about the sync and made this failure harder to read.
+
+### The PR pins one version but the smoke tested another
+
+Expected, not a bug. `GATEWAY_REF=latest` resolves **at run time**, so if
+upstream ships a release between the sync producing a PR and someone merging
+it, the PR's own `branch-checks` smoke runs against the newer one.
+
+Seen 2026-08-11: PR #18 pinned v0.0.102 (the sync's own smoke validated
+v0.0.102 at 09:52), while the merge-time smoke tested v0.0.103 at 16:03.
+
+Both results are useful — the driver works with the version being pinned *and*
+the one released after. The PR body now names the version the smoke actually
+ran against, so the claim is checkable instead of implied.
+
+The failure mode to watch for: if a newly-released gateway breaks the contract,
+the merge-time smoke goes red on a PR whose *content* is fine. Read the gateway
+tag in the smoke log before assuming the PR is at fault; pinning `GATEWAY_REF`
+is the remedy while upstream is broken.
 
 ### Job reports an infrastructure flake
 
