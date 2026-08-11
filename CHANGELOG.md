@@ -6,6 +6,21 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.2] — 2026-08-11
+
+### Changed
+
+- **Synced the `ComputeDriver` contract to upstream v0.0.102.** The vendored
+  protos are **byte-identical** to v0.0.99 (`proto/UPSTREAM.lock` records the
+  same per-file checksums under the new ref/commit) — `scripts/check-proto-drift.sh`
+  confirms this and no driver code changed as a result. `cargo build
+  --workspace --all-targets` is clean against the new pin with no code
+  changes required. This was a pin bump rather than a contract migration.
+- **Re-pinned `gateway.image.tag` and `driver.supervisorImage` by digest** to
+  the v0.0.102 builds:
+  - gateway: `sha256:47f5ca7b3c368841fe0ab8ef33d409ffedc6b937019d2a187b0cc4380f8ad976`
+  - supervisor: `sha256:5e33ec485b9e05a00431a23faabf4a49376b8351d90664d585922e148fb18fa4`
+
 ## [0.3.1] — 2026-08-06
 
 ### Changed

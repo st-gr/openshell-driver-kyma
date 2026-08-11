@@ -345,7 +345,7 @@ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
 name = "computev1"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "prost",
  "prost-types",
@@ -1492,7 +1492,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "openshell-bedrock-bridge"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -1513,7 +1513,7 @@ dependencies = [
 
 [[package]]
 name = "openshell-driver-kyma"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "assert_cmd",
