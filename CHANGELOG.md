@@ -6,6 +6,35 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.3] — 2026-08-17
+
+### Added
+
+- **Implemented the `StartSandbox` RPC** added upstream in v0.0.106, the
+  resume counterpart to `StopSandbox`. This driver's `StopSandbox` is itself
+  `Unimplemented` (it has no "stopped" lifecycle state — see `driver.rs`), so
+  there is nothing for `StartSandbox` to resume from either; it returns
+  `Unimplemented` for the same reason, matching `StopSandbox`'s existing
+  behavior rather than guessing at semantics for a state this driver cannot
+  enter. No upstream Kubernetes driver source is vendored into this repo, so
+  if/when `StopSandbox` gains a real implementation, `StartSandbox` needs
+  matching logic added at the same time — flagged with a TODO at the call
+  site in `driver.rs::start_sandbox`.
+
+### Changed
+
+- **Synced the `ComputeDriver` contract to upstream v0.0.106.** Diff against
+  the previous v0.0.102 pin: `StartSandbox`/`StartSandboxRequest`/
+  `StartSandboxResponse` were added (see above) and the `StopSandbox` RPC
+  doc-comment was reworded; `proto/options.proto` is unchanged.
+  `scripts/check-proto-drift.sh` passes against the new pin. `cargo build
+  --workspace --all-targets` required exactly one fix: implementing the new
+  `start_sandbox` trait method.
+- **Re-pinned `gateway.image.tag` and `driver.supervisorImage` by digest** to
+  the v0.0.106 builds:
+  - gateway: `sha256:a3804181521e6fe326abee5092a93c80bf3f85da6a7e68316f7d66512782f928`
+  - supervisor: `sha256:722f44669722961b7f432b0b81de25b91a58f34a61d6403bef967acaf2b3af01`
+
 ## [0.3.2] — 2026-08-11
 
 ### Changed
