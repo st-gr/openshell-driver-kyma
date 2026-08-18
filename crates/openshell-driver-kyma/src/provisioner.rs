@@ -979,7 +979,7 @@ impl SandboxProvisioner for KymaProvisioner {
             // set --workspace-mode managed and get sandboxes in a namespace
             // that was never bootstrapped.
             WorkspaceMode::Managed | WorkspaceMode::Operator => {
-                Err(DriverError::Internal(anyhow::anyhow!(
+                Err(DriverError::FailedPrecondition(format!(
                     "workspace mode {:?} is not implemented yet",
                     self.cfg.workspace_mode
                 )))
@@ -990,9 +990,9 @@ impl SandboxProvisioner for KymaProvisioner {
     async fn delete_workspace(&self, _workspace: &str) -> Result<(), DriverError> {
         match self.cfg.workspace_mode {
             WorkspaceMode::Shared | WorkspaceMode::Operator => Ok(()),
-            WorkspaceMode::Managed => Err(DriverError::Internal(anyhow::anyhow!(
-                "managed workspace deletion is not implemented yet"
-            ))),
+            WorkspaceMode::Managed => Err(DriverError::FailedPrecondition(
+                "managed workspace deletion is not implemented yet".to_string(),
+            )),
         }
     }
 }
