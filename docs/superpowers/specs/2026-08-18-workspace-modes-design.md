@@ -1,4 +1,4 @@
-# Workspace modes: EnsureWorkspace / DeleteWorkspace — design
+# Upstream v0.0.107 parity: workspace modes + sandbox start/stop — design
 
 **Date:** 2026-08-18
 **Status:** approved, not yet implemented
@@ -44,6 +44,8 @@ the mode abstraction, of which today's behaviour is one branch.
 2. **Chart-conditional RBAC.** Shared installs gain zero privilege.
 3. **Managed does a full bootstrap**, not just a namespace.
 4. **Mode rules live in a new `src/workspace.rs`.**
+5. **`StartSandbox` / `StopSandbox` are implemented for real**, both CRD
+   versions, rather than left `unimplemented`.
 
 ## Architecture
 
@@ -200,21 +202,83 @@ something to flip on a cluster with live sandboxes.
   that an owned namespace IS deleted, and that an unlabelled namespace of the
   same name is NOT.
 
+## Sandbox start/stop
+
+A second, independent subsystem in the same v0.0.107 parity push. Unlike the
+workspace RPCs this closes a **functional** gap, not a capability one: the
+gateway does not swallow `Unimplemented` for these (`compute/mod.rs:1048`,
+`:1203`), so `openshell sandbox stop` fails against this driver today.
+
+Both were stubbed as `unimplemented` — `StopSandbox` since the original build,
+`StartSandbox` added by the v0.0.106 sync (PR #24), which mirrored the existing
+stub. Correct at the time; now replaced.
+
+### Mechanism
+
+Upstream patches the Sandbox CR's operating state, dispatching on the served
+API version (`driver.rs:4254`):
+
+```
+v1beta1  -> spec.operatingMode: "Running" | "Suspended"
+v1alpha1 -> spec.replicas: 1 | 0
+```
+
+**Both are implemented**, matching upstream, even though the installed CRD
+currently serves only `v1alpha1` (verified: `served=true, storage=true`, and no
+`v1beta1`). The `v1beta1` branch is dead code today. It is included on purpose:
+when agent-sandbox starts serving `v1beta1`, a `v1alpha1`-only driver would
+silently patch a field the new CRD ignores — a quiet breakage, which is exactly
+the failure class this repo's upstream tracking exists to prevent.
+
+### Semantics
+
+- Empty `sandbox_id` → `invalid_argument`, matching upstream's guard.
+- Resolve the CR through the existing `find_by_sandbox_id` label selector —
+  the same name-independent lookup the workspace work relies on.
+- Patch with a **`resourceVersion` precondition** (optimistic concurrency), so
+  a concurrent update fails the patch rather than clobbering it.
+- `StopSandbox` then **polls until the pod is actually gone**, bounded by a
+  timeout; returning before termination would let the gateway believe a
+  sandbox is stopped while its pod still runs.
+- Timeout: reuse upstream's shape — a bounded deadline with backoff. Default
+  120s, exposed as `driver.stopTimeoutSecs` so an operator can raise it for
+  slow-terminating workloads.
+- `NotFound` from the selector → `not_found`, not `internal`.
+
+`SandboxProvisioner` gains `start_sandbox(&str)` and `stop_sandbox(&str)`.
+
+### Testing
+
+- Unit tests for the patch-payload builder across both API versions and both
+  directions (running/suspended) — a pure function, table-driven.
+- Contract tests: empty `sandbox_id`, and that neither RPC returns
+  `Unimplemented` any more.
+- The `shared` interop smoke gains a stop → verify pod gone → start → verify
+  Ready cycle on a real cluster. This is the only way to prove the poll loop
+  and the replicas patch actually work against a live agent-sandbox controller.
+
 ## Implementation phasing
 
 Three phases, each independently mergeable and each leaving `main` shippable.
 `Shared` stays the default throughout, so nothing changes for the deployed
 cluster until someone opts in.
 
-1. **Shared parity.** `workspace.rs` with all three modes defined, both RPCs
-   implemented, `Shared` wired end to end. Provisioner switches to resolved
-   namespaces. No RBAC change, no chart values beyond `workspaceMode`. Ships a
-   working contract implementation with zero behaviour change.
+0. **Proto bump to v0.0.107.** The vendored proto is pinned at v0.0.106 and
+   does **not** contain `EnsureWorkspace`/`DeleteWorkspace`. Everything below
+   depends on `make proto-vendor TAG=v0.0.107` landing first.
+1. **Shared parity.** `workspace.rs` with all three modes defined, both
+   workspace RPCs implemented, `Shared` wired end to end. Provisioner switches
+   to resolved namespaces. No RBAC change, no chart values beyond
+   `workspaceMode`. Ships a working contract implementation with zero
+   behaviour change.
 2. **Managed.** Bootstrap, guarded delete, conditional ClusterRole,
    `gatewayId`, the `managed` smoke job. The destructive phase; it should not
    share a PR with anything else.
 3. **Operator.** Allowlist config, validation, the documented prerequisite.
    Smallest phase; no bootstrap, no namespace lifecycle.
+4. **Start/stop.** Independent of phases 1-3; could land in either order.
+   Sequenced last only because the workspace work touches `provisioner.rs`
+   more heavily and rebasing start/stop over it is cheaper than the reverse.
 
 ## Out of scope
 
