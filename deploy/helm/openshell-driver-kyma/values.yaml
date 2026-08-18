@@ -72,6 +72,9 @@ driver:
   # response field was reserved upstream. With this false, any sandbox that
   # requests a GPU is rejected at create time.
   gpuSupport: true
+  # Must be false when workspaceMode is "managed" -- see the note under
+  # workspaceMode below. The chart refuses that combination at install
+  # time rather than silently downgrading isolation.
   enableNetworkPolicy: true
   # When true, the driver injects `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`
   # into every sandbox pod's env. Pair with an in-cluster LLM gateway that
@@ -119,6 +122,15 @@ driver:
   # SWITCHING MODES IS BREAKING. Both the namespace and the object names
   # change, so existing sandboxes become unreachable. Delete every sandbox
   # before switching, then recreate.
+  #
+  # "managed" ALSO REQUIRES enableNetworkPolicy: false (see below), because
+  # this chart's stock default for that value is true. That is not a bug in
+  # managed mode being unfinished by accident: managed namespaces receive no
+  # NetworkPolicy today (bootstrap_managed_namespace deliberately does not
+  # create one -- see provisioner.rs), so the driver and the chart both
+  # refuse the combination on purpose, forcing you to consciously accept
+  # losing network isolation before switching. Install fails at `helm
+  # template`/`helm install` with that explanation if you forget.
   workspaceMode: shared
   # Gateway identity baked into managed namespace names
   # (openshell-{gatewayId}-{workspace}). Required when workspaceMode is

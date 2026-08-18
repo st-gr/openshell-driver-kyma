@@ -21,7 +21,7 @@ deployment.yaml. */}}
 {{- fail (printf "driver.gatewayId %q is not a DNS-1123 label; it becomes part of every managed namespace name." $gid) -}}
 {{- end -}}
 {{- if .Values.driver.enableNetworkPolicy -}}
-{{- fail "driver.workspaceMode=managed requires driver.enableNetworkPolicy=false. The driver itself already refuses to start on this combination (main.rs, see provisioner.rs::bootstrap_managed_namespace's doc comment for why) because the chart's sandbox NetworkPolicy depends on Helm-only inputs a managed namespace never gets; this guard turns that into an immediate install-time error instead of a pod crash-loop." -}}
+{{- fail "driver.workspaceMode=managed requires --set driver.enableNetworkPolicy=false (the chart's own default is true, so managed installs must set this explicitly). This is deliberate, not a bug: managed namespaces get no NetworkPolicy today, so switching to managed means consciously accepting weaker network isolation until that lands. The driver itself already refuses to start on this combination (main.rs, see provisioner.rs::bootstrap_managed_namespace's doc comment for why); this guard turns that into an immediate install-time error instead of a pod crash-loop." -}}
 {{- end -}}
 {{- end -}}
 {{- if and (eq $mode "operator") (not .Values.driver.operatorNamespaceAllowlist) -}}
