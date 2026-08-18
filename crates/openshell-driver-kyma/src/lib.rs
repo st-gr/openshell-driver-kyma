@@ -14,3 +14,4 @@ pub mod interfaces;
 pub mod lifecycle;
 pub mod metrics;
 pub mod provisioner;
+pub mod workspace;

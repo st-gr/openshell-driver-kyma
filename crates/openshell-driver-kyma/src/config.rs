@@ -119,6 +119,28 @@ pub struct Config {
     /// up. Raise it for workloads with long graceful-shutdown handlers.
     #[arg(long, default_value_t = 120)]
     pub stop_timeout_secs: u64,
+
+    /// Tenancy model for workspaces. `shared` (default) keeps every sandbox
+    /// in `--namespace` with `{workspace}--{name}` object names — the only
+    /// mode this driver supported before v0.0.107. `managed` creates a
+    /// namespace per workspace; `operator` uses pre-existing namespaces from
+    /// `--operator-namespace-allowlist`.
+    #[arg(long, value_enum, default_value_t = crate::workspace::WorkspaceMode::Shared)]
+    pub workspace_mode: crate::workspace::WorkspaceMode,
+
+    /// Gateway identity used to derive managed namespace names
+    /// (`openshell-{gateway_id}-{workspace}`). Required when
+    /// `--workspace-mode managed`. Deliberately its own flag rather than a
+    /// read of the sandbox-JWT config, because managed mode must work with
+    /// `gateway.sandboxJwt.enabled=false`.
+    #[arg(long, default_value = "")]
+    pub gateway_id: String,
+
+    /// Namespaces this driver may use in `operator` mode. Read once at
+    /// startup; adding a namespace requires a restart. Repeat the flag or
+    /// pass a comma-separated list.
+    #[arg(long, value_delimiter = ',')]
+    pub operator_namespace_allowlist: Vec<String>,
 }
 
 impl Default for Config {
@@ -142,6 +164,9 @@ impl Default for Config {
             health_port: 9090,
             log_level: "info".to_string(),
             stop_timeout_secs: 120,
+            workspace_mode: crate::workspace::WorkspaceMode::Shared,
+            gateway_id: String::new(),
+            operator_namespace_allowlist: Vec::new(),
         }
     }
 }
@@ -182,6 +207,9 @@ mod tests {
         assert_eq!(c.sandbox_storage_class, "");
         assert_eq!(c.health_port, 9090);
         assert_eq!(c.log_level, "info");
+        assert_eq!(c.workspace_mode, crate::workspace::WorkspaceMode::Shared);
+        assert_eq!(c.gateway_id, "");
+        assert!(c.operator_namespace_allowlist.is_empty());
     }
 
     #[test]
@@ -222,5 +250,11 @@ mod tests {
         assert_eq!(cli.gpu_support, dflt.gpu_support);
         assert_eq!(cli.health_port, dflt.health_port);
         assert_eq!(cli.stop_timeout_secs, dflt.stop_timeout_secs);
+        assert_eq!(cli.workspace_mode, dflt.workspace_mode);
+        assert_eq!(cli.gateway_id, dflt.gateway_id);
+        assert_eq!(
+            cli.operator_namespace_allowlist,
+            dflt.operator_namespace_allowlist
+        );
     }
 }

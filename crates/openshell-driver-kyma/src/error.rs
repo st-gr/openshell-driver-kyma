@@ -20,6 +20,9 @@ pub enum DriverError {
     #[error("precondition failed: {0}")]
     FailedPrecondition(String),
 
+    #[error("permission denied: {0}")]
+    PermissionDenied(String),
+
     #[error("unavailable: {0}")]
     Unavailable(String),
 
@@ -38,6 +41,7 @@ impl From<DriverError> for tonic::Status {
             DriverError::NotFound(m) => Status::new(Code::NotFound, m),
             DriverError::AlreadyExists(m) => Status::new(Code::AlreadyExists, m),
             DriverError::FailedPrecondition(m) => Status::new(Code::FailedPrecondition, m),
+            DriverError::PermissionDenied(m) => Status::new(Code::PermissionDenied, m),
             DriverError::Unavailable(m) => Status::new(Code::Unavailable, m),
             DriverError::Kube(kube::Error::Api(s)) if s.code == 404 => {
                 Status::new(Code::NotFound, s.message.clone())
@@ -88,6 +92,13 @@ mod tests {
     fn precondition_maps_to_failed_precondition() {
         let s: tonic::Status = DriverError::FailedPrecondition("no gpu".into()).into();
         assert_eq!(s.code(), Code::FailedPrecondition);
+    }
+
+    #[test]
+    fn permission_denied_maps_to_permission_denied_code() {
+        let s: tonic::Status = DriverError::PermissionDenied("workspace not allowed".into()).into();
+        assert_eq!(s.code(), Code::PermissionDenied);
+        assert!(s.message().contains("workspace not allowed"));
     }
 
     #[test]
