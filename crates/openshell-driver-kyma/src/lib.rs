@@ -11,5 +11,6 @@ pub mod enricher;
 pub mod error;
 pub mod helpers;
 pub mod interfaces;
+pub mod lifecycle;
 pub mod metrics;
 pub mod provisioner;
