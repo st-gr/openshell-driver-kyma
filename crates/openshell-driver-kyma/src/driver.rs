@@ -8,13 +8,14 @@ use crate::error::DriverError;
 use crate::interfaces::{DriverMetrics, PlatformEnricher, SandboxProvisioner, WatchEvent};
 use computev1::pb::{
     compute_driver_server::ComputeDriver, CreateSandboxRequest, CreateSandboxResponse,
-    DeleteSandboxRequest, DeleteSandboxResponse, GetCapabilitiesRequest, GetCapabilitiesResponse,
-    GetGatewayListenerRequirementsRequest, GetGatewayListenerRequirementsResponse,
-    GetSandboxRequest, GetSandboxResponse, ListSandboxesRequest, ListSandboxesResponse,
-    StartSandboxRequest, StartSandboxResponse, StopSandboxRequest, StopSandboxResponse,
-    ValidateSandboxCreateRequest, ValidateSandboxCreateResponse, WatchSandboxesDeletedEvent,
-    WatchSandboxesEvent, WatchSandboxesPlatformEvent, WatchSandboxesRequest,
-    WatchSandboxesSandboxEvent,
+    DeleteSandboxRequest, DeleteSandboxResponse, DeleteWorkspaceRequest, DeleteWorkspaceResponse,
+    EnsureWorkspaceRequest, EnsureWorkspaceResponse, GetCapabilitiesRequest,
+    GetCapabilitiesResponse, GetGatewayListenerRequirementsRequest,
+    GetGatewayListenerRequirementsResponse, GetSandboxRequest, GetSandboxResponse,
+    ListSandboxesRequest, ListSandboxesResponse, StartSandboxRequest, StartSandboxResponse,
+    StopSandboxRequest, StopSandboxResponse, ValidateSandboxCreateRequest,
+    ValidateSandboxCreateResponse, WatchSandboxesDeletedEvent, WatchSandboxesEvent,
+    WatchSandboxesPlatformEvent, WatchSandboxesRequest, WatchSandboxesSandboxEvent,
 };
 use futures::Stream;
 use std::pin::Pin;
@@ -307,6 +308,29 @@ impl ComputeDriver for Driver {
             Ok(mapped)
         });
         Ok(Response::new(Box::pin(stream) as Self::WatchSandboxesStream))
+    }
+
+    /// Implemented in Phase 2 of the v0.0.107 parity work. Until then this
+    /// returns Unimplemented, which the gateway maps to Ok(()) — see
+    /// openshell-server/src/compute/mod.rs:903. Behaviour is therefore
+    /// unchanged from v0.0.106.
+    async fn ensure_workspace(
+        &self,
+        _req: Request<EnsureWorkspaceRequest>,
+    ) -> Result<Response<EnsureWorkspaceResponse>, Status> {
+        Err(Status::unimplemented(
+            "ensure workspace is not yet implemented by the kyma compute driver",
+        ))
+    }
+
+    /// See `ensure_workspace`. Implemented in Phase 2.
+    async fn delete_workspace(
+        &self,
+        _req: Request<DeleteWorkspaceRequest>,
+    ) -> Result<Response<DeleteWorkspaceResponse>, Status> {
+        Err(Status::unimplemented(
+            "delete workspace is not yet implemented by the kyma compute driver",
+        ))
     }
 }
 
