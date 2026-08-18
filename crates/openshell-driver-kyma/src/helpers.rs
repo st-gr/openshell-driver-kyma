@@ -15,6 +15,21 @@ pub const LABEL_SANDBOX_ID: &str = "openshell.ai/sandbox-id";
 pub const LABEL_SANDBOX_NAME: &str = "openshell.ai/sandbox-name";
 pub const LABEL_SANDBOX_NAMESPACE: &str = "openshell.ai/sandbox-namespace";
 pub const LABEL_SANDBOX_WORKSPACE: &str = "openshell.ai/sandbox-workspace";
+/// Identifies every object this driver owns, across every resource kind
+/// (Sandbox CRs, PVCs, and — as of managed-workspace bootstrap — Namespaces
+/// and ServiceAccounts). Moved here from being provisioner-private so the
+/// namespace/ServiceAccount object builders can share it without a second,
+/// independently-drifting copy of the value below.
+pub const LABEL_MANAGED_BY: &str = "openshell.ai/managed-by";
+/// The value `LABEL_MANAGED_BY` is always set to. Previously hardcoded as
+/// the bare string `"openshell"` at every label-selector call site; broken
+/// out so a typo in one site can't silently desync it from the others.
+pub const LABEL_MANAGED_BY_VALUE: &str = "openshell";
+/// Ties a managed namespace back to the gateway that owns it. Read by a
+/// future `DeleteWorkspace` teardown as one of the ownership checks before
+/// deleting anything — deleting a namespace this driver didn't create would
+/// be catastrophic.
+pub const LABEL_GATEWAY_ID: &str = "openshell.ai/gateway-id";
 
 /// Read an identity value from the CR, preferring the annotation over the
 /// label. Mirrors upstream's `annotation_or_label`: label *values* are capped

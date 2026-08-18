@@ -22,7 +22,7 @@ use crate::interfaces::{SandboxProvisioner, WatchEvent};
 use async_trait::async_trait;
 use computev1::pb::{DriverPlatformEvent, DriverSandbox};
 use futures::{StreamExt, TryStreamExt};
-use k8s_openapi::api::core::v1::{Event as CoreEvent, Node};
+use k8s_openapi::api::core::v1::{Event as CoreEvent, Namespace, Node, ServiceAccount};
 use kube::{
     api::{
         Api, ApiResource, DeleteParams, DynamicObject, ListParams, Patch, PatchParams, PostParams,
@@ -39,11 +39,11 @@ use tokio::sync::{mpsc, RwLock};
 // Identity labels. Re-exported from `helpers` so the CR writer and the CR
 // reader (`object_to_driver_sandbox`) can never drift apart.
 use crate::helpers::{
-    LABEL_SANDBOX_ID, LABEL_SANDBOX_NAME, LABEL_SANDBOX_NAMESPACE, LABEL_SANDBOX_WORKSPACE,
+    LABEL_GATEWAY_ID, LABEL_MANAGED_BY, LABEL_MANAGED_BY_VALUE, LABEL_SANDBOX_ID,
+    LABEL_SANDBOX_NAME, LABEL_SANDBOX_NAMESPACE, LABEL_SANDBOX_WORKSPACE,
 };
 use crate::workspace::WorkspaceMode;
 
-const LABEL_MANAGED_BY: &str = "openshell.ai/managed-by";
 const LABEL_KAGENTI: &str = "kagenti.io/type";
 const LABEL_ISTIO_INJECT: &str = "sidecar.istio.io/inject";
 // Pod annotation read by the gateway after a successful TokenReview to
@@ -141,7 +141,7 @@ impl KymaProvisioner {
     /// namespace under `Managed`/`Operator`.
     async fn find_by_sandbox_id(&self, sandbox_id: &str) -> Result<DynamicObject, DriverError> {
         let lp = ListParams::default().labels(&format!(
-            "{LABEL_MANAGED_BY}=openshell,{LABEL_SANDBOX_ID}={sandbox_id}"
+            "{LABEL_MANAGED_BY}={LABEL_MANAGED_BY_VALUE},{LABEL_SANDBOX_ID}={sandbox_id}"
         ));
         let ns = self.id_lookup_namespace();
         let list = self.sandboxes_api_for(ns.as_deref()).list(&lp).await?;
@@ -292,7 +292,7 @@ impl KymaProvisioner {
                     "name": claim_name,
                     "namespace": namespace,
                     "labels": {
-                        LABEL_MANAGED_BY: "openshell",
+                        LABEL_MANAGED_BY: LABEL_MANAGED_BY_VALUE,
                         LABEL_SANDBOX_ID: sb.id,
                         LABEL_SANDBOX_NAME: sb.name,
                         LABEL_SANDBOX_WORKSPACE: sb.workspace,
@@ -308,6 +308,91 @@ impl KymaProvisioner {
             Ok(_) => Ok(()),
             Err(kube::Error::Api(s)) if s.code == 409 => Ok(()),
             Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Create everything a sandbox needs in a managed workspace namespace.
+    ///
+    /// Steps 2 and 3 have no upstream counterpart. They are required here
+    /// because this driver hard-depends on them: `verify_psa_label` fails
+    /// without the PSA label, and `SANDBOX_SERVICE_ACCOUNT` is pinned into
+    /// every pod spec, so a bare namespace produces pods that never start.
+    ///
+    /// Deliberately does **not** create a NetworkPolicy. The chart's sandbox
+    /// NetworkPolicy (`templates/networkpolicy.yaml`) depends on Helm-only
+    /// inputs — `.Values.gateway.*`, `.Release.Namespace`/`.Release.Name`,
+    /// the `selectorLabels` helper, the `gatewayUpstreamEgress`/
+    /// `bedrockBridge` blocks — none of which exist in `Config`. Porting it
+    /// here would mean maintaining the same security policy in two
+    /// languages that must never drift, and drift would mean a managed
+    /// namespace silently getting weaker isolation than the shared one.
+    /// Instead, `main.rs` refuses to start when `--workspace-mode managed`
+    /// is combined with `--enable-network-policy=true`, so this gap is
+    /// loud, not silent.
+    async fn bootstrap_managed_namespace(&self, workspace: &str) -> Result<(), DriverError> {
+        let ns = crate::workspace::managed_namespace(&self.cfg.gateway_id, workspace);
+
+        // 1 + 2: namespace, carrying both the ownership labels a future
+        // DeleteWorkspace teardown must check and the PSA label sandbox pods
+        // need. The payload is built by a pure function so it can be unit
+        // tested without a cluster.
+        let ns_obj =
+            serde_json::from_value(managed_namespace_object(&self.cfg.gateway_id, workspace))
+                .map_err(|e| {
+                    DriverError::Internal(anyhow::anyhow!(
+                        "managed namespace manifest build failed: {e}"
+                    ))
+                })?;
+        create_tolerating_conflict(&Api::<Namespace>::all(self.client.clone()), ns_obj).await?;
+
+        // 3: the ServiceAccount every sandbox pod spec names.
+        let sa_obj = serde_json::from_value(sandbox_service_account_object(&ns)).map_err(|e| {
+            DriverError::Internal(anyhow::anyhow!(
+                "sandbox service account manifest build failed: {e}"
+            ))
+        })?;
+        create_tolerating_conflict(
+            &Api::<ServiceAccount>::namespaced(self.client.clone(), &ns),
+            sa_obj,
+        )
+        .await?;
+
+        // Post-condition, not a precondition: the label was just applied, so a
+        // failure here means something stripped it (e.g. a policy webhook).
+        self.verify_psa_label(&ns).await?;
+        Ok(())
+    }
+
+    /// Confirm a namespace carries the PSA label sandbox pods require.
+    ///
+    /// In `Managed` this is a POST-condition: `bootstrap_managed_namespace`
+    /// just applied the label, so a failure here means something stripped it
+    /// (a policy webhook, say). In `Operator` it would be a genuine
+    /// PRECONDITION — the platform team owns the namespace and must have
+    /// labelled it themselves — but `Operator` wiring is a later task.
+    ///
+    /// Kept as the provisioner's own check rather than a call into
+    /// `PlatformEnricher::detect_psa`: the provisioner holds no enricher.
+    /// The error wording mirrors `KymaEnricher::detect_psa` (`enricher.rs`)
+    /// verbatim — the runbook quotes that message.
+    async fn verify_psa_label(&self, namespace: &str) -> Result<(), DriverError> {
+        let api: Api<Namespace> = Api::all(self.client.clone());
+        let ns = api.get(namespace).await?;
+        let enforce = ns
+            .metadata
+            .labels
+            .as_ref()
+            .and_then(|l| l.get("pod-security.kubernetes.io/enforce"))
+            .cloned();
+        if enforce.as_deref() == Some("privileged") {
+            Ok(())
+        } else {
+            Err(DriverError::FailedPrecondition(format!(
+                "namespace {namespace} must have label pod-security.kubernetes.io/enforce=privileged \
+                 for the supervisor's elevated capabilities; current value: {:?}. Apply this label as \
+                 cluster-admin: kubectl label ns {namespace} pod-security.kubernetes.io/enforce=privileged --overwrite",
+                enforce.unwrap_or_else(|| "<absent>".to_string())
+            )))
         }
     }
 
@@ -484,7 +569,7 @@ impl KymaProvisioner {
         let user_labels = template.map(|t| t.labels.clone()).unwrap_or_default();
         let mut driver_labels: HashMap<String, String> = HashMap::new();
         driver_labels.insert(LABEL_SANDBOX_ID.into(), sb.id.clone());
-        driver_labels.insert(LABEL_MANAGED_BY.into(), "openshell".into());
+        driver_labels.insert(LABEL_MANAGED_BY.into(), LABEL_MANAGED_BY_VALUE.into());
         driver_labels.insert(LABEL_KAGENTI.into(), "agent".into());
         if !self.cfg.istio_inject_sandboxes {
             driver_labels.insert(LABEL_ISTIO_INJECT.into(), "false".into());
@@ -591,7 +676,7 @@ impl KymaProvisioner {
         driver_labels.insert(LABEL_SANDBOX_NAME.into(), sb.name.clone());
         driver_labels.insert(LABEL_SANDBOX_NAMESPACE.into(), namespace.to_string());
         driver_labels.insert(LABEL_SANDBOX_WORKSPACE.into(), sb.workspace.clone());
-        driver_labels.insert(LABEL_MANAGED_BY.into(), "openshell".into());
+        driver_labels.insert(LABEL_MANAGED_BY.into(), LABEL_MANAGED_BY_VALUE.into());
         driver_labels.insert(LABEL_KAGENTI.into(), "agent".into());
 
         let user_labels = sb
@@ -631,6 +716,66 @@ impl KymaProvisioner {
         obj.metadata.annotations = Some(annotations);
         obj.data = json!({ "spec": self.build_sandbox_spec(sb) });
         obj
+    }
+}
+
+/// Namespace object for a managed workspace.
+///
+/// The three ownership labels are what a future `DeleteWorkspace` teardown
+/// must check before it deletes anything — deleting a namespace this driver
+/// didn't create would be catastrophic. Keep the write side (here) and that
+/// future check in sync.
+#[must_use]
+fn managed_namespace_object(gateway_id: &str, workspace: &str) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "Namespace",
+        "metadata": {
+            "name": crate::workspace::managed_namespace(gateway_id, workspace),
+            "labels": {
+                LABEL_MANAGED_BY: LABEL_MANAGED_BY_VALUE,
+                LABEL_GATEWAY_ID: gateway_id,
+                LABEL_SANDBOX_WORKSPACE: workspace,
+                // verify_psa_label hard-fails without this, and every
+                // sandbox pod needs privileged. Mirrors what the chart
+                // applies to the shared namespace.
+                "pod-security.kubernetes.io/enforce": "privileged",
+            }
+        }
+    })
+}
+
+/// The ServiceAccount `SANDBOX_SERVICE_ACCOUNT` names in every pod spec.
+/// Mirrors `templates/sandbox-serviceaccount.yaml`, including the
+/// no-automount decision: sandbox pods are user code, so a mounted SA
+/// token would be a credential-leak surface for nothing.
+#[must_use]
+fn sandbox_service_account_object(namespace: &str) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "ServiceAccount",
+        "metadata": {
+            "name": SANDBOX_SERVICE_ACCOUNT,
+            "namespace": namespace,
+            "labels": { LABEL_MANAGED_BY: LABEL_MANAGED_BY_VALUE },
+        },
+        "automountServiceAccountToken": false
+    })
+}
+
+/// `create`, treating an existing object as success.
+///
+/// Idempotence is not optional here: the gateway calls EnsureWorkspace before
+/// every sandbox create, so the second call onwards always hits this path.
+async fn create_tolerating_conflict<K>(api: &Api<K>, obj: K) -> Result<(), DriverError>
+where
+    K: kube::Resource + Clone + std::fmt::Debug + serde::de::DeserializeOwned + serde::Serialize,
+    K::DynamicType: Default,
+{
+    match api.create(&PostParams::default(), &obj).await {
+        Ok(_) => Ok(()),
+        Err(kube::Error::Api(e)) if e.code == 409 => Ok(()),
+        Err(e) => Err(DriverError::Kube(e)),
     }
 }
 
@@ -723,7 +868,8 @@ impl SandboxProvisioner for KymaProvisioner {
     }
 
     async fn list(&self) -> Result<Vec<DriverSandbox>, DriverError> {
-        let lp = ListParams::default().labels(&format!("{LABEL_MANAGED_BY}=openshell"));
+        let lp =
+            ListParams::default().labels(&format!("{LABEL_MANAGED_BY}={LABEL_MANAGED_BY_VALUE}"));
         let ns = self.id_lookup_namespace();
         let list = self.sandboxes_api_for(ns.as_deref()).list(&lp).await?;
         // Mirror upstream: one malformed CR must not break `list` for every
@@ -744,7 +890,8 @@ impl SandboxProvisioner for KymaProvisioner {
     async fn watch(&self) -> Result<mpsc::Receiver<WatchEvent>, DriverError> {
         let ns = self.id_lookup_namespace();
         let api = self.sandboxes_api_for(ns.as_deref());
-        let cfg = watcher::Config::default().labels(&format!("{LABEL_MANAGED_BY}=openshell"));
+        let cfg = watcher::Config::default()
+            .labels(&format!("{LABEL_MANAGED_BY}={LABEL_MANAGED_BY_VALUE}"));
 
         let (tx, rx) = mpsc::channel::<WatchEvent>(64);
 
@@ -972,21 +1119,20 @@ impl SandboxProvisioner for KymaProvisioner {
         Ok(())
     }
 
-    async fn ensure_workspace(&self, _workspace: &str) -> Result<(), DriverError> {
+    async fn ensure_workspace(&self, workspace: &str) -> Result<(), DriverError> {
         match self.cfg.workspace_mode {
             // Upstream: `Shared => {}`. The namespace is static and installed
             // by the chart; there is nothing to prepare.
             WorkspaceMode::Shared => Ok(()),
-            // Landing in Phase 3 / Phase 4. Returning an error rather than
-            // Ok(()) is deliberate: a silent success here would let someone
-            // set --workspace-mode managed and get sandboxes in a namespace
-            // that was never bootstrapped.
-            WorkspaceMode::Managed | WorkspaceMode::Operator => {
-                Err(DriverError::FailedPrecondition(format!(
-                    "workspace mode {:?} is not implemented yet",
-                    self.cfg.workspace_mode
-                )))
-            }
+            WorkspaceMode::Managed => self.bootstrap_managed_namespace(workspace).await,
+            // Landing in a later task. Returning an error rather than Ok(())
+            // is deliberate: a silent success here would let someone set
+            // --workspace-mode operator and get sandboxes in a namespace
+            // that was never verified against the allowlist's preconditions.
+            WorkspaceMode::Operator => Err(DriverError::FailedPrecondition(format!(
+                "workspace mode {:?} is not implemented yet",
+                self.cfg.workspace_mode
+            ))),
         }
     }
 
@@ -1405,5 +1551,85 @@ mod tests {
         assert_eq!(back.id, "id-9");
         assert_eq!(back.name, "round-trip");
         assert_eq!(back.workspace, "default");
+    }
+
+    // ---------- managed-workspace bootstrap object builders ----------
+
+    #[test]
+    fn managed_namespace_carries_ownership_and_psa_labels() {
+        let obj = managed_namespace_object("gw1", "team-a");
+        let labels = &obj["metadata"]["labels"];
+        assert_eq!(obj["metadata"]["name"], "openshell-gw1-team-a");
+        assert_eq!(labels[LABEL_MANAGED_BY], LABEL_MANAGED_BY_VALUE);
+        assert_eq!(labels[LABEL_GATEWAY_ID], "gw1");
+        assert_eq!(labels[LABEL_SANDBOX_WORKSPACE], "team-a");
+        // Without this, verify_psa_label fails and no sandbox pod can start.
+        assert_eq!(labels["pod-security.kubernetes.io/enforce"], "privileged");
+    }
+
+    /// Would catch a mutation that swaps the gateway_id/workspace arguments
+    /// at a call site: the namespace name embeds both in a fixed order, so a
+    /// swap changes the derived name even though both values are still
+    /// present somewhere in the object.
+    #[test]
+    fn managed_namespace_object_uses_the_derived_namespace_name() {
+        let obj = managed_namespace_object("gw1", "team-a");
+        assert_eq!(
+            obj["metadata"]["name"],
+            crate::workspace::managed_namespace("gw1", "team-a")
+        );
+    }
+
+    #[test]
+    fn managed_service_account_does_not_automount_its_token() {
+        let obj = sandbox_service_account_object("openshell-gw1-team-a");
+        // Sandbox pods are user code; a mounted SA token is a credential
+        // leak surface for nothing. Mirrors sandbox-serviceaccount.yaml.
+        assert_eq!(obj["automountServiceAccountToken"], false);
+        assert_eq!(obj["metadata"]["name"], SANDBOX_SERVICE_ACCOUNT);
+        assert_eq!(obj["metadata"]["namespace"], "openshell-gw1-team-a");
+        assert_eq!(
+            obj["metadata"]["labels"][LABEL_MANAGED_BY],
+            LABEL_MANAGED_BY_VALUE
+        );
+    }
+
+    /// Both builders must deserialize into their real Kubernetes types
+    /// without error — a typo in a field name would otherwise only surface
+    /// at runtime against a live cluster, in `bootstrap_managed_namespace`.
+    #[test]
+    fn managed_namespace_object_deserializes_into_namespace_type() {
+        let obj = managed_namespace_object("gw1", "team-a");
+        let _: Namespace =
+            serde_json::from_value(obj).expect("must deserialize into k8s Namespace");
+    }
+
+    #[test]
+    fn sandbox_service_account_object_deserializes_into_service_account_type() {
+        let obj = sandbox_service_account_object("openshell-gw1-team-a");
+        let _: ServiceAccount =
+            serde_json::from_value(obj).expect("must deserialize into k8s ServiceAccount");
+    }
+
+    /// `ensure_workspace` under `Operator` must still surface a
+    /// FailedPrecondition, not silently succeed or panic — Managed's wiring
+    /// (this task) must not have disturbed the still-unimplemented mode.
+    #[tokio::test]
+    async fn ensure_workspace_operator_mode_still_not_implemented() {
+        let cfg = Config {
+            namespace: "test-ns".into(),
+            workspace_mode: WorkspaceMode::Operator,
+            operator_namespace_allowlist: vec!["tenant-a".into()],
+            ..Config::default()
+        };
+        let svc = tower::service_fn(|_req: http::Request<kube::client::Body>| async move {
+            Ok::<_, std::convert::Infallible>(http::Response::new(kube::client::Body::empty()))
+        });
+        let p = KymaProvisioner::new(Client::new(svc, "test-ns"), cfg);
+        let err = p
+            .ensure_workspace("tenant-a")
+            .await
+            .expect_err("Operator must still be unimplemented");
+        assert!(matches!(err, DriverError::FailedPrecondition(_)), "{err:?}");
     }
 }
