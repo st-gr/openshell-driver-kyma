@@ -211,9 +211,10 @@ grep -q "$SB" <<<"$list_out" || fail "gateway did not list ${SB} by its bare nam
 
 # --- Assertion 3b: stop and start actually work ------------------------
 #
-# Unit tests cover the patch payload; only a live agent-sandbox controller
-# proves the replicas patch and the termination poll behave. This is the
-# assertion that would have caught 'stop returns Unimplemented'.
+# Unit tests cover the patch payload in isolation. This assertion adds the
+# end-to-end path a unit test cannot: the gateway -> driver RPC, the
+# label-based CR lookup, and the patch reaching a real API server. This is
+# the assertion that would have caught 'stop returns Unimplemented'.
 #
 # This smoke deliberately runs no agent-sandbox controller (see the CRD
 # install step above: "this smoke stops at 'CR created' on purpose and
