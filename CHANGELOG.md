@@ -6,6 +6,24 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **Implemented the `EnsureWorkspace` and `DeleteWorkspace` RPCs**, backed by
+  a new `src/workspace.rs` that centralizes every tenancy rule behind three
+  modes: `Shared` (default), `Managed`, and `Operator`. Only `Shared` is
+  implemented today — `Managed` and `Operator` return an explicit "not
+  implemented yet" error; they land in later phases.
+- **Added the `driver.workspaceMode` Helm value**, defaulting to `shared`.
+  It is passed to the driver as `--workspace-mode` and accepts `shared`,
+  `managed`, or `operator`. A default install is unaffected: `shared`
+  reproduces every namespace and object-naming rule this driver used before
+  this change.
+  **Switching workspace modes is breaking.** Both the namespace a sandbox
+  lives in and its object names change with the mode, so sandboxes created
+  under one mode become unreachable (not deleted — orphaned) once the mode
+  changes. Delete every sandbox before switching `driver.workspaceMode`, and
+  recreate them afterwards.
+
 ## [0.3.3] — 2026-08-17
 
 ### Added

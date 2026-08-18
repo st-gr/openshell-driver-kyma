@@ -90,6 +90,7 @@ spec:
             - --log-level
             - {{ .Values.driver.logLevel | quote }}
             - --stop-timeout-secs={{ .Values.driver.stopTimeoutSecs }}
+            - --workspace-mode={{ .Values.driver.workspaceMode }}
           env:
             - name: RUST_LOG
               value: {{ .Values.driver.logLevel | quote }}

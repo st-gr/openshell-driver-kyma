@@ -106,6 +106,19 @@ driver:
   # How long stop_sandbox waits for the sandbox's pod to terminate before
   # giving up. Raise it for workloads with long graceful-shutdown handlers.
   stopTimeoutSecs: 120
+  # Workspace tenancy model. Leave at "shared" unless you have read
+  # docs/superpowers/specs/2026-08-18-workspace-modes-design.md.
+  #
+  #   shared   - every sandbox in .Values.namespace, object names are
+  #              {workspace}--{name}. The only mode before v0.0.107 and the
+  #              only one the default RBAC covers.
+  #   managed  - one driver-created namespace per workspace (Phase 3)
+  #   operator - pre-existing allowlisted namespaces (Phase 4)
+  #
+  # SWITCHING MODES IS BREAKING. Both the namespace and the object names
+  # change, so existing sandboxes become unreachable. Delete every sandbox
+  # before switching, then recreate.
+  workspaceMode: shared
 
 # Driver pod resource requests and limits. Modest defaults that fit any
 # Kyma namespace ResourceQuota out of the box.
