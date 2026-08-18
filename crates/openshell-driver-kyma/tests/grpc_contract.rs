@@ -13,10 +13,11 @@
 use async_trait::async_trait;
 use computev1::pb::{
     compute_driver_client::ComputeDriverClient, compute_driver_server::ComputeDriverServer,
-    watch_sandboxes_event::Payload, CreateSandboxRequest, DeleteSandboxRequest, DriverSandbox,
-    DriverSandboxSpec, DriverSandboxTemplate, GetCapabilitiesRequest,
-    GetGatewayListenerRequirementsRequest, GetSandboxRequest, ListSandboxesRequest,
-    StartSandboxRequest, StopSandboxRequest, ValidateSandboxCreateRequest, WatchSandboxesRequest,
+    watch_sandboxes_event::Payload, CreateSandboxRequest, DeleteSandboxRequest,
+    DeleteWorkspaceRequest, DriverSandbox, DriverSandboxSpec, DriverSandboxTemplate,
+    EnsureWorkspaceRequest, GetCapabilitiesRequest, GetGatewayListenerRequirementsRequest,
+    GetSandboxRequest, ListSandboxesRequest, StartSandboxRequest, StopSandboxRequest,
+    ValidateSandboxCreateRequest, WatchSandboxesRequest,
 };
 use mockall::mock;
 use openshell_driver_kyma::{
@@ -463,6 +464,80 @@ async fn grpc_watch_streams_two_events_then_closes() {
         other => panic!("expected deleted event, got {other:?}"),
     }
     assert!(stream.next().await.is_none());
+
+    drop(shutdown);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn grpc_ensure_workspace_rejects_empty_workspace() {
+    let (_dir, socket) = temp_socket();
+    let (mut client, shutdown, handle) = start_server(
+        socket,
+        MockProvisioner::new(),
+        MockEnricher::new(),
+        MockMetrics::new(),
+    )
+    .await;
+
+    let err = client
+        .ensure_workspace(EnsureWorkspaceRequest {
+            workspace: String::new(),
+        })
+        .await
+        .expect_err("empty workspace must be rejected");
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+    drop(shutdown);
+    let _ = handle.await;
+}
+
+/// Shared mode is a no-op, but it must be a *successful* no-op: the gateway
+/// calls EnsureWorkspace before every create, so an error here fails
+/// sandbox creation. `.times(1)` plus `handle.await.unwrap()` (rather than
+/// `let _ = handle.await;`) makes this non-vacuous: mockall's default
+/// call-count is 0..usize::MAX, so an expectation without `.times(..)` is
+/// satisfied by zero calls, and the checkpoint panic that would catch a
+/// regressed handler fires inside the spawned server task, which only
+/// surfaces as an `Err` from the JoinHandle.
+#[tokio::test]
+async fn grpc_ensure_workspace_succeeds_in_shared_mode() {
+    let mut p = MockProvisioner::new();
+    p.expect_ensure_workspace().times(1).returning(|_| Ok(()));
+
+    let (_dir, socket) = temp_socket();
+    let (mut client, shutdown, handle) =
+        start_server(socket, p, MockEnricher::new(), MockMetrics::new()).await;
+
+    client
+        .ensure_workspace(EnsureWorkspaceRequest {
+            workspace: "default".into(),
+        })
+        .await
+        .expect("shared mode must succeed");
+
+    drop(shutdown);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn grpc_delete_workspace_rejects_empty_workspace() {
+    let (_dir, socket) = temp_socket();
+    let (mut client, shutdown, handle) = start_server(
+        socket,
+        MockProvisioner::new(),
+        MockEnricher::new(),
+        MockMetrics::new(),
+    )
+    .await;
+
+    let err = client
+        .delete_workspace(DeleteWorkspaceRequest {
+            workspace: String::new(),
+        })
+        .await
+        .expect_err("empty workspace must be rejected");
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
 
     drop(shutdown);
     let _ = handle.await;

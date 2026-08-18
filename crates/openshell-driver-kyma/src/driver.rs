@@ -313,27 +313,42 @@ impl ComputeDriver for Driver {
         Ok(Response::new(Box::pin(stream) as Self::WatchSandboxesStream))
     }
 
-    /// Implemented in Phase 2 of the v0.0.107 parity work. Until then this
-    /// returns Unimplemented, which the gateway maps to Ok(()) — see
-    /// openshell-server/src/compute/mod.rs:903. Behaviour is therefore
-    /// unchanged from v0.0.106.
+    /// Dispatches to `SandboxProvisioner::ensure_workspace`. Under `Shared`
+    /// mode this is a deliberate successful no-op: the gateway calls
+    /// EnsureWorkspace before every sandbox create, so an error here would
+    /// fail every create in a mode that has no workspace bootstrap to do.
+    /// `Managed`/`Operator` modes gate on the provisioner's real bootstrap
+    /// logic (or its "not implemented yet" error, until later phases land).
     async fn ensure_workspace(
         &self,
-        _req: Request<EnsureWorkspaceRequest>,
+        req: Request<EnsureWorkspaceRequest>,
     ) -> Result<Response<EnsureWorkspaceResponse>, Status> {
-        Err(Status::unimplemented(
-            "ensure workspace is not yet implemented by the kyma compute driver",
-        ))
+        let ws = req.into_inner().workspace;
+        if ws.is_empty() {
+            return Err(Status::invalid_argument("workspace is required"));
+        }
+        self.provisioner
+            .ensure_workspace(&ws)
+            .await
+            .map_err(Status::from)?;
+        Ok(Response::new(EnsureWorkspaceResponse {}))
     }
 
-    /// See `ensure_workspace`. Implemented in Phase 2.
+    /// Dispatches to `SandboxProvisioner::delete_workspace`. See
+    /// `ensure_workspace` for why `Shared` mode must succeed as a no-op.
     async fn delete_workspace(
         &self,
-        _req: Request<DeleteWorkspaceRequest>,
+        req: Request<DeleteWorkspaceRequest>,
     ) -> Result<Response<DeleteWorkspaceResponse>, Status> {
-        Err(Status::unimplemented(
-            "delete workspace is not yet implemented by the kyma compute driver",
-        ))
+        let ws = req.into_inner().workspace;
+        if ws.is_empty() {
+            return Err(Status::invalid_argument("workspace is required"));
+        }
+        self.provisioner
+            .delete_workspace(&ws)
+            .await
+            .map_err(Status::from)?;
+        Ok(Response::new(DeleteWorkspaceResponse {}))
     }
 }
 
