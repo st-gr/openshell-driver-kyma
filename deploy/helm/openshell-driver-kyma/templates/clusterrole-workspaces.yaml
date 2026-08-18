@@ -1,0 +1,102 @@
+{{- if ne .Values.driver.workspaceMode "shared" -}}
+# Cluster-scoped RBAC for non-shared workspace modes. NOT rendered for
+# "shared", which keeps the namespaced Role in role.yaml and nothing else —
+# a shared install must gain zero new cluster-scoped permissions.
+#
+# Both "managed" and "operator" resolve sandboxes to a namespace other than
+# .Values.namespace (crate::workspace::namespace_for), so every namespaced
+# call the driver makes for a sandbox's lifecycle has to reach across
+# namespaces instead of staying pinned to the release namespace the way
+# role.yaml's Role does. Each rule below traces to a specific
+# kube::Api::all(_with) call in provisioner.rs, cross-checked against the
+# grep evidence, not assumed:
+#   - sandboxes:        find_by_sandbox_id/list/watch (Api::all_with when
+#                        id_lookup_namespace() is None) and the resolved-
+#                        namespace create/delete/patch in create()/delete()/
+#                        patch_operating_state().
+#   - sandboxes/status:  mirrors role.yaml's own grant for the same
+#                        resource; not read directly by this driver, kept
+#                        for parity with the namespaced Role.
+#   - events:            the WatchSandboxes Event watcher (Api::all::<Event>
+#                        when ns is None).
+#   - pods (get only):   await_pod_gone's per-sandbox pod lookup, now
+#                        against the CR's resolved namespace rather than
+#                        cfg.namespace.
+#   - persistentvolumeclaims: ensure_sandbox_pvc's create and delete()'s
+#                        best-effort PVC cleanup, both against the resolved
+#                        namespace. Only rendered when a workspace PVC is
+#                        actually requested (driver.sandboxStorageSize set).
+#   - apirules/services: apply_apirule's resolved-namespace APIRule create,
+#                        and the Service the rendered APIRule points at.
+#                        Only rendered when driver.enableApirule is set,
+#                        mirroring role.yaml's own conditional block.
+#
+# managed additionally gets namespaces get/create/delete and
+# serviceaccounts create — both are exercised only from
+# provisioner.rs::bootstrap_managed_namespace and ::delete_managed_namespace,
+# which ensure_workspace/delete_workspace call for Managed only (Operator's
+# ensure_workspace is not implemented yet and returns an error; Operator's
+# delete_workspace is a no-op). "list" on namespaces is deliberately absent:
+# nothing in the driver calls it.
+#
+# Deliberately does NOT grant networkpolicies:create. The driver never
+# creates a NetworkPolicy in managed mode (see provisioner.rs::
+# bootstrap_managed_namespace's doc comment) — main.rs refuses to start
+# with --workspace-mode=managed and --enable-network-policy=true instead,
+# and the workspaceGuards template below fails the install even earlier.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "openshell-driver-kyma.fullname" . }}-workspaces
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["sandboxes"]
+    verbs: ["get", "list", "watch", "create", "delete", "patch", "update"]
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["sandboxes/status"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get"]
+{{- if .Values.driver.sandboxStorageSize }}
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["create", "delete"]
+{{- end }}
+{{- if .Values.driver.enableApirule }}
+  - apiGroups: ["gateway.kyma-project.io"]
+    resources: ["apirules"]
+    verbs: ["get", "list", "watch", "create", "delete", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "create", "delete", "patch"]
+{{- end }}
+{{- if eq .Values.driver.workspaceMode "managed" }}
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["create"]
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "openshell-driver-kyma.fullname" . }}-workspaces
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "openshell-driver-kyma.fullname" . }}-workspaces
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "openshell-driver-kyma.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

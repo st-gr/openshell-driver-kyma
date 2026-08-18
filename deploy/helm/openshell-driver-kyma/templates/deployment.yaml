@@ -2,6 +2,7 @@
 {{- include "openshell-driver-kyma.inferenceProviderGuards" . -}}
 {{- include "openshell-driver-kyma.gatewayUpstreamEgressGuards" . -}}
 {{- include "openshell-driver-kyma.gatewayTlsGuards" . -}}
+{{- include "openshell-driver-kyma.workspaceGuards" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -91,6 +92,10 @@ spec:
             - {{ .Values.driver.logLevel | quote }}
             - --stop-timeout-secs={{ .Values.driver.stopTimeoutSecs }}
             - --workspace-mode={{ .Values.driver.workspaceMode }}
+            - --gateway-id={{ default .Values.gateway.sandboxJwt.gatewayId .Values.driver.gatewayId }}
+            {{- if .Values.driver.operatorNamespaceAllowlist }}
+            - --operator-namespace-allowlist={{ join "," .Values.driver.operatorNamespaceAllowlist }}
+            {{- end }}
           env:
             - name: RUST_LOG
               value: {{ .Values.driver.logLevel | quote }}

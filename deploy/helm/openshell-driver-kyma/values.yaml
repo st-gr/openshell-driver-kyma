@@ -111,7 +111,8 @@ driver:
   #
   #   shared   - every sandbox in .Values.namespace, object names are
   #              {workspace}--{name}. The only mode before v0.0.107 and the
-  #              only one the default RBAC covers.
+  #              only one that renders no cluster-scoped RBAC (see
+  #              templates/clusterrole-workspaces.yaml).
   #   managed  - one driver-created namespace per workspace (Phase 3)
   #   operator - pre-existing allowlisted namespaces (Phase 4)
   #
@@ -119,6 +120,15 @@ driver:
   # change, so existing sandboxes become unreachable. Delete every sandbox
   # before switching, then recreate.
   workspaceMode: shared
+  # Gateway identity baked into managed namespace names
+  # (openshell-{gatewayId}-{workspace}). Required when workspaceMode is
+  # "managed". Must be a DNS-1123 label. Defaults from
+  # gateway.sandboxJwt.gatewayId when that is set.
+  gatewayId: ""
+  # Namespaces the driver may use when workspaceMode is "operator".
+  # Required and must be non-empty in that mode. An empty allowlist denies
+  # every workspace.
+  operatorNamespaceAllowlist: []
 
 # Driver pod resource requests and limits. Modest defaults that fit any
 # Kyma namespace ResourceQuota out of the box.
