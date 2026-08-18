@@ -26,10 +26,15 @@
 #                        best-effort PVC cleanup, both against the resolved
 #                        namespace. Only rendered when a workspace PVC is
 #                        actually requested (driver.sandboxStorageSize set).
-#   - apirules/services: apply_apirule's resolved-namespace APIRule create,
-#                        and the Service the rendered APIRule points at.
-#                        Only rendered when driver.enableApirule is set,
-#                        mirroring role.yaml's own conditional block.
+#   - apirules (create only): apply_apirule's resolved-namespace APIRule
+#                        create -- the only verb call site in the crate
+#                        (provisioner.rs::apply_apirule makes exactly one
+#                        API call: api.create()). No services rule: the
+#                        driver never creates, reads, or otherwise touches
+#                        a core Service object anywhere -- render_apirule
+#                        only *names* one inside the APIRule's
+#                        spec.service.name; something else owns it. Only
+#                        rendered when driver.enableApirule is set.
 #
 # managed additionally gets namespaces get/create/delete and
 # serviceaccounts create — both are exercised only from
@@ -71,10 +76,7 @@ rules:
 {{- if .Values.driver.enableApirule }}
   - apiGroups: ["gateway.kyma-project.io"]
     resources: ["apirules"]
-    verbs: ["get", "list", "watch", "create", "delete", "patch", "update"]
-  - apiGroups: [""]
-    resources: ["services"]
-    verbs: ["get", "list", "create", "delete", "patch"]
+    verbs: ["create"]
 {{- end }}
 {{- if eq .Values.driver.workspaceMode "managed" }}
   - apiGroups: [""]
