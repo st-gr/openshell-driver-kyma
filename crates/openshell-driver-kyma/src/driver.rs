@@ -11,9 +11,10 @@ use computev1::pb::{
     DeleteSandboxRequest, DeleteSandboxResponse, GetCapabilitiesRequest, GetCapabilitiesResponse,
     GetGatewayListenerRequirementsRequest, GetGatewayListenerRequirementsResponse,
     GetSandboxRequest, GetSandboxResponse, ListSandboxesRequest, ListSandboxesResponse,
-    StopSandboxRequest, StopSandboxResponse, ValidateSandboxCreateRequest,
-    ValidateSandboxCreateResponse, WatchSandboxesDeletedEvent, WatchSandboxesEvent,
-    WatchSandboxesPlatformEvent, WatchSandboxesRequest, WatchSandboxesSandboxEvent,
+    StartSandboxRequest, StartSandboxResponse, StopSandboxRequest, StopSandboxResponse,
+    ValidateSandboxCreateRequest, ValidateSandboxCreateResponse, WatchSandboxesDeletedEvent,
+    WatchSandboxesEvent, WatchSandboxesPlatformEvent, WatchSandboxesRequest,
+    WatchSandboxesSandboxEvent,
 };
 use futures::Stream;
 use std::pin::Pin;
@@ -212,6 +213,28 @@ impl ComputeDriver for Driver {
         ))
     }
 
+    /// Added upstream in v0.0.106 as the counterpart to `StopSandbox`
+    /// (resume a stopped sandbox's platform resources). `stop_sandbox` above
+    /// is itself unimplemented, so there is no "stopped" state this driver
+    /// can ever produce for `start_sandbox` to resume from — returning
+    /// `Unimplemented` here matches that, rather than guessing at behavior
+    /// for a state the driver cannot enter.
+    ///
+    /// TODO(upstream v0.0.106 StartSandbox): once `stop_sandbox` gains a
+    /// real implementation (e.g. scaling the Sandbox CR's workload to zero),
+    /// implement the matching resume here. No upstream Kubernetes driver
+    /// source is vendored into this repo to copy the expected semantics
+    /// from; only the proto contract (`sandbox_id` + `sandbox_name`, no
+    /// other fields) is available.
+    async fn start_sandbox(
+        &self,
+        _req: Request<StartSandboxRequest>,
+    ) -> Result<Response<StartSandboxResponse>, Status> {
+        Err(Status::unimplemented(
+            "start sandbox is not implemented by the kyma compute driver",
+        ))
+    }
+
     async fn delete_sandbox(
         &self,
         req: Request<DeleteSandboxRequest>,
@@ -407,6 +430,20 @@ mod tests {
         );
         let s = d
             .stop_sandbox(Request::new(StopSandboxRequest::default()))
+            .await
+            .unwrap_err();
+        assert_eq!(s.code(), tonic::Code::Unimplemented);
+    }
+
+    #[tokio::test]
+    async fn start_sandbox_returns_unimplemented() {
+        let d = make_driver_with_mocks(
+            Config::default(),
+            MockSandboxProvisioner::new(),
+            MockDriverMetrics::new(),
+        );
+        let s = d
+            .start_sandbox(Request::new(StartSandboxRequest::default()))
             .await
             .unwrap_err();
         assert_eq!(s.code(), tonic::Code::Unimplemented);

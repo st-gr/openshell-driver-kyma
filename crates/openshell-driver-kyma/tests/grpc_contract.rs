@@ -16,7 +16,7 @@ use computev1::pb::{
     watch_sandboxes_event::Payload, CreateSandboxRequest, DeleteSandboxRequest, DriverSandbox,
     DriverSandboxSpec, DriverSandboxTemplate, GetCapabilitiesRequest,
     GetGatewayListenerRequirementsRequest, GetSandboxRequest, ListSandboxesRequest,
-    StopSandboxRequest, ValidateSandboxCreateRequest, WatchSandboxesRequest,
+    StartSandboxRequest, StopSandboxRequest, ValidateSandboxCreateRequest, WatchSandboxesRequest,
 };
 use mockall::mock;
 use openshell_driver_kyma::{
@@ -322,6 +322,35 @@ async fn grpc_stop_returns_unimplemented() {
 
     let err = client
         .stop_sandbox(StopSandboxRequest {
+            sandbox_id: "id".into(),
+            sandbox_name: "x".into(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::Unimplemented);
+
+    drop(shutdown);
+    let _ = handle.await;
+}
+
+/// `StartSandbox` was added upstream in v0.0.106 as the resume counterpart
+/// to `StopSandbox`, which this driver does not implement — see
+/// `grpc_stop_returns_unimplemented`. Proves the RPC is wired into the
+/// server (not a wire-level `Unimplemented` from a missing method) while
+/// still surfacing an application-level `Unimplemented` status.
+#[tokio::test]
+async fn grpc_start_returns_unimplemented() {
+    let (_dir, socket) = temp_socket();
+    let (mut client, shutdown, handle) = start_server(
+        socket,
+        MockProvisioner::new(),
+        MockEnricher::new(),
+        MockMetrics::new(),
+    )
+    .await;
+
+    let err = client
+        .start_sandbox(StartSandboxRequest {
             sandbox_id: "id".into(),
             sandbox_name: "x".into(),
         })

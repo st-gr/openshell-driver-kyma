@@ -3,8 +3,8 @@
 
 // VENDORED from NVIDIA/OpenShell — do not edit by hand.
 //   repo:   https://github.com/NVIDIA/OpenShell
-//   ref:    v0.0.102
-//   commit: f48b05e31228a25d5a34cc929bb6383cc0e8921a
+//   ref:    v0.0.106
+//   commit: c4b500a7de64d0b66e3ee8098f58d14299092162
 // Re-vendor with `make proto-vendor TAG=<tag>`; provenance + checksums
 // are recorded in proto/UPSTREAM.lock and enforced by CI.
 
@@ -47,8 +47,11 @@ service ComputeDriver {
   // Provision platform resources for a sandbox.
   rpc CreateSandbox(CreateSandboxRequest) returns (CreateSandboxResponse);
 
-  // Stop platform resources for a sandbox without deleting its record.
+  // Idempotently stop platform resources without deleting persistent state.
   rpc StopSandbox(StopSandboxRequest) returns (StopSandboxResponse);
+
+  // Idempotently start platform resources for a stopped sandbox.
+  rpc StartSandbox(StartSandboxRequest) returns (StartSandboxResponse);
 
   // Tear down platform resources for a sandbox.
   rpc DeleteSandbox(DeleteSandboxRequest) returns (DeleteSandboxResponse);
@@ -292,6 +295,15 @@ message StopSandboxRequest {
 }
 
 message StopSandboxResponse {}
+
+message StartSandboxRequest {
+  // Stable sandbox ID stored by the gateway.
+  string sandbox_id = 1;
+  // Compute-runtime name used by the driver.
+  string sandbox_name = 2;
+}
+
+message StartSandboxResponse {}
 
 message DeleteSandboxRequest {
   // Stable sandbox ID stored by the gateway.
