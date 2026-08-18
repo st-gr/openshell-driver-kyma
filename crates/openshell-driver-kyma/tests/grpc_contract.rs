@@ -311,8 +311,40 @@ async fn grpc_list_returns_empty_when_no_sandboxes() {
     let _ = handle.await;
 }
 
+/// The whole point of Phase 1: these used to return Unimplemented, and the
+/// gateway does NOT swallow that for stop/start — `openshell sandbox stop`
+/// failed against this driver.
 #[tokio::test]
-async fn grpc_stop_returns_unimplemented() {
+async fn grpc_stop_and_start_are_implemented() {
+    let mut p = MockProvisioner::new();
+    p.expect_stop_sandbox().returning(|_| Ok(()));
+    p.expect_start_sandbox().returning(|_| Ok(()));
+
+    let (_dir, socket) = temp_socket();
+    let (mut client, shutdown, handle) =
+        start_server(socket, p, MockEnricher::new(), MockMetrics::new()).await;
+
+    client
+        .stop_sandbox(StopSandboxRequest {
+            sandbox_id: "sb-1".into(),
+            sandbox_name: "n".into(),
+        })
+        .await
+        .expect("stop must be implemented");
+    client
+        .start_sandbox(StartSandboxRequest {
+            sandbox_id: "sb-1".into(),
+            sandbox_name: "n".into(),
+        })
+        .await
+        .expect("start must be implemented");
+
+    drop(shutdown);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn grpc_stop_rejects_empty_sandbox_id() {
     let (_dir, socket) = temp_socket();
     let (mut client, shutdown, handle) = start_server(
         socket,
@@ -324,41 +356,12 @@ async fn grpc_stop_returns_unimplemented() {
 
     let err = client
         .stop_sandbox(StopSandboxRequest {
-            sandbox_id: "id".into(),
-            sandbox_name: "x".into(),
+            sandbox_id: String::new(),
+            sandbox_name: "n".into(),
         })
         .await
-        .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::Unimplemented);
-
-    drop(shutdown);
-    let _ = handle.await;
-}
-
-/// `StartSandbox` was added upstream in v0.0.106 as the resume counterpart
-/// to `StopSandbox`, which this driver does not implement — see
-/// `grpc_stop_returns_unimplemented`. Proves the RPC is wired into the
-/// server (not a wire-level `Unimplemented` from a missing method) while
-/// still surfacing an application-level `Unimplemented` status.
-#[tokio::test]
-async fn grpc_start_returns_unimplemented() {
-    let (_dir, socket) = temp_socket();
-    let (mut client, shutdown, handle) = start_server(
-        socket,
-        MockProvisioner::new(),
-        MockEnricher::new(),
-        MockMetrics::new(),
-    )
-    .await;
-
-    let err = client
-        .start_sandbox(StartSandboxRequest {
-            sandbox_id: "id".into(),
-            sandbox_name: "x".into(),
-        })
-        .await
-        .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::Unimplemented);
+        .expect_err("empty sandbox_id must be rejected");
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
 
     drop(shutdown);
     let _ = handle.await;

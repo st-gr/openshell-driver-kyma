@@ -207,33 +207,35 @@ impl ComputeDriver for Driver {
 
     async fn stop_sandbox(
         &self,
-        _req: Request<StopSandboxRequest>,
+        req: Request<StopSandboxRequest>,
     ) -> Result<Response<StopSandboxResponse>, Status> {
-        Err(Status::unimplemented(
-            "stop sandbox is not implemented by the kyma compute driver",
-        ))
+        let id = req.into_inner().sandbox_id;
+        if id.is_empty() {
+            return Err(Status::invalid_argument("sandbox_id is required"));
+        }
+        self.provisioner
+            .stop_sandbox(&id)
+            .await
+            .map_err(Status::from)?;
+        Ok(Response::new(StopSandboxResponse {}))
     }
 
     /// Added upstream in v0.0.106 as the counterpart to `StopSandbox`
-    /// (resume a stopped sandbox's platform resources). `stop_sandbox` above
-    /// is itself unimplemented, so there is no "stopped" state this driver
-    /// can ever produce for `start_sandbox` to resume from — returning
-    /// `Unimplemented` here matches that, rather than guessing at behavior
-    /// for a state the driver cannot enter.
-    ///
-    /// TODO(upstream v0.0.106 StartSandbox): once `stop_sandbox` gains a
-    /// real implementation (e.g. scaling the Sandbox CR's workload to zero),
-    /// implement the matching resume here. No upstream Kubernetes driver
-    /// source is vendored into this repo to copy the expected semantics
-    /// from; only the proto contract (`sandbox_id` + `sandbox_name`, no
-    /// other fields) is available.
+    /// (resume a stopped sandbox's platform resources). Delegates to
+    /// `SandboxProvisioner::start_sandbox`, mirroring `stop_sandbox` above.
     async fn start_sandbox(
         &self,
-        _req: Request<StartSandboxRequest>,
+        req: Request<StartSandboxRequest>,
     ) -> Result<Response<StartSandboxResponse>, Status> {
-        Err(Status::unimplemented(
-            "start sandbox is not implemented by the kyma compute driver",
-        ))
+        let id = req.into_inner().sandbox_id;
+        if id.is_empty() {
+            return Err(Status::invalid_argument("sandbox_id is required"));
+        }
+        self.provisioner
+            .start_sandbox(&id)
+            .await
+            .map_err(Status::from)?;
+        Ok(Response::new(StartSandboxResponse {}))
     }
 
     async fn delete_sandbox(
@@ -443,34 +445,6 @@ mod tests {
             );
         }
         assert_eq!(responses[0], responses[1]);
-    }
-
-    #[tokio::test]
-    async fn stop_sandbox_returns_unimplemented() {
-        let d = make_driver_with_mocks(
-            Config::default(),
-            MockSandboxProvisioner::new(),
-            MockDriverMetrics::new(),
-        );
-        let s = d
-            .stop_sandbox(Request::new(StopSandboxRequest::default()))
-            .await
-            .unwrap_err();
-        assert_eq!(s.code(), tonic::Code::Unimplemented);
-    }
-
-    #[tokio::test]
-    async fn start_sandbox_returns_unimplemented() {
-        let d = make_driver_with_mocks(
-            Config::default(),
-            MockSandboxProvisioner::new(),
-            MockDriverMetrics::new(),
-        );
-        let s = d
-            .start_sandbox(Request::new(StartSandboxRequest::default()))
-            .await
-            .unwrap_err();
-        assert_eq!(s.code(), tonic::Code::Unimplemented);
     }
 
     // ---------- ValidateSandboxCreate ----------
