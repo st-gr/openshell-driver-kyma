@@ -455,9 +455,16 @@ impl KymaProvisioner {
     ///
     /// 1. The name is DERIVED from `cfg.gateway_id` + `workspace` by the
     ///    same `crate::workspace::managed_namespace` that
-    ///    `bootstrap_managed_namespace` used to create it. No field of the
-    ///    request names a namespace, so no caller can aim this at
-    ///    `kube-system`.
+    ///    `bootstrap_managed_namespace` used to create it, so the target is
+    ///    always the namespace this driver would have created for this
+    ///    workspace. Read this narrowly: deriving PREFIXES, it does not
+    ///    SANITISE. `workspace` is caller-supplied and is interpolated into
+    ///    the name verbatim, and kube-core's `validate_name` only rejects
+    ///    the empty string before splicing that name raw and unencoded into
+    ///    the request path — so a workspace containing `/` and `..` can
+    ///    still produce a path that dot-segment removal resolves onto some
+    ///    other namespace, `kube-system` included. Guardrail 1 alone does
+    ///    NOT stop that. Guardrail 3 does; see below.
     /// 2. A missing namespace is success, not a `NotFound` error, so a
     ///    retried or duplicated `DeleteWorkspace` is idempotent.
     /// 3. The ownership labels must match THIS gateway and workspace —
@@ -467,6 +474,17 @@ impl KymaProvisioner {
     ///    pair, or an operator-made namespace) is logged and left alone.
     ///    Declining returns `Ok(())` rather than an error: teardown must
     ///    not wedge on a namespace it simply does not own.
+    ///
+    ///    This is also what makes guardrail 1's gap unexploitable, and it
+    ///    is the guardrail to preserve most carefully. Kubernetes validates
+    ///    label VALUES on write, so no namespace can ever carry an
+    ///    `openshell.ai/sandbox-workspace` value containing `/`, `%` or
+    ///    whitespace. A workspace string crafted to traverse therefore can
+    ///    never equal the workspace label of any namespace that exists, so
+    ///    the check declines — and if traversal did land the GET on
+    ///    `kube-system`, that namespace carries none of the three labels
+    ///    either. Ownership, not name derivation, is what keeps this off
+    ///    other people's namespaces.
     /// 4. The delete carries a UID precondition, so a namespace deleted and
     ///    recreated between the `get` and the `delete` is not destroyed by a
     ///    decision taken about the object it replaced.
@@ -529,17 +547,25 @@ impl KymaProvisioner {
                 tracing::info!(namespace = %ns, "managed workspace namespace already gone");
                 Ok(())
             }
-            // The UID precondition failed: the namespace was deleted and a
-            // new one with the same name took its place. The object this
-            // call decided about is gone, so this teardown is done — and
-            // the replacement belongs to a newer lifecycle (only
-            // `bootstrap_managed_namespace` recreates it), which this stale
-            // decision must not destroy.
+            // Conflict. The expected cause is the UID precondition failing
+            // — the namespace was deleted and a new one with the same name
+            // took its place, so the object this call decided about is
+            // gone, this teardown is done, and the replacement belongs to a
+            // newer lifecycle that a stale decision must not destroy. It is
+            // not the only cause, though: the apiserver also returns 409 for
+            // "object has been modified" and for some admission and
+            // finalizer conflicts. All of them mean the same thing here —
+            // this decision no longer applies to what is on the server — so
+            // the handling is the same, but the log carries `reason` rather
+            // than asserting which one it was.
             Err(kube::Error::Api(e)) if e.code == 409 => {
                 tracing::warn!(
                     namespace = %ns,
-                    "uid precondition failed; the namespace was recreated between the \
-                     ownership check and the delete, so it is left alone"
+                    reason = %e.reason,
+                    message = %e.message,
+                    "conflict deleting managed workspace namespace (most likely the uid \
+                     precondition failing because it was recreated between the ownership \
+                     check and the delete); leaving it alone"
                 );
                 Ok(())
             }
@@ -1965,11 +1991,22 @@ mod tests {
         );
     }
 
-    /// The guardrail that makes this feature acceptable on a live cluster:
-    /// the delete target is computed from configuration plus the workspace
-    /// name, and nothing a caller can say escapes the
-    /// `openshell-{gateway_id}-` prefix. Would catch any future change that
-    /// let a request field name the namespace directly.
+    /// Covers `crate::workspace::managed_namespace` ONLY: whatever a caller
+    /// puts in `workspace`, the derived name still begins with
+    /// `openshell-{gateway_id}-`. That `delete_managed_namespace` actually
+    /// uses this derived name is a separate claim, tested on the wire by
+    /// `delete_managed_namespace_targets_the_derived_name_and_pins_the_uid`.
+    ///
+    /// Note what this does NOT show. Deriving prefixes; it does not
+    /// sanitise. The hostile strings below stay inside the prefix as a
+    /// STRING, but kube-core splices the name into the request path raw and
+    /// unencoded (`validate_name` only rejects the empty string), so one
+    /// containing `/` and `..` still goes on the wire and can resolve, after
+    /// dot-segment removal, onto a different namespace. What makes that
+    /// harmless is the ownership check, not this prefix: Kubernetes
+    /// validates label values, so no namespace can carry a workspace label
+    /// containing `/`, and `kube-system` carries none of the three labels
+    /// regardless.
     #[test]
     fn managed_namespace_name_is_derived_not_supplied() {
         for hostile in [
@@ -1988,9 +2025,11 @@ mod tests {
             assert_ne!(ns, "kube-system");
             assert_ne!(ns, "default");
         }
-        // Such a workspace never reaches the API server anyway: the derived
-        // name is not a DNS-1123 label, so both the create and the get are
-        // rejected. The prefix is the guarantee that matters here.
+        // These names DO reach the API server — nothing validates them
+        // client-side — and it is the server that rejects them as invalid
+        // DNS-1123 labels, or (on a traversal-shaped string) resolves the
+        // path elsewhere. Either way the ownership check has already had to
+        // pass first, which for any of these strings it cannot.
     }
 
     /// The delete side must target exactly what the create side made.
@@ -2032,6 +2071,283 @@ mod tests {
         p.delete_workspace("team-a")
             .await
             .expect("operator mode must not touch the API server");
+    }
+
+    // ---------- delete_managed_namespace, on the wire ----------
+    //
+    // The helper tests above cover the decisions in isolation. These cover
+    // the composed function, where all four guardrails actually meet: they
+    // assert what is sent to the API server, and — for the decline path —
+    // that nothing is sent at all. A stub `tower::Service` stands in for the
+    // apiserver; no cluster is involved.
+
+    #[derive(Debug, Clone)]
+    struct RecordedRequest {
+        method: String,
+        uri: String,
+        body: String,
+    }
+
+    type Recorder = Arc<std::sync::Mutex<Vec<RecordedRequest>>>;
+
+    /// A `Client` backed by a stub that records every request and answers
+    /// them in order from `responses` (HTTP status, JSON body). Receiving
+    /// more requests than there are canned responses panics, which is how
+    /// "and it issued no DELETE" is enforced.
+    fn recording_client(responses: Vec<(u16, String)>) -> (Client, Recorder) {
+        let recorder: Recorder = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let queue = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from(
+            responses,
+        )));
+        let rec = Arc::clone(&recorder);
+        let svc = tower::service_fn(move |req: http::Request<kube::client::Body>| {
+            let rec = Arc::clone(&rec);
+            let queue = Arc::clone(&queue);
+            async move {
+                let (parts, body) = req.into_parts();
+                let bytes = http_body_util::BodyExt::collect(body)
+                    .await
+                    .map(http_body_util::Collected::to_bytes)
+                    .unwrap_or_default();
+                rec.lock().unwrap().push(RecordedRequest {
+                    method: parts.method.to_string(),
+                    uri: parts.uri.to_string(),
+                    body: String::from_utf8_lossy(&bytes).into_owned(),
+                });
+                let (code, payload) = queue
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .expect("stub apiserver received a request it was not primed for");
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(code)
+                        .header("content-type", "application/json")
+                        .body(kube::client::Body::from(payload.into_bytes()))
+                        .unwrap(),
+                )
+            }
+        });
+        (Client::new(svc, "test-ns"), recorder)
+    }
+
+    fn managed_provisioner(client: Client) -> KymaProvisioner {
+        let cfg = Config {
+            workspace_mode: WorkspaceMode::Managed,
+            gateway_id: "gw1".into(),
+            namespace: "test-ns".into(),
+            ..Config::default()
+        };
+        KymaProvisioner::new(client, cfg)
+    }
+
+    /// A namespace as the apiserver would return it, optionally carrying
+    /// this driver's ownership labels and/or a uid.
+    fn served_namespace(owned: bool, uid: Option<&str>) -> String {
+        let mut metadata = serde_json::json!({ "name": "openshell-gw1-team-a" });
+        if owned {
+            metadata["labels"] = serde_json::json!({
+                LABEL_MANAGED_BY: LABEL_MANAGED_BY_VALUE,
+                LABEL_GATEWAY_ID: "gw1",
+                LABEL_SANDBOX_WORKSPACE: "team-a",
+            });
+        }
+        if let Some(uid) = uid {
+            metadata["uid"] = serde_json::json!(uid);
+        }
+        serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Namespace",
+            "metadata": metadata,
+        })
+        .to_string()
+    }
+
+    fn served_status(code: u16, reason: &str) -> String {
+        serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Status",
+            "status": "Failure",
+            "reason": reason,
+            "message": format!("{reason} for namespaces \"openshell-gw1-team-a\""),
+            "code": code,
+        })
+        .to_string()
+    }
+
+    /// Guardrail 2, on the composed function: a namespace that is already
+    /// gone is success, so a retried DeleteWorkspace is idempotent. Would
+    /// catch the 404 arm on the GET being removed or narrowed — with it
+    /// gone this returns `Err(Kube)` instead.
+    #[tokio::test]
+    async fn delete_managed_namespace_treats_a_missing_namespace_as_success() {
+        let (client, recorder) = recording_client(vec![(404, served_status(404, "NotFound"))]);
+        managed_provisioner(client)
+            .delete_managed_namespace("team-a")
+            .await
+            .expect("an already-absent namespace must be success, not NotFound");
+        let seen = recorder.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "expected only the GET, saw {seen:?}");
+        assert_eq!(seen[0].method, "GET");
+    }
+
+    /// Guardrails 1 and 4 together, as they appear on the wire: the DELETE
+    /// must go to the DERIVED name, and must carry a uid precondition equal
+    /// to the uid of the object the ownership check just inspected.
+    ///
+    /// Would catch the derived name being replaced by the raw workspace
+    /// (the path would read `/api/v1/namespaces/team-a`), and would catch
+    /// the precondition being dropped or filled from anywhere else.
+    #[tokio::test]
+    async fn delete_managed_namespace_targets_the_derived_name_and_pins_the_uid() {
+        let (client, recorder) = recording_client(vec![
+            (200, served_namespace(true, Some("uid-42"))),
+            (200, served_namespace(true, Some("uid-42"))),
+        ]);
+        managed_provisioner(client)
+            .delete_managed_namespace("team-a")
+            .await
+            .expect("an owned namespace must be deleted");
+
+        let seen = recorder.lock().unwrap().clone();
+        assert_eq!(seen.len(), 2, "expected a GET then a DELETE, saw {seen:?}");
+        assert_eq!(seen[0].method, "GET");
+        assert!(
+            seen[0]
+                .uri
+                .starts_with("/api/v1/namespaces/openshell-gw1-team-a"),
+            "the read must target the derived name, got {}",
+            seen[0].uri
+        );
+        assert_eq!(seen[1].method, "DELETE");
+        assert!(
+            seen[1]
+                .uri
+                .starts_with("/api/v1/namespaces/openshell-gw1-team-a"),
+            "the delete must target the derived name, got {}",
+            seen[1].uri
+        );
+        let body: serde_json::Value =
+            serde_json::from_str(&seen[1].body).expect("delete body must be JSON");
+        assert_eq!(
+            body["preconditions"]["uid"], "uid-42",
+            "the delete must be pinned to the uid of the inspected object, got {body}"
+        );
+    }
+
+    /// Guardrail 3 on the composed function, and the single most important
+    /// assertion in this file: a namespace sitting at the derived name that
+    /// this driver does not own is not merely tolerated, it is NOT DELETED.
+    /// The stub is primed with one response only, so an attempted DELETE
+    /// panics; the recorded-request count asserts it independently.
+    #[tokio::test]
+    async fn delete_managed_namespace_issues_no_delete_for_a_namespace_it_does_not_own() {
+        let (client, recorder) =
+            recording_client(vec![(200, served_namespace(false, Some("uid-9")))]);
+        managed_provisioner(client)
+            .delete_managed_namespace("team-a")
+            .await
+            .expect("declining must be Ok(()), so teardown cannot wedge");
+        let seen = recorder.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "expected only the GET, saw {seen:?}");
+        assert_eq!(seen[0].method, "GET");
+        assert!(
+            !seen.iter().any(|r| r.method == "DELETE"),
+            "a namespace this driver does not own must never be deleted, saw {seen:?}"
+        );
+    }
+
+    /// The `NoUid` branch end to end: owned, but the object came back with
+    /// no uid, so the delete cannot be pinned. Must refuse rather than
+    /// delete unpinned — and must issue no DELETE.
+    #[tokio::test]
+    async fn delete_managed_namespace_refuses_when_it_cannot_pin_the_uid() {
+        let (client, recorder) = recording_client(vec![(200, served_namespace(true, None))]);
+        let err = managed_provisioner(client)
+            .delete_managed_namespace("team-a")
+            .await
+            .expect_err("an unpinnable delete must be refused");
+        assert!(
+            matches!(err, DriverError::FailedPrecondition(_)),
+            "expected FailedPrecondition, got {err:?}"
+        );
+        let seen = recorder.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "expected only the GET, saw {seen:?}");
+    }
+
+    /// Guardrail 2 on the DELETE itself: someone else finished the job
+    /// between the read and the write. Would catch the 404 arm on the
+    /// delete being removed.
+    #[tokio::test]
+    async fn delete_managed_namespace_tolerates_a_404_on_the_delete() {
+        let (client, _recorder) = recording_client(vec![
+            (200, served_namespace(true, Some("uid-42"))),
+            (404, served_status(404, "NotFound")),
+        ]);
+        managed_provisioner(client)
+            .delete_managed_namespace("team-a")
+            .await
+            .expect("a namespace that vanished mid-delete is not an error");
+    }
+
+    /// A conflict on the delete — expected to be the uid precondition
+    /// failing because the namespace was recreated, though the apiserver
+    /// returns 409 for other reasons too. Either way this decision no
+    /// longer applies, and the replacement must not be destroyed. Would
+    /// catch the 409 arm being removed.
+    #[tokio::test]
+    async fn delete_managed_namespace_tolerates_a_conflict_on_the_delete() {
+        let (client, _recorder) = recording_client(vec![
+            (200, served_namespace(true, Some("uid-42"))),
+            (409, served_status(409, "Conflict")),
+        ]);
+        managed_provisioner(client)
+            .delete_managed_namespace("team-a")
+            .await
+            .expect("a conflict means this decision is stale, not that teardown failed");
+    }
+
+    /// The tolerance above must be narrow. A 403 — the shape an RBAC gap
+    /// takes — must surface, not be swallowed as success. Would catch a
+    /// catch-all `Err(_) => Ok(())`.
+    #[tokio::test]
+    async fn delete_managed_namespace_propagates_errors_it_does_not_expect() {
+        let (client, _recorder) = recording_client(vec![(403, served_status(403, "Forbidden"))]);
+        let err = managed_provisioner(client)
+            .delete_managed_namespace("team-a")
+            .await
+            .expect_err("a 403 must not be reported as a successful teardown");
+        assert!(
+            matches!(err, DriverError::Kube(_)),
+            "expected the kube error to surface, got {err:?}"
+        );
+    }
+
+    /// Positive routing: `Managed` must actually reach
+    /// `delete_managed_namespace`. The Shared/Operator tests above only
+    /// prove the no-op arms; a regression turning `Managed` into a silent
+    /// no-op too would pass every one of them. This fails if no request is
+    /// made, or if it is made against the wrong name.
+    #[tokio::test]
+    async fn delete_workspace_routes_managed_mode_to_the_namespace_delete() {
+        let (client, recorder) = recording_client(vec![(404, served_status(404, "NotFound"))]);
+        managed_provisioner(client)
+            .delete_workspace("team-a")
+            .await
+            .expect("managed teardown of an absent namespace is success");
+        let seen = recorder.lock().unwrap().clone();
+        assert_eq!(
+            seen.len(),
+            1,
+            "managed mode must reach the API server, not silently no-op; saw {seen:?}"
+        );
+        assert!(
+            seen[0]
+                .uri
+                .starts_with("/api/v1/namespaces/openshell-gw1-team-a"),
+            "expected the derived namespace, got {}",
+            seen[0].uri
+        );
     }
 
     #[test]
