@@ -24,7 +24,9 @@ use computev1::pb::{DriverPlatformEvent, DriverSandbox};
 use futures::{StreamExt, TryStreamExt};
 use k8s_openapi::api::core::v1::{Event as CoreEvent, Node};
 use kube::{
-    api::{Api, ApiResource, DeleteParams, DynamicObject, ListParams, PostParams},
+    api::{
+        Api, ApiResource, DeleteParams, DynamicObject, ListParams, Patch, PatchParams, PostParams,
+    },
     core::GroupVersionKind,
     runtime::watcher,
     Client,
@@ -163,6 +165,71 @@ impl KymaProvisioner {
             .name
             .clone()
             .ok_or_else(|| DriverError::NotFound(sandbox_id.to_string()))
+    }
+
+    /// Patch the CR's operating state, carrying its resourceVersion as an
+    /// optimistic-concurrency precondition.
+    async fn patch_operating_state(
+        &self,
+        sandbox_id: &str,
+        running: bool,
+    ) -> Result<(), DriverError> {
+        let obj = self.find_by_sandbox_id(sandbox_id).await?;
+        let kube_name = obj
+            .metadata
+            .name
+            .clone()
+            .ok_or_else(|| DriverError::NotFound(sandbox_id.to_string()))?;
+        let resource_version = obj
+            .metadata
+            .resource_version
+            .clone()
+            .ok_or_else(|| DriverError::NotFound(sandbox_id.to_string()))?;
+
+        // The CR's own apiVersion decides the payload shape. Reading it from
+        // the object rather than assuming keeps this correct when the CRD
+        // starts serving a newer version.
+        let api_version = obj
+            .types
+            .as_ref()
+            .and_then(|t| t.api_version.rsplit('/').next().map(str::to_string))
+            .unwrap_or_else(|| crate::lifecycle::SANDBOX_V1ALPHA1.to_string());
+
+        let patch =
+            crate::lifecycle::operating_state_patch(&api_version, &resource_version, running);
+        self.sandboxes_api()
+            .patch(&kube_name, &PatchParams::default(), &Patch::Merge(&patch))
+            .await?;
+        Ok(())
+    }
+
+    /// Poll until the sandbox's pod is gone, bounded by `stop_timeout_secs`.
+    async fn await_pod_gone(&self, sandbox_id: &str) -> Result<(), DriverError> {
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(self.cfg.stop_timeout_secs);
+        let pod_api: Api<k8s_openapi::api::core::v1::Pod> =
+            Api::namespaced(self.client.clone(), &self.cfg.namespace);
+
+        loop {
+            let kube_name = match self.find_by_sandbox_id(sandbox_id).await {
+                Ok(o) => o.metadata.name.clone().unwrap_or_default(),
+                // The CR vanished mid-stop; nothing left to wait for.
+                Err(DriverError::NotFound(_)) => return Ok(()),
+                Err(e) => return Err(e),
+            };
+            match pod_api.get(&kube_name).await {
+                Err(kube::Error::Api(s)) if s.code == 404 => return Ok(()),
+                Err(e) => return Err(e.into()),
+                Ok(_) => {}
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(DriverError::FailedPrecondition(format!(
+                    "timed out after {}s waiting for sandbox {sandbox_id} to stop",
+                    self.cfg.stop_timeout_secs
+                )));
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
     }
 
     /// Idempotent PVC create for a sandbox's `/workspace` mount.
@@ -795,6 +862,15 @@ impl SandboxProvisioner for KymaProvisioner {
             }
         }
         Ok(false)
+    }
+
+    async fn start_sandbox(&self, sandbox_id: &str) -> Result<(), DriverError> {
+        self.patch_operating_state(sandbox_id, true).await
+    }
+
+    async fn stop_sandbox(&self, sandbox_id: &str) -> Result<(), DriverError> {
+        self.patch_operating_state(sandbox_id, false).await?;
+        self.await_pod_gone(sandbox_id).await
     }
 
     async fn apply_apirule(&self, manifest: serde_json::Value) -> Result<(), DriverError> {

@@ -103,6 +103,9 @@ driver:
   sandboxStorageClass: ""
   healthPort: 9090
   logLevel: info
+  # How long stop_sandbox waits for the sandbox's pod to terminate before
+  # giving up. Raise it for workloads with long graceful-shutdown handlers.
+  stopTimeoutSecs: 120
 
 # Driver pod resource requests and limits. Modest defaults that fit any
 # Kyma namespace ResourceQuota out of the box.

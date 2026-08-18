@@ -48,6 +48,8 @@ mock! {
         async fn watch(&self) -> Result<mpsc::Receiver<WatchEvent>, DriverError>;
         async fn validate_create(&self, sb: &DriverSandbox) -> Result<(), DriverError>;
         async fn has_gpu_capacity(&self, count: u32) -> Result<bool, DriverError>;
+        async fn start_sandbox(&self, sandbox_id: &str) -> Result<(), DriverError>;
+        async fn stop_sandbox(&self, sandbox_id: &str) -> Result<(), DriverError>;
         async fn apply_apirule(&self, manifest: serde_json::Value) -> Result<(), DriverError>;
     }
 }

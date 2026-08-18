@@ -46,6 +46,13 @@ pub trait SandboxProvisioner: Send + Sync + 'static {
     /// True when a single node can satisfy `count` GPUs.
     async fn has_gpu_capacity(&self, count: u32) -> Result<bool, DriverError>;
 
+    /// Start a stopped sandbox. Keyed by sandbox **id**, like `get`/`delete`.
+    async fn start_sandbox(&self, sandbox_id: &str) -> Result<(), DriverError>;
+    /// Stop a running sandbox and wait until its pod is actually gone.
+    /// Returning before termination would let the gateway believe a sandbox
+    /// is stopped while its pod still runs.
+    async fn stop_sandbox(&self, sandbox_id: &str) -> Result<(), DriverError>;
+
     /// POST a rendered Kyma `APIRule` manifest. No-op when the APIRule
     /// flag is off — the driver layer still gates the call site, this
     /// method only handles the HTTP for callers that pass a manifest.

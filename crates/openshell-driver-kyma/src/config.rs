@@ -114,6 +114,11 @@ pub struct Config {
     /// Tracing log level. `RUST_LOG` overrides this when set.
     #[arg(long, default_value = "info")]
     pub log_level: String,
+
+    /// How long `stop_sandbox` waits for the pod to terminate before giving
+    /// up. Raise it for workloads with long graceful-shutdown handlers.
+    #[arg(long, default_value_t = 120)]
+    pub stop_timeout_secs: u64,
 }
 
 impl Default for Config {
@@ -136,6 +141,7 @@ impl Default for Config {
             sandbox_storage_class: String::new(),
             health_port: 9090,
             log_level: "info".to_string(),
+            stop_timeout_secs: 120,
         }
     }
 }

@@ -89,6 +89,7 @@ spec:
             - {{ .Values.driver.healthPort | quote }}
             - --log-level
             - {{ .Values.driver.logLevel | quote }}
+            - --stop-timeout-secs={{ .Values.driver.stopTimeoutSecs }}
           env:
             - name: RUST_LOG
               value: {{ .Values.driver.logLevel | quote }}
