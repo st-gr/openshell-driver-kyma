@@ -317,8 +317,8 @@ async fn grpc_list_returns_empty_when_no_sandboxes() {
 #[tokio::test]
 async fn grpc_stop_and_start_are_implemented() {
     let mut p = MockProvisioner::new();
-    p.expect_stop_sandbox().returning(|_| Ok(()));
-    p.expect_start_sandbox().returning(|_| Ok(()));
+    p.expect_stop_sandbox().times(1).returning(|_| Ok(()));
+    p.expect_start_sandbox().times(1).returning(|_| Ok(()));
 
     let (_dir, socket) = temp_socket();
     let (mut client, shutdown, handle) =
@@ -340,7 +340,15 @@ async fn grpc_stop_and_start_are_implemented() {
         .expect("start must be implemented");
 
     drop(shutdown);
-    let _ = handle.await;
+    // Unlike other tests here, this one's whole purpose is to catch a
+    // regressed handler that stops calling the provisioner. mockall's
+    // `.times(1)` checkpoint fires on Drop of the mock, which happens
+    // inside the spawned server task as it tears down — a task panic
+    // there surfaces only as `Err` from this JoinHandle, not as a panic
+    // on the current thread. `let _ = handle.await;` (used elsewhere in
+    // this file) would silently swallow that and let the test report
+    // "ok" even when the expectation was violated, so unwrap it instead.
+    handle.await.unwrap();
 }
 
 #[tokio::test]
@@ -356,6 +364,30 @@ async fn grpc_stop_rejects_empty_sandbox_id() {
 
     let err = client
         .stop_sandbox(StopSandboxRequest {
+            sandbox_id: String::new(),
+            sandbox_name: "n".into(),
+        })
+        .await
+        .expect_err("empty sandbox_id must be rejected");
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+    drop(shutdown);
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn grpc_start_rejects_empty_sandbox_id() {
+    let (_dir, socket) = temp_socket();
+    let (mut client, shutdown, handle) = start_server(
+        socket,
+        MockProvisioner::new(),
+        MockEnricher::new(),
+        MockMetrics::new(),
+    )
+    .await;
+
+    let err = client
+        .start_sandbox(StartSandboxRequest {
             sandbox_id: String::new(),
             sandbox_name: "n".into(),
         })
