@@ -1389,6 +1389,11 @@ mod tests {
     async fn build_dynamic_object_round_trips_through_object_to_driver_sandbox() {
         let p = make_provisioner();
         let sb = make_sandbox("id-9", "round-trip", "img");
+        // Ties the "test-ns" literal passed below to the real resolution
+        // path `create()` actually uses (`namespace_for_workspace`), so a
+        // regression there (e.g. passing `sb.workspace` instead) can't hide
+        // behind a hardcoded literal in this test.
+        assert_eq!(p.namespace_for_workspace("default").unwrap(), "test-ns");
         let obj = p.build_dynamic_object(&sb, "test-ns");
 
         assert_eq!(obj.metadata.name.as_deref(), Some("default--round-trip"));

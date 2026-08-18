@@ -279,4 +279,21 @@ mod tests {
         assert!(validate_kube_resource_name(WorkspaceMode::Managed, "default", &long).is_ok());
         assert!(validate_kube_resource_name(WorkspaceMode::Shared, "", "hello").is_err());
     }
+
+    /// Pins both sides of the DNS-1123 boundary under `Shared`. Exactly 63
+    /// combined characters must be accepted; 64 must not. Without the
+    /// positive case, changing the length check from `>` to `>=` would still
+    /// pass the rest of the suite.
+    #[test]
+    fn shared_name_at_exactly_the_dns1123_limit_is_accepted() {
+        let at_limit = "a".repeat(MAX_KUBE_NAME_LEN - "default".len() - 2);
+        assert_eq!(
+            kube_resource_name(WorkspaceMode::Shared, "default", &at_limit).len(),
+            MAX_KUBE_NAME_LEN
+        );
+        assert!(validate_kube_resource_name(WorkspaceMode::Shared, "default", &at_limit).is_ok());
+
+        let over = format!("{at_limit}a");
+        assert!(validate_kube_resource_name(WorkspaceMode::Shared, "default", &over).is_err());
+    }
 }
