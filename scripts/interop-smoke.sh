@@ -215,31 +215,45 @@ grep -q "$SB" <<<"$list_out" || fail "gateway did not list ${SB} by its bare nam
 # proves the replicas patch and the termination poll behave. This is the
 # assertion that would have caught 'stop returns Unimplemented'.
 #
+# This smoke deliberately runs no agent-sandbox controller (see the CRD
+# install step above: "this smoke stops at 'CR created' on purpose and
+# never needs the controller to reconcile a pod"), so no Pod is ever
+# created here. Asserting on the Sandbox CR's own spec.replicas -- the
+# exact field the driver patches (see lifecycle.rs::operating_state_patch)
+# -- instead of on a Pod, still covers the gateway -> driver RPC, the
+# label-based CR lookup, and the operating-state patch reaching the API
+# server. It does NOT exercise provisioner.rs::await_pod_gone's
+# termination poll: that only ever runs where a controller has created a
+# Pod to wait for. That poll is covered only against a real cluster, not
+# by this smoke -- do not read a pass here as proof it works.
+#
 # Requires CLI >= 0.0.106: `openshell sandbox stop`/`start` do not exist
 # before that. CLI_VERSION tracks GATEWAY_REF (see
 # scripts/resolve-upstream-refs.sh), so if a maintainer pins GATEWAY_REF to
 # <= 0.0.105 in .github/upstream-compat.env during an upstream-breakage
 # window, this assertion will fail with "unrecognized subcommand" rather
 # than the failure it is meant to catch.
-log "ASSERT 3b: stop -> pod gone -> start -> pod back"
+log "ASSERT 3b: stop -> spec.replicas=0 -> start -> spec.replicas=1"
 
 osh sandbox stop "$SB" || fail "openshell sandbox stop failed"
 
-gone=0
+stopped=0
 for _ in $(seq 1 40); do
-	if ! kubectl -n "$NS" get pod "$cr" >/dev/null 2>&1; then gone=1; break; fi
+	replicas=$(kubectl -n "$NS" get sandbox "$cr" -o jsonpath='{.spec.replicas}' 2>/dev/null || true)
+	[[ $replicas == 0 ]] && { stopped=1; break; }
 	sleep 3
 done
-[[ $gone == 1 ]] || fail "pod $cr still present after stop"
+[[ $stopped == 1 ]] || fail "sandbox $cr spec.replicas never reached 0 after stop (last seen: '${replicas:-}')"
 
 osh sandbox start "$SB" || fail "openshell sandbox start failed"
 
-back=0
+started=0
 for _ in $(seq 1 40); do
-	if kubectl -n "$NS" get pod "$cr" >/dev/null 2>&1; then back=1; break; fi
+	replicas=$(kubectl -n "$NS" get sandbox "$cr" -o jsonpath='{.spec.replicas}' 2>/dev/null || true)
+	[[ $replicas == 1 ]] && { started=1; break; }
 	sleep 3
 done
-[[ $back == 1 ]] || fail "pod $cr did not return after start"
+[[ $started == 1 ]] || fail "sandbox $cr spec.replicas never reached 1 after start (last seen: '${replicas:-}')"
 
 # --- Assertion 4: nothing errored ----------------------------------------
 #
