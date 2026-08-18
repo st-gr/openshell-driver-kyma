@@ -221,5 +221,6 @@ mod tests {
         assert_eq!(cli.enable_apirule, dflt.enable_apirule);
         assert_eq!(cli.gpu_support, dflt.gpu_support);
         assert_eq!(cli.health_port, dflt.health_port);
+        assert_eq!(cli.stop_timeout_secs, dflt.stop_timeout_secs);
     }
 }
