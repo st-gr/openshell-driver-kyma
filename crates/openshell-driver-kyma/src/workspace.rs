@@ -139,6 +139,32 @@ pub fn validate_kube_resource_name(
     Ok(())
 }
 
+/// Validate a caller-supplied `workspace` string at the gRPC boundary.
+///
+/// `workspace` ends up in `managed_namespace` and, in `Managed` mode, as a
+/// Kubernetes resource *name* — interpolated into the request URL path raw
+/// and unencoded, since `kube-core`'s own `validate_name` only rejects the
+/// empty string. Requiring a DNS-1123 label here closes that off at the
+/// boundary: a traversal-shaped workspace like `a/../../../api/v1/...` is
+/// rejected before it ever reaches `kube::Api`.
+///
+/// # Errors
+/// `InvalidArgument` when `workspace` is not a DNS-1123 label (empty,
+/// contains anything other than lowercase ASCII letters/digits/hyphens,
+/// starts/ends with a hyphen, or exceeds 63 characters).
+pub fn validate_workspace_name(workspace: &str) -> Result<(), DriverError> {
+    if is_dns1123_label(workspace) {
+        Ok(())
+    } else {
+        Err(DriverError::InvalidArgument(format!(
+            "workspace '{workspace}' is not a valid DNS-1123 label: it must be \
+             non-empty, at most {MAX_KUBE_NAME_LEN} characters, contain only \
+             lowercase ASCII letters, digits, and hyphens, and not start or \
+             end with a hyphen"
+        )))
+    }
+}
+
 fn is_dns1123_label(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= MAX_KUBE_NAME_LEN
@@ -295,5 +321,48 @@ mod tests {
 
         let over = format!("{at_limit}a");
         assert!(validate_kube_resource_name(WorkspaceMode::Shared, "default", &over).is_err());
+    }
+
+    #[test]
+    fn validate_workspace_name_accepts_realistic_values() {
+        for ws in ["default", "ws-a", "team-a", "tenant-a", "a", "a-1-b"] {
+            assert!(
+                validate_workspace_name(ws).is_ok(),
+                "expected {ws:?} to be accepted"
+            );
+        }
+    }
+
+    /// The exact hole this closes: a traversal-shaped workspace string that
+    /// would otherwise be spliced raw into a `kube::Api` request path.
+    #[test]
+    fn validate_workspace_name_rejects_path_traversal() {
+        let err = validate_workspace_name("a/../../../../api/v1/namespaces/kube-system")
+            .expect_err("traversal-shaped workspace must be rejected");
+        assert!(matches!(err, DriverError::InvalidArgument(_)));
+    }
+
+    /// Replaces the old bare `ws.is_empty()` check in `driver.rs` — prove
+    /// the empty case is still rejected now that `is_dns1123_label` is the
+    /// sole gate.
+    #[test]
+    fn validate_workspace_name_rejects_empty() {
+        assert!(validate_workspace_name("").is_err());
+    }
+
+    #[test]
+    fn validate_workspace_name_rejects_invalid_characters_and_shape() {
+        for ws in [
+            "Default",       // uppercase
+            "team_a",        // underscore
+            "-team-a",       // leading hyphen
+            "team-a-",       // trailing hyphen
+            &"a".repeat(64), // over 63 characters
+        ] {
+            assert!(
+                validate_workspace_name(ws).is_err(),
+                "expected {ws:?} to be rejected"
+            );
+        }
     }
 }

@@ -547,3 +547,55 @@ async fn grpc_delete_workspace_rejects_empty_workspace() {
     drop(shutdown);
     let _ = handle.await;
 }
+
+/// A traversal-shaped workspace must be rejected before it reaches the
+/// provisioner — the mock has no expectations set, so a call that got past
+/// validation would panic inside the spawned server task rather than
+/// surface as a clean `InvalidArgument`.
+#[tokio::test]
+async fn grpc_ensure_workspace_rejects_path_traversal() {
+    let (_dir, socket) = temp_socket();
+    let (mut client, shutdown, handle) = start_server(
+        socket,
+        MockProvisioner::new(),
+        MockEnricher::new(),
+        MockMetrics::new(),
+    )
+    .await;
+
+    let err = client
+        .ensure_workspace(EnsureWorkspaceRequest {
+            workspace: "a/../../../../api/v1/namespaces/kube-system".into(),
+        })
+        .await
+        .expect_err("traversal-shaped workspace must be rejected");
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+    drop(shutdown);
+    let _ = handle.await;
+}
+
+/// See `grpc_ensure_workspace_rejects_path_traversal` — same boundary check
+/// on the delete side.
+#[tokio::test]
+async fn grpc_delete_workspace_rejects_path_traversal() {
+    let (_dir, socket) = temp_socket();
+    let (mut client, shutdown, handle) = start_server(
+        socket,
+        MockProvisioner::new(),
+        MockEnricher::new(),
+        MockMetrics::new(),
+    )
+    .await;
+
+    let err = client
+        .delete_workspace(DeleteWorkspaceRequest {
+            workspace: "a/../../../../api/v1/namespaces/kube-system".into(),
+        })
+        .await
+        .expect_err("traversal-shaped workspace must be rejected");
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+    drop(shutdown);
+    let _ = handle.await;
+}

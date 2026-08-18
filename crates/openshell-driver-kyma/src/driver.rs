@@ -348,9 +348,7 @@ impl ComputeDriver for Driver {
         req: Request<EnsureWorkspaceRequest>,
     ) -> Result<Response<EnsureWorkspaceResponse>, Status> {
         let ws = req.into_inner().workspace;
-        if ws.is_empty() {
-            return Err(Status::invalid_argument("workspace is required"));
-        }
+        crate::workspace::validate_workspace_name(&ws).map_err(Status::from)?;
         self.provisioner
             .ensure_workspace(&ws)
             .await
@@ -365,9 +363,7 @@ impl ComputeDriver for Driver {
         req: Request<DeleteWorkspaceRequest>,
     ) -> Result<Response<DeleteWorkspaceResponse>, Status> {
         let ws = req.into_inner().workspace;
-        if ws.is_empty() {
-            return Err(Status::invalid_argument("workspace is required"));
-        }
+        crate::workspace::validate_workspace_name(&ws).map_err(Status::from)?;
         self.provisioner
             .delete_workspace(&ws)
             .await
