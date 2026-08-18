@@ -332,18 +332,19 @@ impl KymaProvisioner {
     async fn bootstrap_managed_namespace(&self, workspace: &str) -> Result<(), DriverError> {
         let ns = crate::workspace::managed_namespace(&self.cfg.gateway_id, workspace);
 
-        // 1 + 2: namespace, carrying both the ownership labels a future
-        // DeleteWorkspace teardown must check and the PSA label sandbox pods
-        // need. The payload is built by a pure function so it can be unit
-        // tested without a cluster.
-        let ns_obj =
+        // 1 + 2: namespace, carrying both the ownership labels
+        // `namespace_owned_by` (and a future DeleteWorkspace teardown)
+        // check, and the PSA label sandbox pods need. The payload is built
+        // by a pure function so it can be unit tested without a cluster.
+        let ns_obj: Namespace =
             serde_json::from_value(managed_namespace_object(&self.cfg.gateway_id, workspace))
                 .map_err(|e| {
                     DriverError::Internal(anyhow::anyhow!(
                         "managed namespace manifest build failed: {e}"
                     ))
                 })?;
-        create_tolerating_conflict(&Api::<Namespace>::all(self.client.clone()), ns_obj).await?;
+        self.create_or_verify_managed_namespace(&ns, workspace, ns_obj)
+            .await?;
 
         // 3: the ServiceAccount every sandbox pod spec names.
         let sa_obj = serde_json::from_value(sandbox_service_account_object(&ns)).map_err(|e| {
@@ -361,6 +362,55 @@ impl KymaProvisioner {
         // failure here means something stripped it (e.g. a policy webhook).
         self.verify_psa_label(&ns).await?;
         Ok(())
+    }
+
+    /// Create the managed namespace, or — if one with this name already
+    /// exists — confirm this driver is the one that owns it before doing
+    /// anything else inside it.
+    ///
+    /// `crate::workspace::managed_namespace` joins `gateway_id` and
+    /// `workspace` with a single dash to match upstream's naming
+    /// convention (`openshell-{gateway_id}-{workspace}`), which means two
+    /// distinct `(gateway_id, workspace)` pairs can derive the same
+    /// namespace name — e.g. `("a", "b-c")` and `("a-b", "c")` both give
+    /// `openshell-a-b-c`. A plain `AlreadyExists`-tolerant create (as used
+    /// for the ServiceAccount below) would silently *adopt* whatever
+    /// namespace is already there, including one created by a different,
+    /// colliding gateway, and go on to place this gateway's ServiceAccount
+    /// and tenant sandboxes inside it. That is the one state a retry
+    /// cannot repair, since nothing else ever writes ownership labels onto
+    /// a namespace that already existed — so on 409 this reads the
+    /// namespace back and requires `namespace_owned_by` to hold before
+    /// proceeding, rather than tolerating the conflict unconditionally.
+    async fn create_or_verify_managed_namespace(
+        &self,
+        namespace: &str,
+        workspace: &str,
+        obj: Namespace,
+    ) -> Result<(), DriverError> {
+        let api: Api<Namespace> = Api::all(self.client.clone());
+        match api.create(&PostParams::default(), &obj).await {
+            Ok(_) => Ok(()),
+            Err(kube::Error::Api(e)) if e.code == 409 => {
+                let existing = api.get(namespace).await?;
+                if namespace_owned_by(&existing, &self.cfg.gateway_id, workspace) {
+                    Ok(())
+                } else {
+                    Err(DriverError::FailedPrecondition(format!(
+                        "namespace {namespace} already exists but is not owned by this driver \
+                         for gateway_id={gw:?} workspace={workspace:?} (expected labels \
+                         {LABEL_MANAGED_BY}={LABEL_MANAGED_BY_VALUE}, {LABEL_GATEWAY_ID}={gw:?}, \
+                         {LABEL_SANDBOX_WORKSPACE}={workspace:?}; found {found:?}). Refusing to \
+                         place a ServiceAccount or sandboxes in a namespace this driver did not \
+                         create — this can happen when two gateway_id/workspace pairs derive the \
+                         same namespace name (managed_namespace joins them with a single dash).",
+                        gw = self.cfg.gateway_id,
+                        found = existing.metadata.labels.clone().unwrap_or_default(),
+                    )))
+                }
+            }
+            Err(e) => Err(DriverError::Kube(e)),
+        }
     }
 
     /// Confirm a namespace carries the PSA label sandbox pods require.
@@ -721,10 +771,11 @@ impl KymaProvisioner {
 
 /// Namespace object for a managed workspace.
 ///
-/// The three ownership labels are what a future `DeleteWorkspace` teardown
-/// must check before it deletes anything — deleting a namespace this driver
-/// didn't create would be catastrophic. Keep the write side (here) and that
-/// future check in sync.
+/// The three ownership labels are what `namespace_owned_by` checks — both
+/// here, at create time, and (in a future task) before `DeleteWorkspace`
+/// deletes anything. Deleting, or adopting, a namespace this driver didn't
+/// create would be catastrophic; keep the write side (here) and that check
+/// in sync.
 #[must_use]
 fn managed_namespace_object(gateway_id: &str, workspace: &str) -> serde_json::Value {
     serde_json::json!({
@@ -737,12 +788,38 @@ fn managed_namespace_object(gateway_id: &str, workspace: &str) -> serde_json::Va
                 LABEL_GATEWAY_ID: gateway_id,
                 LABEL_SANDBOX_WORKSPACE: workspace,
                 // verify_psa_label hard-fails without this, and every
-                // sandbox pod needs privileged. Mirrors what the chart
-                // applies to the shared namespace.
+                // sandbox pod needs privileged. The chart does NOT set
+                // this label for the shared namespace either — there is
+                // no pod-security reference in any template; per
+                // docs/getting-started.md, the operator applies it by
+                // hand as cluster-admin. Managed mode can't rely on a
+                // manual per-namespace step, so the driver applies it
+                // itself here.
                 "pod-security.kubernetes.io/enforce": "privileged",
             }
         }
     })
+}
+
+/// Whether `ns` carries this driver's ownership labels for exactly this
+/// `gateway_id`/`workspace` pair.
+///
+/// Pure predicate so both the create-time ownership check in
+/// `create_or_verify_managed_namespace` and a future `DeleteWorkspace`
+/// teardown can ask the same question the same way — and so a mismatch
+/// between the two can't develop silently. Requires all three labels
+/// (`LABEL_MANAGED_BY`, `LABEL_GATEWAY_ID`, `LABEL_SANDBOX_WORKSPACE`) to
+/// match: a namespace this driver never touched (no labels at all) and a
+/// namespace from a colliding `gateway_id`/`workspace` pair (labels
+/// present but wrong) both return `false`.
+#[must_use]
+fn namespace_owned_by(ns: &Namespace, gateway_id: &str, workspace: &str) -> bool {
+    let Some(labels) = ns.metadata.labels.as_ref() else {
+        return false;
+    };
+    labels.get(LABEL_MANAGED_BY).map(String::as_str) == Some(LABEL_MANAGED_BY_VALUE)
+        && labels.get(LABEL_GATEWAY_ID).map(String::as_str) == Some(gateway_id)
+        && labels.get(LABEL_SANDBOX_WORKSPACE).map(String::as_str) == Some(workspace)
 }
 
 /// The ServiceAccount `SANDBOX_SERVICE_ACCOUNT` names in every pod spec.
@@ -1578,6 +1655,82 @@ mod tests {
             obj["metadata"]["name"],
             crate::workspace::managed_namespace("gw1", "team-a")
         );
+    }
+
+    // ---------- namespace ownership predicate ----------
+
+    fn namespace_with_labels(labels: serde_json::Value) -> Namespace {
+        serde_json::from_value(serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Namespace",
+            "metadata": { "name": "openshell-gw1-team-a", "labels": labels }
+        }))
+        .expect("must deserialize into k8s Namespace")
+    }
+
+    /// The accept path — this is what the second `EnsureWorkspace` call for
+    /// an already-bootstrapped workspace must see, or every namespace this
+    /// driver itself created would wrongly fail the ownership check.
+    #[test]
+    fn namespace_owned_by_accepts_matching_labels() {
+        let ns = namespace_with_labels(serde_json::json!({
+            LABEL_MANAGED_BY: LABEL_MANAGED_BY_VALUE,
+            LABEL_GATEWAY_ID: "gw1",
+            LABEL_SANDBOX_WORKSPACE: "team-a",
+        }));
+        assert!(namespace_owned_by(&ns, "gw1", "team-a"));
+    }
+
+    /// Would catch the managed-by check being dropped or short-circuited:
+    /// only the gateway-id/workspace labels being right must not be enough.
+    #[test]
+    fn namespace_owned_by_rejects_wrong_managed_by_value() {
+        let ns = namespace_with_labels(serde_json::json!({
+            LABEL_MANAGED_BY: "someone-else",
+            LABEL_GATEWAY_ID: "gw1",
+            LABEL_SANDBOX_WORKSPACE: "team-a",
+        }));
+        assert!(!namespace_owned_by(&ns, "gw1", "team-a"));
+    }
+
+    /// The collision case the finding is about: a namespace another
+    /// gateway created (right managed-by/workspace, wrong gateway_id) must
+    /// not be adopted.
+    #[test]
+    fn namespace_owned_by_rejects_wrong_gateway_id() {
+        let ns = namespace_with_labels(serde_json::json!({
+            LABEL_MANAGED_BY: LABEL_MANAGED_BY_VALUE,
+            LABEL_GATEWAY_ID: "gw-other",
+            LABEL_SANDBOX_WORKSPACE: "team-a",
+        }));
+        assert!(!namespace_owned_by(&ns, "gw1", "team-a"));
+    }
+
+    /// Would catch the workspace comparison being dropped: right
+    /// managed-by/gateway-id but the wrong workspace must still be denied.
+    #[test]
+    fn namespace_owned_by_rejects_wrong_workspace() {
+        let ns = namespace_with_labels(serde_json::json!({
+            LABEL_MANAGED_BY: LABEL_MANAGED_BY_VALUE,
+            LABEL_GATEWAY_ID: "gw1",
+            LABEL_SANDBOX_WORKSPACE: "team-b",
+        }));
+        assert!(!namespace_owned_by(&ns, "gw1", "team-a"));
+    }
+
+    /// A namespace this driver never touched at all — no labels whatsoever
+    /// — must be denied too, not treated as a vacuous match. Catches an
+    /// `unwrap_or(true)`-style bug in the `None` branch of the labels
+    /// lookup.
+    #[test]
+    fn namespace_owned_by_rejects_namespace_with_no_labels() {
+        let ns: Namespace = serde_json::from_value(serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Namespace",
+            "metadata": { "name": "openshell-gw1-team-a" }
+        }))
+        .unwrap();
+        assert!(!namespace_owned_by(&ns, "gw1", "team-a"));
     }
 
     #[test]
