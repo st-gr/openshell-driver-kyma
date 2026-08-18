@@ -197,6 +197,20 @@ mod tests {
         assert_eq!(namespace_for(&c, "tenant-a").unwrap(), "tenant-a");
         let err = namespace_for(&c, "kube-system").expect_err("must be denied");
         assert!(matches!(err, DriverError::PermissionDenied(_)));
+
+        // A strict substring of an allowlisted entry must not match.
+        let err = namespace_for(&c, "tenant").expect_err("substring must be denied");
+        assert!(matches!(err, DriverError::PermissionDenied(_)));
+
+        // A workspace that strictly contains an allowlisted entry must not
+        // match either — this rules out both `ns.contains(workspace)` and
+        // `workspace.contains(ns)` style bugs.
+        let err = namespace_for(&c, "tenant-a-extra").expect_err("superstring must be denied");
+        assert!(matches!(err, DriverError::PermissionDenied(_)));
+
+        // The comparison must be case-sensitive.
+        let err = namespace_for(&c, "TENANT-A").expect_err("case variant must be denied");
+        assert!(matches!(err, DriverError::PermissionDenied(_)));
     }
 
     /// The separator is two dashes so a single-dash workspace or sandbox name
@@ -230,8 +244,22 @@ mod tests {
         assert!(validate_workspace_mode(&managed).is_err(), "no gateway_id");
         managed.gateway_id = "Bad_ID".into();
         assert!(validate_workspace_mode(&managed).is_err(), "not DNS-1123");
+        managed.gateway_id = "-gw1".into();
+        assert!(validate_workspace_mode(&managed).is_err(), "leading hyphen");
+        managed.gateway_id = "gw1-".into();
+        assert!(
+            validate_workspace_mode(&managed).is_err(),
+            "trailing hyphen"
+        );
+        managed.gateway_id = "a".repeat(64);
+        assert!(validate_workspace_mode(&managed).is_err(), "over-length");
         managed.gateway_id = "gw1".into();
         assert!(validate_workspace_mode(&managed).is_ok());
+        managed.gateway_id = "gw-1".into();
+        assert!(
+            validate_workspace_mode(&managed).is_ok(),
+            "valid id with an internal hyphen must still pass"
+        );
 
         let mut operator = cfg_with(WorkspaceMode::Operator);
         assert!(

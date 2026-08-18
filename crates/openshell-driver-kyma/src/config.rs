@@ -239,6 +239,22 @@ mod tests {
     }
 
     #[test]
+    fn clap_parses_workspace_mode_flags() {
+        let c = Config::parse_from([
+            "openshell-driver-kyma",
+            "--workspace-mode",
+            "managed",
+            "--gateway-id",
+            "gw1",
+            "--operator-namespace-allowlist",
+            "a,b,c",
+        ]);
+        assert_eq!(c.workspace_mode, crate::workspace::WorkspaceMode::Managed);
+        assert_eq!(c.gateway_id, "gw1");
+        assert_eq!(c.operator_namespace_allowlist, vec!["a", "b", "c"]);
+    }
+
+    #[test]
     fn clap_defaults_match_default_impl() {
         let cli = Config::parse_from(["openshell-driver-kyma"]);
         let dflt = Config::default();
