@@ -26,6 +26,7 @@ use k8s_openapi::api::core::v1::{Event as CoreEvent, Namespace, Node, ServiceAcc
 use kube::{
     api::{
         Api, ApiResource, DeleteParams, DynamicObject, ListParams, Patch, PatchParams, PostParams,
+        Preconditions,
     },
     core::GroupVersionKind,
     runtime::watcher,
@@ -446,6 +447,106 @@ impl KymaProvisioner {
         }
     }
 
+    /// Delete a managed workspace namespace, or decline to.
+    ///
+    /// This is the only code path in the driver that deletes a namespace,
+    /// and deleting a namespace destroys everything inside it
+    /// irreversibly. Four guardrails, all load-bearing:
+    ///
+    /// 1. The name is DERIVED from `cfg.gateway_id` + `workspace` by the
+    ///    same `crate::workspace::managed_namespace` that
+    ///    `bootstrap_managed_namespace` used to create it. No field of the
+    ///    request names a namespace, so no caller can aim this at
+    ///    `kube-system`.
+    /// 2. A missing namespace is success, not a `NotFound` error, so a
+    ///    retried or duplicated `DeleteWorkspace` is idempotent.
+    /// 3. The ownership labels must match THIS gateway and workspace —
+    ///    the same `namespace_owned_by` predicate the create side uses, so
+    ///    the two answers cannot drift. A namespace that merely happens to
+    ///    match the naming convention (a colliding `gateway_id`/`workspace`
+    ///    pair, or an operator-made namespace) is logged and left alone.
+    ///    Declining returns `Ok(())` rather than an error: teardown must
+    ///    not wedge on a namespace it simply does not own.
+    /// 4. The delete carries a UID precondition, so a namespace deleted and
+    ///    recreated between the `get` and the `delete` is not destroyed by a
+    ///    decision taken about the object it replaced.
+    async fn delete_managed_namespace(&self, workspace: &str) -> Result<(), DriverError> {
+        // Guardrail 1.
+        let ns = crate::workspace::managed_namespace(&self.cfg.gateway_id, workspace);
+        let api: Api<Namespace> = Api::all(self.client.clone());
+
+        // Guardrail 2.
+        let existing = match api.get(&ns).await {
+            Ok(n) => n,
+            Err(kube::Error::Api(e)) if e.code == 404 => {
+                tracing::info!(namespace = %ns, "managed workspace namespace already gone");
+                return Ok(());
+            }
+            Err(e) => return Err(DriverError::Kube(e)),
+        };
+
+        // Guardrails 3 and 4, decided by a pure function so the decision is
+        // unit testable without a cluster.
+        let uid = match namespace_delete_decision(&existing, &self.cfg.gateway_id, workspace) {
+            NamespaceDeleteDecision::DeletePinnedTo { uid } => uid,
+            NamespaceDeleteDecision::Decline => {
+                tracing::warn!(
+                    namespace = %ns,
+                    gateway_id = %self.cfg.gateway_id,
+                    workspace = %workspace,
+                    labels = ?existing.metadata.labels.clone().unwrap_or_default(),
+                    "refusing to delete a namespace this driver does not own; \
+                     leaving it untouched"
+                );
+                return Ok(());
+            }
+            NamespaceDeleteDecision::NoUid => {
+                // Every object the API server returns has a uid, so this is
+                // a "the cluster is not in the state I need" condition, not
+                // an internal bug. Refusing beats deleting unpinned.
+                return Err(DriverError::FailedPrecondition(format!(
+                    "namespace {ns} carries this driver's ownership labels but was returned \
+                     without a metadata.uid, so the delete cannot be pinned to the object \
+                     that was inspected; refusing to delete without a UID precondition"
+                )));
+            }
+        };
+
+        let dp = DeleteParams {
+            preconditions: Some(Preconditions {
+                uid: Some(uid),
+                resource_version: None,
+            }),
+            ..DeleteParams::default()
+        };
+        match api.delete(&ns, &dp).await {
+            Ok(_) => {
+                tracing::info!(namespace = %ns, "deleting managed workspace namespace");
+                Ok(())
+            }
+            // Someone else finished the job between the get and the delete.
+            Err(kube::Error::Api(e)) if e.code == 404 => {
+                tracing::info!(namespace = %ns, "managed workspace namespace already gone");
+                Ok(())
+            }
+            // The UID precondition failed: the namespace was deleted and a
+            // new one with the same name took its place. The object this
+            // call decided about is gone, so this teardown is done — and
+            // the replacement belongs to a newer lifecycle (only
+            // `bootstrap_managed_namespace` recreates it), which this stale
+            // decision must not destroy.
+            Err(kube::Error::Api(e)) if e.code == 409 => {
+                tracing::warn!(
+                    namespace = %ns,
+                    "uid precondition failed; the namespace was recreated between the \
+                     ownership check and the delete, so it is left alone"
+                );
+                Ok(())
+            }
+            Err(e) => Err(DriverError::Kube(e)),
+        }
+    }
+
     /// Build the Sandbox CR's `spec` JSON value. Pure function; no I/O.
     /// Mirrors the Go reference's `buildSandboxSpec` but adds Kyma-specific
     /// behavior: when `cfg.istio_inject_sandboxes` is false, stamps the
@@ -820,6 +921,45 @@ fn namespace_owned_by(ns: &Namespace, gateway_id: &str, workspace: &str) -> bool
     labels.get(LABEL_MANAGED_BY).map(String::as_str) == Some(LABEL_MANAGED_BY_VALUE)
         && labels.get(LABEL_GATEWAY_ID).map(String::as_str) == Some(gateway_id)
         && labels.get(LABEL_SANDBOX_WORKSPACE).map(String::as_str) == Some(workspace)
+}
+
+/// What `delete_managed_namespace` should do about a namespace it has just
+/// read back from the API server.
+///
+/// Split out from the I/O so the two guardrails that decide whether a
+/// namespace gets destroyed — ownership, and the UID the delete is pinned
+/// to — are a pure function that can be unit tested without a cluster.
+#[derive(Debug, PartialEq, Eq)]
+enum NamespaceDeleteDecision {
+    /// Owned by this gateway/workspace: delete it, with the delete pinned
+    /// to this exact object via a UID precondition.
+    DeletePinnedTo { uid: String },
+    /// Not this driver's namespace. Leave it alone.
+    Decline,
+    /// Owned, but returned without a `metadata.uid`, so the delete cannot
+    /// be pinned. Refuse rather than delete unpinned.
+    NoUid,
+}
+
+/// Decide the fate of an existing namespace named for `gateway_id`/`workspace`.
+///
+/// Ownership is delegated to `namespace_owned_by` — the same predicate
+/// `create_or_verify_managed_namespace` uses — deliberately, so the create
+/// side and the delete side can never answer the ownership question
+/// differently.
+#[must_use]
+fn namespace_delete_decision(
+    ns: &Namespace,
+    gateway_id: &str,
+    workspace: &str,
+) -> NamespaceDeleteDecision {
+    if !namespace_owned_by(ns, gateway_id, workspace) {
+        return NamespaceDeleteDecision::Decline;
+    }
+    match ns.metadata.uid.clone() {
+        Some(uid) => NamespaceDeleteDecision::DeletePinnedTo { uid },
+        None => NamespaceDeleteDecision::NoUid,
+    }
 }
 
 /// The ServiceAccount `SANDBOX_SERVICE_ACCOUNT` names in every pod spec.
@@ -1213,12 +1353,15 @@ impl SandboxProvisioner for KymaProvisioner {
         }
     }
 
-    async fn delete_workspace(&self, _workspace: &str) -> Result<(), DriverError> {
+    async fn delete_workspace(&self, workspace: &str) -> Result<(), DriverError> {
         match self.cfg.workspace_mode {
+            // Neither mode created a namespace, so neither may remove one.
+            // `Operator` especially: those namespaces belong to the platform
+            // team and predate the driver. Mirrors
+            // `workspace::workspace_delete_requires_namespace_access`, which
+            // is true only for `Managed`.
             WorkspaceMode::Shared | WorkspaceMode::Operator => Ok(()),
-            WorkspaceMode::Managed => Err(DriverError::FailedPrecondition(
-                "managed workspace deletion is not implemented yet".to_string(),
-            )),
+            WorkspaceMode::Managed => self.delete_managed_namespace(workspace).await,
         }
     }
 }
@@ -1731,6 +1874,164 @@ mod tests {
         }))
         .unwrap();
         assert!(!namespace_owned_by(&ns, "gw1", "team-a"));
+    }
+
+    // ---------- namespace delete decision ----------
+
+    fn namespace_with(labels: serde_json::Value, uid: Option<&str>) -> Namespace {
+        let mut metadata = serde_json::json!({
+            "name": "openshell-gw1-team-a",
+            "labels": labels,
+        });
+        if let Some(uid) = uid {
+            metadata["uid"] = serde_json::json!(uid);
+        }
+        serde_json::from_value(serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Namespace",
+            "metadata": metadata,
+        }))
+        .expect("must deserialize into k8s Namespace")
+    }
+
+    fn owned_labels() -> serde_json::Value {
+        serde_json::json!({
+            LABEL_MANAGED_BY: LABEL_MANAGED_BY_VALUE,
+            LABEL_GATEWAY_ID: "gw1",
+            LABEL_SANDBOX_WORKSPACE: "team-a",
+        })
+    }
+
+    /// The one path that ends in a namespace being destroyed, and the UID
+    /// it is pinned to must be the UID of the object whose labels were
+    /// just checked. Would catch the precondition being dropped, or being
+    /// filled from anything other than the inspected object.
+    #[test]
+    fn namespace_delete_decision_pins_the_delete_to_the_inspected_uid() {
+        let ns = namespace_with(owned_labels(), Some("uid-1"));
+        assert_eq!(
+            namespace_delete_decision(&ns, "gw1", "team-a"),
+            NamespaceDeleteDecision::DeletePinnedTo {
+                uid: "uid-1".to_string()
+            }
+        );
+    }
+
+    /// A namespace that merely matches the naming convention — another
+    /// gateway's, or a colliding gateway_id/workspace pair's — must never
+    /// reach the delete call. Would catch the ownership check being
+    /// bypassed on the teardown side while the create side still has it.
+    #[test]
+    fn namespace_delete_decision_declines_another_gateways_namespace() {
+        let ns = namespace_with(
+            serde_json::json!({
+                LABEL_MANAGED_BY: LABEL_MANAGED_BY_VALUE,
+                LABEL_GATEWAY_ID: "gw-other",
+                LABEL_SANDBOX_WORKSPACE: "team-a",
+            }),
+            Some("uid-1"),
+        );
+        assert_eq!(
+            namespace_delete_decision(&ns, "gw1", "team-a"),
+            NamespaceDeleteDecision::Decline
+        );
+    }
+
+    /// The catastrophic case: a namespace this driver never created, which
+    /// happens to sit at the derived name. No labels, but a perfectly good
+    /// uid — so a decision that looked only at the uid would delete it.
+    #[test]
+    fn namespace_delete_decision_declines_an_unlabelled_namespace() {
+        let ns: Namespace = serde_json::from_value(serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Namespace",
+            "metadata": { "name": "openshell-gw1-team-a", "uid": "uid-1" }
+        }))
+        .unwrap();
+        assert_eq!(
+            namespace_delete_decision(&ns, "gw1", "team-a"),
+            NamespaceDeleteDecision::Decline
+        );
+    }
+
+    /// Owned, but with no uid to pin to. Deleting unpinned would race with
+    /// a recreate, so the decision must be neither Delete nor Decline.
+    #[test]
+    fn namespace_delete_decision_refuses_to_delete_unpinned() {
+        let ns = namespace_with(owned_labels(), None);
+        assert_eq!(
+            namespace_delete_decision(&ns, "gw1", "team-a"),
+            NamespaceDeleteDecision::NoUid
+        );
+    }
+
+    /// The guardrail that makes this feature acceptable on a live cluster:
+    /// the delete target is computed from configuration plus the workspace
+    /// name, and nothing a caller can say escapes the
+    /// `openshell-{gateway_id}-` prefix. Would catch any future change that
+    /// let a request field name the namespace directly.
+    #[test]
+    fn managed_namespace_name_is_derived_not_supplied() {
+        for hostile in [
+            "kube-system",
+            "../kube-system",
+            "..%2fkube-system",
+            "a/../../kube-system",
+            "",
+            " kube-system",
+        ] {
+            let ns = crate::workspace::managed_namespace("gw1", hostile);
+            assert!(
+                ns.starts_with("openshell-gw1-"),
+                "workspace {hostile:?} escaped the derived prefix: {ns}"
+            );
+            assert_ne!(ns, "kube-system");
+            assert_ne!(ns, "default");
+        }
+        // Such a workspace never reaches the API server anyway: the derived
+        // name is not a DNS-1123 label, so both the create and the get are
+        // rejected. The prefix is the guarantee that matters here.
+    }
+
+    /// The delete side must target exactly what the create side made.
+    #[test]
+    fn delete_target_matches_the_bootstrapped_namespace_name() {
+        let created = managed_namespace_object("gw1", "team-a");
+        assert_eq!(
+            created["metadata"]["name"],
+            crate::workspace::managed_namespace("gw1", "team-a")
+        );
+    }
+
+    /// `Shared` shares one chart-installed namespace; deleting it would
+    /// take every other workspace with it. `DeleteWorkspace` must be a
+    /// no-op that performs no API call at all — the stub client here would
+    /// fail any request it made.
+    #[tokio::test]
+    async fn delete_workspace_is_a_no_op_in_shared_mode() {
+        let p = make_provisioner();
+        assert_eq!(p.cfg.workspace_mode, WorkspaceMode::Shared);
+        p.delete_workspace("team-a")
+            .await
+            .expect("shared mode must not touch the API server");
+    }
+
+    /// `Operator` namespaces belong to the platform team and predate the
+    /// driver; it never created them and must never remove them.
+    #[tokio::test]
+    async fn delete_workspace_is_a_no_op_in_operator_mode() {
+        let cfg = Config {
+            workspace_mode: WorkspaceMode::Operator,
+            gateway_id: "gw1".into(),
+            ..Config::default()
+        };
+        let svc = tower::service_fn(|_req: http::Request<kube::client::Body>| async move {
+            Ok::<_, std::convert::Infallible>(http::Response::new(kube::client::Body::empty()))
+        });
+        let p = KymaProvisioner::new(Client::new(svc, "test-ns"), cfg);
+        p.delete_workspace("team-a")
+            .await
+            .expect("operator mode must not touch the API server");
     }
 
     #[test]
