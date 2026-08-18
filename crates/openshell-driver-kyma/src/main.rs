@@ -47,9 +47,13 @@ async fn main() -> Result<()> {
     let cfg = Config::parse();
     init_tracing(&cfg.log_level);
 
+    openshell_driver_kyma::workspace::validate_workspace_mode(&cfg)
+        .map_err(|e| anyhow::anyhow!("invalid workspace configuration: {e}"))?;
+
     tracing::info!(
         socket = %cfg.socket,
         namespace = %cfg.namespace,
+        workspace_mode = ?cfg.workspace_mode,
         gpu_support = cfg.gpu_support,
         enable_apirule = cfg.enable_apirule,
         istio_inject_sandboxes = cfg.istio_inject_sandboxes,
@@ -59,14 +63,25 @@ async fn main() -> Result<()> {
     let kube_client = build_kube_client().await.context("build kube client")?;
 
     // PSA fail-fast: must happen before we bind the listener, so a
-    // misconfigured cluster never sees a half-up driver.
+    // misconfigured cluster never sees a half-up driver. Only meaningful
+    // under `Shared`, where `cfg.namespace` is the one static namespace the
+    // chart installs ahead of time — under `Managed`/`Operator` there is no
+    // single namespace to check yet at startup; that check moves into the
+    // per-workspace path in later phases.
     let enricher =
         Arc::new(KymaEnricher::new(kube_client.clone(), cfg.clone())) as Arc<dyn PlatformEnricher>;
-    enricher
-        .detect_psa(&cfg.namespace)
-        .await
-        .context("PSA pre-flight check")?;
-    tracing::info!(namespace = %cfg.namespace, "PSA enforce=privileged confirmed");
+    if cfg.workspace_mode == openshell_driver_kyma::workspace::WorkspaceMode::Shared {
+        enricher
+            .detect_psa(&cfg.namespace)
+            .await
+            .context("PSA pre-flight check")?;
+        tracing::info!(namespace = %cfg.namespace, "PSA enforce=privileged confirmed");
+    } else {
+        tracing::info!(
+            workspace_mode = ?cfg.workspace_mode,
+            "skipping startup PSA pre-flight check; not applicable outside Shared mode"
+        );
+    }
 
     let provisioner =
         Arc::new(KymaProvisioner::new(kube_client, cfg.clone())) as Arc<dyn SandboxProvisioner>;

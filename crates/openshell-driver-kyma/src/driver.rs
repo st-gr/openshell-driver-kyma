@@ -149,7 +149,8 @@ impl ComputeDriver for Driver {
         let name = sb.name.clone();
         let id = sb.id.clone();
         let workspace = sb.workspace.clone();
-        let kube_name = crate::provisioner::kube_resource_name(&workspace, &name);
+        let kube_name =
+            crate::workspace::kube_resource_name(self.cfg.workspace_mode, &workspace, &name);
         match self.provisioner.create(&sb).await {
             Ok(()) => {
                 self.metrics

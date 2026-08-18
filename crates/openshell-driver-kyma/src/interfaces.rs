@@ -57,6 +57,15 @@ pub trait SandboxProvisioner: Send + Sync + 'static {
     /// flag is off — the driver layer still gates the call site, this
     /// method only handles the HTTP for callers that pass a manifest.
     async fn apply_apirule(&self, manifest: serde_json::Value) -> Result<(), DriverError>;
+
+    /// Prepare whatever the configured mode needs before a sandbox in
+    /// `workspace` can be created. Must be idempotent: the gateway calls this
+    /// before *every* create, not once per workspace.
+    async fn ensure_workspace(&self, workspace: &str) -> Result<(), DriverError>;
+
+    /// Tear down what `ensure_workspace` created. Only Managed mode has
+    /// anything to remove.
+    async fn delete_workspace(&self, workspace: &str) -> Result<(), DriverError>;
 }
 
 /// Kyma-specific behaviors layered onto the bare provisioner: Pod Security

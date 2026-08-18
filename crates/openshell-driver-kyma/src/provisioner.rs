@@ -41,45 +41,9 @@ use tokio::sync::{mpsc, RwLock};
 use crate::helpers::{
     LABEL_SANDBOX_ID, LABEL_SANDBOX_NAME, LABEL_SANDBOX_NAMESPACE, LABEL_SANDBOX_WORKSPACE,
 };
+use crate::workspace::WorkspaceMode;
 
 const LABEL_MANAGED_BY: &str = "openshell.ai/managed-by";
-
-/// Kubernetes object names are DNS-1123 labels, capped at 63 characters.
-const MAX_KUBE_NAME_LEN: usize = 63;
-
-/// Build the Kubernetes object name for a sandbox.
-///
-/// Since v0.0.91 upstream qualifies every sandbox-derived object with its
-/// workspace so two sandboxes of the same name in different workspaces cannot
-/// collide in a shared namespace. This must match upstream's
-/// `kube_resource_name` exactly.
-#[must_use]
-pub fn kube_resource_name(workspace: &str, name: &str) -> String {
-    format!("{workspace}--{name}")
-}
-
-/// Reject sandbox/workspace pairs whose combined object name would exceed the
-/// DNS-1123 limit, so the failure is an actionable `InvalidArgument` at
-/// validate time rather than an opaque 422 from the API server at create time.
-///
-/// # Errors
-/// Returns `DriverError::InvalidArgument` when `{workspace}--{name}` exceeds
-/// 63 characters, or when the workspace is empty.
-pub fn validate_kube_resource_name(workspace: &str, name: &str) -> Result<(), DriverError> {
-    if workspace.is_empty() {
-        return Err(DriverError::InvalidArgument(
-            "sandbox workspace is required".to_string(),
-        ));
-    }
-    let combined = workspace.len() + 2 + name.len();
-    if combined > MAX_KUBE_NAME_LEN {
-        return Err(DriverError::InvalidArgument(format!(
-            "combined Kubernetes resource name '{workspace}--{name}' is {combined} characters, \
-             exceeding the DNS-1123 limit of {MAX_KUBE_NAME_LEN}"
-        )));
-    }
-    Ok(())
-}
 const LABEL_KAGENTI: &str = "kagenti.io/type";
 const LABEL_ISTIO_INJECT: &str = "sidecar.istio.io/inject";
 // Pod annotation read by the gateway after a successful TokenReview to
@@ -136,8 +100,30 @@ impl KymaProvisioner {
         }
     }
 
-    fn sandboxes_api(&self) -> Api<DynamicObject> {
-        Api::namespaced_with(self.client.clone(), &self.cfg.namespace, &self.sandbox_ar)
+    /// Namespace a sandbox in `workspace` lives in, under the configured mode.
+    fn namespace_for_workspace(&self, workspace: &str) -> Result<String, DriverError> {
+        crate::workspace::namespace_for(&self.cfg, workspace)
+    }
+
+    /// Sandbox-CR API scoped to `ns`, or cluster-wide when `None`.
+    fn sandboxes_api_for(&self, ns: Option<&str>) -> Api<DynamicObject> {
+        match ns {
+            Some(ns) => Api::namespaced_with(self.client.clone(), ns, &self.sandbox_ar),
+            None => Api::all_with(self.client.clone(), &self.sandbox_ar),
+        }
+    }
+
+    /// Namespace to search when only a sandbox id is known.
+    ///
+    /// `GetSandboxRequest` and `DeleteSandboxRequest` carry no workspace, so
+    /// in `Shared` mode there is exactly one namespace to look in, and in the
+    /// other modes there are many — hence the cluster-wide fallback, which
+    /// the mode's ClusterRole permits.
+    fn id_lookup_namespace(&self) -> Option<String> {
+        match self.cfg.workspace_mode {
+            WorkspaceMode::Shared => Some(self.cfg.namespace.clone()),
+            WorkspaceMode::Managed | WorkspaceMode::Operator => None,
+        }
     }
 
     /// Look a Sandbox CR up by its `openshell.ai/sandbox-id` label.
@@ -147,24 +133,39 @@ impl KymaProvisioner {
     /// therefore the only handle that survives the rename, which is why
     /// `get`/`delete` resolve through here instead of doing a direct name
     /// lookup. This mirrors the upstream Kubernetes driver.
+    ///
+    /// The returned object's own `metadata.namespace` is the source of truth
+    /// for where the CR actually lives — callers that need to act on it
+    /// again (patch, delete, find its pod) must read that field rather than
+    /// re-deriving a namespace from `cfg`, or they silently target the wrong
+    /// namespace under `Managed`/`Operator`.
     async fn find_by_sandbox_id(&self, sandbox_id: &str) -> Result<DynamicObject, DriverError> {
         let lp = ListParams::default().labels(&format!(
             "{LABEL_MANAGED_BY}=openshell,{LABEL_SANDBOX_ID}={sandbox_id}"
         ));
-        let list = self.sandboxes_api().list(&lp).await?;
+        let ns = self.id_lookup_namespace();
+        let list = self.sandboxes_api_for(ns.as_deref()).list(&lp).await?;
         list.items
             .into_iter()
             .next()
             .ok_or_else(|| DriverError::NotFound(sandbox_id.to_string()))
     }
 
-    /// Resolve a sandbox id to the Kubernetes object name of its CR.
-    async fn resolve_cr_name(&self, sandbox_id: &str) -> Result<String, DriverError> {
+    /// Resolve a sandbox id to its CR's Kubernetes object name and the
+    /// namespace it actually lives in, per `find_by_sandbox_id`'s contract.
+    async fn resolve_cr_location(&self, sandbox_id: &str) -> Result<(String, String), DriverError> {
         let obj = self.find_by_sandbox_id(sandbox_id).await?;
-        obj.metadata
+        let name = obj
+            .metadata
             .name
             .clone()
-            .ok_or_else(|| DriverError::NotFound(sandbox_id.to_string()))
+            .ok_or_else(|| DriverError::NotFound(sandbox_id.to_string()))?;
+        let namespace = obj
+            .metadata
+            .namespace
+            .clone()
+            .ok_or_else(|| DriverError::NotFound(sandbox_id.to_string()))?;
+        Ok((name, namespace))
     }
 
     /// Patch the CR's operating state, carrying its resourceVersion as an
@@ -178,6 +179,11 @@ impl KymaProvisioner {
         let kube_name = obj
             .metadata
             .name
+            .clone()
+            .ok_or_else(|| DriverError::NotFound(sandbox_id.to_string()))?;
+        let namespace = obj
+            .metadata
+            .namespace
             .clone()
             .ok_or_else(|| DriverError::NotFound(sandbox_id.to_string()))?;
         let resource_version = obj
@@ -197,7 +203,9 @@ impl KymaProvisioner {
 
         let patch =
             crate::lifecycle::operating_state_patch(&api_version, &resource_version, running);
-        self.sandboxes_api()
+        // Patch in the namespace the CR was actually found in, not
+        // `cfg.namespace` — under `Managed`/`Operator` those can differ.
+        self.sandboxes_api_for(Some(&namespace))
             .patch(&kube_name, &PatchParams::default(), &Patch::Merge(&patch))
             .await?;
         Ok(())
@@ -207,16 +215,28 @@ impl KymaProvisioner {
     async fn await_pod_gone(&self, sandbox_id: &str) -> Result<(), DriverError> {
         let deadline =
             std::time::Instant::now() + std::time::Duration::from_secs(self.cfg.stop_timeout_secs);
-        let pod_api: Api<k8s_openapi::api::core::v1::Pod> =
-            Api::namespaced(self.client.clone(), &self.cfg.namespace);
 
         loop {
-            let kube_name = match self.find_by_sandbox_id(sandbox_id).await {
-                Ok(o) => o.metadata.name.clone().unwrap_or_default(),
+            // Re-resolved every iteration (as before), and now also gives us
+            // the CR's actual namespace so the Pod lookup below targets the
+            // same namespace the CR — and therefore its pod — lives in,
+            // rather than `cfg.namespace`.
+            let (kube_name, namespace) = match self.find_by_sandbox_id(sandbox_id).await {
+                Ok(o) => {
+                    let name = o.metadata.name.clone().unwrap_or_default();
+                    let ns = o
+                        .metadata
+                        .namespace
+                        .clone()
+                        .ok_or_else(|| DriverError::NotFound(sandbox_id.to_string()))?;
+                    (name, ns)
+                }
                 // The CR vanished mid-stop; nothing left to wait for.
                 Err(DriverError::NotFound(_)) => return Ok(()),
                 Err(e) => return Err(e),
             };
+            let pod_api: Api<k8s_openapi::api::core::v1::Pod> =
+                Api::namespaced(self.client.clone(), &namespace);
             match pod_api.get(&kube_name).await {
                 Err(kube::Error::Api(s)) if s.code == 404 => return Ok(()),
                 Err(e) => return Err(e.into()),
@@ -244,10 +264,17 @@ impl KymaProvisioner {
     /// Tolerates AlreadyExists (a previous create attempt succeeded but
     /// the Sandbox CR create or a follow-up step failed; second attempt
     /// finds the PVC waiting). All other API errors propagate.
-    async fn ensure_sandbox_pvc(&self, sb: &DriverSandbox) -> Result<(), DriverError> {
+    async fn ensure_sandbox_pvc(
+        &self,
+        sb: &DriverSandbox,
+        namespace: &str,
+    ) -> Result<(), DriverError> {
         let pvc_api: Api<k8s_openapi::api::core::v1::PersistentVolumeClaim> =
-            Api::namespaced(self.client.clone(), &self.cfg.namespace);
-        let claim_name = format!("{}-workspace", kube_resource_name(&sb.workspace, &sb.name));
+            Api::namespaced(self.client.clone(), namespace);
+        let claim_name = format!(
+            "{}-workspace",
+            crate::workspace::kube_resource_name(self.cfg.workspace_mode, &sb.workspace, &sb.name)
+        );
 
         let mut spec = json!({
             "accessModes": ["ReadWriteOnce"],
@@ -263,7 +290,7 @@ impl KymaProvisioner {
                 "kind": "PersistentVolumeClaim",
                 "metadata": {
                     "name": claim_name,
-                    "namespace": self.cfg.namespace,
+                    "namespace": namespace,
                     "labels": {
                         LABEL_MANAGED_BY: "openshell",
                         LABEL_SANDBOX_ID: sb.id,
@@ -413,7 +440,14 @@ impl KymaProvisioner {
         // we just thread its name into the pod's `volumes` and the
         // agent container's `volumeMounts`.
         if !self.cfg.sandbox_storage_size.is_empty() {
-            let claim_name = format!("{}-workspace", kube_resource_name(&sb.workspace, &sb.name));
+            let claim_name = format!(
+                "{}-workspace",
+                crate::workspace::kube_resource_name(
+                    self.cfg.workspace_mode,
+                    &sb.workspace,
+                    &sb.name
+                )
+            );
             let volumes = pod_spec["volumes"]
                 .as_array_mut()
                 .expect("volumes initialized above");
@@ -547,11 +581,15 @@ impl KymaProvisioner {
         envs
     }
 
-    fn build_dynamic_object(&self, sb: &DriverSandbox) -> DynamicObject {
+    /// `namespace` is the already-resolved namespace this sandbox lives in
+    /// (see `namespace_for_workspace`) — it is recorded verbatim in the
+    /// `LABEL_SANDBOX_NAMESPACE` label/annotation and the object's own
+    /// `metadata.namespace`, never re-derived from `cfg.namespace` here.
+    fn build_dynamic_object(&self, sb: &DriverSandbox, namespace: &str) -> DynamicObject {
         let mut driver_labels: HashMap<String, String> = HashMap::new();
         driver_labels.insert(LABEL_SANDBOX_ID.into(), sb.id.clone());
         driver_labels.insert(LABEL_SANDBOX_NAME.into(), sb.name.clone());
-        driver_labels.insert(LABEL_SANDBOX_NAMESPACE.into(), self.cfg.namespace.clone());
+        driver_labels.insert(LABEL_SANDBOX_NAMESPACE.into(), namespace.to_string());
         driver_labels.insert(LABEL_SANDBOX_WORKSPACE.into(), sb.workspace.clone());
         driver_labels.insert(LABEL_MANAGED_BY.into(), "openshell".into());
         driver_labels.insert(LABEL_KAGENTI.into(), "agent".into());
@@ -576,10 +614,7 @@ impl KymaProvisioner {
             (ANNOTATION_SANDBOX_ID.to_string(), sb.id.clone()),
             (LABEL_SANDBOX_ID.to_string(), sb.id.clone()),
             (LABEL_SANDBOX_NAME.to_string(), sb.name.clone()),
-            (
-                LABEL_SANDBOX_NAMESPACE.to_string(),
-                self.cfg.namespace.clone(),
-            ),
+            (LABEL_SANDBOX_NAMESPACE.to_string(), namespace.to_string()),
             (LABEL_SANDBOX_WORKSPACE.to_string(), sb.workspace.clone()),
         ]
         .into_iter()
@@ -588,9 +623,10 @@ impl KymaProvisioner {
         // The CR is named `{workspace}--{name}` so sandboxes of the same name
         // in different workspaces cannot collide in a shared namespace. The
         // bare logical name lives in the labels/annotations above.
-        let kube_name = kube_resource_name(&sb.workspace, &sb.name);
+        let kube_name =
+            crate::workspace::kube_resource_name(self.cfg.workspace_mode, &sb.workspace, &sb.name);
         let mut obj = DynamicObject::new(&kube_name, &self.sandbox_ar);
-        obj.metadata.namespace = Some(self.cfg.namespace.clone());
+        obj.metadata.namespace = Some(namespace.to_string());
         obj.metadata.labels = Some(labels);
         obj.metadata.annotations = Some(annotations);
         obj.data = json!({ "spec": self.build_sandbox_spec(sb) });
@@ -613,33 +649,40 @@ impl SandboxProvisioner for KymaProvisioner {
         // PVC by claim name; if the PVC isn't there yet the agent-sandbox
         // controller's pod stays Pending until it appears. Failing here
         // is preferable to that visible-but-broken state.
-        validate_kube_resource_name(&sb.workspace, &sb.name)?;
+        crate::workspace::validate_kube_resource_name(
+            self.cfg.workspace_mode,
+            &sb.workspace,
+            &sb.name,
+        )?;
+        let namespace = self.namespace_for_workspace(&sb.workspace)?;
 
         if !self.cfg.sandbox_storage_size.is_empty() {
-            self.ensure_sandbox_pvc(sb).await?;
+            self.ensure_sandbox_pvc(sb, &namespace).await?;
         }
 
-        let obj = self.build_dynamic_object(sb);
-        self.sandboxes_api()
+        let obj = self.build_dynamic_object(sb, &namespace);
+        self.sandboxes_api_for(Some(&namespace))
             .create(&PostParams::default(), &obj)
             .await?;
         tracing::info!(
             sandbox_id = %sb.id,
             sandbox_name = %sb.name,
-            namespace = %self.cfg.namespace,
+            namespace = %namespace,
             "sandbox CR created"
         );
         Ok(())
     }
 
     async fn delete(&self, sandbox_id: &str) -> Result<(), DriverError> {
-        // Resolve id -> CR name first: the gateway knows nothing about our
-        // `{workspace}--{name}` object naming, so the id label is the only
-        // stable handle we can delete by.
-        let kube_name = self.resolve_cr_name(sandbox_id).await?;
+        // Resolve id -> CR name/namespace first: the gateway knows nothing
+        // about our `{workspace}--{name}` object naming, so the id label is
+        // the only stable handle we can delete by. The namespace comes from
+        // the found object itself, not `cfg.namespace` — under
+        // `Managed`/`Operator` they can differ.
+        let (kube_name, namespace) = self.resolve_cr_location(sandbox_id).await?;
 
         let result = match self
-            .sandboxes_api()
+            .sandboxes_api_for(Some(&namespace))
             .delete(&kube_name, &DeleteParams::default())
             .await
         {
@@ -657,7 +700,7 @@ impl SandboxProvisioner for KymaProvisioner {
         // Sandbox-CR error is the more actionable one.
         if !self.cfg.sandbox_storage_size.is_empty() {
             let pvc_api: Api<k8s_openapi::api::core::v1::PersistentVolumeClaim> =
-                Api::namespaced(self.client.clone(), &self.cfg.namespace);
+                Api::namespaced(self.client.clone(), &namespace);
             // Derived from the resolved CR name, not the bare sandbox name,
             // so it matches what `ensure_sandbox_pvc` actually created.
             let claim_name = format!("{kube_name}-workspace");
@@ -681,7 +724,8 @@ impl SandboxProvisioner for KymaProvisioner {
 
     async fn list(&self) -> Result<Vec<DriverSandbox>, DriverError> {
         let lp = ListParams::default().labels(&format!("{LABEL_MANAGED_BY}=openshell"));
-        let list = self.sandboxes_api().list(&lp).await?;
+        let ns = self.id_lookup_namespace();
+        let list = self.sandboxes_api_for(ns.as_deref()).list(&lp).await?;
         // Mirror upstream: one malformed CR must not break `list` for every
         // other sandbox, so unconvertible objects are logged and skipped.
         Ok(list
@@ -698,7 +742,8 @@ impl SandboxProvisioner for KymaProvisioner {
     }
 
     async fn watch(&self) -> Result<mpsc::Receiver<WatchEvent>, DriverError> {
-        let api = self.sandboxes_api();
+        let ns = self.id_lookup_namespace();
+        let api = self.sandboxes_api_for(ns.as_deref());
         let cfg = watcher::Config::default().labels(&format!("{LABEL_MANAGED_BY}=openshell"));
 
         let (tx, rx) = mpsc::channel::<WatchEvent>(64);
@@ -768,7 +813,14 @@ impl SandboxProvisioner for KymaProvisioner {
         // Events as platform-level WatchSandboxes events. Filtered to
         // `type=Warning` so Normal Events (cluster heartbeat, lifecycle
         // milestones) don't drown the stream.
-        let events_api: Api<CoreEvent> = Api::namespaced(self.client.clone(), &self.cfg.namespace);
+        // Shared: scoped to `cfg.namespace`, matching the CR watcher above.
+        // Otherwise cluster-wide — the `managed-by` label on the Sandbox CR
+        // watcher already keeps the fan-in scoped to our own sandboxes; the
+        // Event watcher itself has no such label to filter on server-side.
+        let events_api: Api<CoreEvent> = match ns.as_deref() {
+            Some(n) => Api::namespaced(self.client.clone(), n),
+            None => Api::all(self.client.clone()),
+        };
         let ev_tx = tx;
         let ev_cache = name_to_id;
         tokio::spawn(async move {
@@ -823,7 +875,11 @@ impl SandboxProvisioner for KymaProvisioner {
         // Reject a name that cannot become a DNS-1123 object name before the
         // gateway commits to the create — the API server would otherwise
         // reject it far later with a much less actionable message.
-        validate_kube_resource_name(&sb.workspace, &sb.name)?;
+        crate::workspace::validate_kube_resource_name(
+            self.cfg.workspace_mode,
+            &sb.workspace,
+            &sb.name,
+        )?;
 
         if let Some(spec) = sb.spec.as_ref() {
             // `count: 0` is an invalid request and surfaces as InvalidArgument.
@@ -911,6 +967,33 @@ impl SandboxProvisioner for KymaProvisioner {
             "APIRule created"
         );
         Ok(())
+    }
+
+    async fn ensure_workspace(&self, _workspace: &str) -> Result<(), DriverError> {
+        match self.cfg.workspace_mode {
+            // Upstream: `Shared => {}`. The namespace is static and installed
+            // by the chart; there is nothing to prepare.
+            WorkspaceMode::Shared => Ok(()),
+            // Landing in Phase 3 / Phase 4. Returning an error rather than
+            // Ok(()) is deliberate: a silent success here would let someone
+            // set --workspace-mode managed and get sandboxes in a namespace
+            // that was never bootstrapped.
+            WorkspaceMode::Managed | WorkspaceMode::Operator => {
+                Err(DriverError::Internal(anyhow::anyhow!(
+                    "workspace mode {:?} is not implemented yet",
+                    self.cfg.workspace_mode
+                )))
+            }
+        }
+    }
+
+    async fn delete_workspace(&self, _workspace: &str) -> Result<(), DriverError> {
+        match self.cfg.workspace_mode {
+            WorkspaceMode::Shared | WorkspaceMode::Operator => Ok(()),
+            WorkspaceMode::Managed => Err(DriverError::Internal(anyhow::anyhow!(
+                "managed workspace deletion is not implemented yet"
+            ))),
+        }
     }
 }
 
@@ -1300,36 +1383,13 @@ mod tests {
         assert!(matches!(err, DriverError::InvalidArgument(_)), "{err:?}");
     }
 
-    #[test]
-    fn kube_resource_name_is_workspace_qualified() {
-        assert_eq!(kube_resource_name("default", "hello"), "default--hello");
-        // The separator is two dashes so a single-dash workspace or sandbox
-        // name cannot forge a collision (`a-b` + `c` vs `a` + `b-c`).
-        assert_ne!(
-            kube_resource_name("a-b", "c"),
-            kube_resource_name("a", "b-c")
-        );
-    }
-
-    #[test]
-    fn validate_kube_resource_name_boundaries() {
-        // Exactly 63 is allowed; 64 is not.
-        let at_limit = "a".repeat(63 - "default".len() - 2);
-        assert!(validate_kube_resource_name("default", &at_limit).is_ok());
-        let over = format!("{at_limit}a");
-        assert!(validate_kube_resource_name("default", &over).is_err());
-        // An empty workspace would produce a leading `--`, which is not a
-        // valid DNS-1123 label.
-        assert!(validate_kube_resource_name("", "hello").is_err());
-    }
-
     /// The CR must carry every label `object_to_driver_sandbox` reads back,
     /// or a sandbox we create becomes one we cannot list.
     #[tokio::test]
     async fn build_dynamic_object_round_trips_through_object_to_driver_sandbox() {
         let p = make_provisioner();
         let sb = make_sandbox("id-9", "round-trip", "img");
-        let obj = p.build_dynamic_object(&sb);
+        let obj = p.build_dynamic_object(&sb, "test-ns");
 
         assert_eq!(obj.metadata.name.as_deref(), Some("default--round-trip"));
 
