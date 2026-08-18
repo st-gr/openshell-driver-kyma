@@ -209,6 +209,38 @@ ${list_out}"
 printf '%s\n' "$list_out"
 grep -q "$SB" <<<"$list_out" || fail "gateway did not list ${SB} by its bare name"
 
+# --- Assertion 3b: stop and start actually work ------------------------
+#
+# Unit tests cover the patch payload; only a live agent-sandbox controller
+# proves the replicas patch and the termination poll behave. This is the
+# assertion that would have caught 'stop returns Unimplemented'.
+#
+# Requires CLI >= 0.0.106: `openshell sandbox stop`/`start` do not exist
+# before that. CLI_VERSION tracks GATEWAY_REF (see
+# scripts/resolve-upstream-refs.sh), so if a maintainer pins GATEWAY_REF to
+# <= 0.0.105 in .github/upstream-compat.env during an upstream-breakage
+# window, this assertion will fail with "unrecognized subcommand" rather
+# than the failure it is meant to catch.
+log "ASSERT 3b: stop -> pod gone -> start -> pod back"
+
+osh sandbox stop "$SB" || fail "openshell sandbox stop failed"
+
+gone=0
+for _ in $(seq 1 40); do
+	if ! kubectl -n "$NS" get pod "$cr" >/dev/null 2>&1; then gone=1; break; fi
+	sleep 3
+done
+[[ $gone == 1 ]] || fail "pod $cr still present after stop"
+
+osh sandbox start "$SB" || fail "openshell sandbox start failed"
+
+back=0
+for _ in $(seq 1 40); do
+	if kubectl -n "$NS" get pod "$cr" >/dev/null 2>&1; then back=1; break; fi
+	sleep 3
+done
+[[ $back == 1 ]] || fail "pod $cr did not return after start"
+
 # --- Assertion 4: nothing errored ----------------------------------------
 #
 # Capture the logs into a variable and check kubectl's own exit status
