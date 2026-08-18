@@ -160,17 +160,41 @@ impl ComputeDriver for Driver {
                 // here does NOT roll back the Sandbox CR; we surface it as
                 // a metric and log so operators can investigate. Returning
                 // the create-success keeps the gateway happy.
+                //
+                // The namespace is resolved once, here, and passed to both
+                // `render_apirule` (so it lands in the manifest) and
+                // `apply_apirule` (so it's the API target) — that is what
+                // keeps the two from disagreeing under Managed/Operator
+                // mode. `create()` already resolved the same value via the
+                // same `namespace_for` for this workspace/mode to place the
+                // Sandbox CR, so a resolution error here is not expected in
+                // practice, but is handled the same way as an apply
+                // failure rather than risked as a silent skip.
                 if self.cfg.enable_apirule {
-                    if let Some(manifest) = self
-                        .enricher
-                        .render_apirule(&id, &kube_name, &name, &workspace)
-                    {
-                        if let Err(e) = self.provisioner.apply_apirule(manifest).await {
+                    match crate::workspace::namespace_for(&self.cfg, &workspace) {
+                        Ok(namespace) => {
+                            if let Some(manifest) = self
+                                .enricher
+                                .render_apirule(&id, &kube_name, &name, &workspace, &namespace)
+                            {
+                                if let Err(e) =
+                                    self.provisioner.apply_apirule(manifest, &namespace).await
+                                {
+                                    self.metrics.sandbox_failed(&name, "apirule_failed");
+                                    tracing::warn!(
+                                        sandbox_name = %name,
+                                        error = %e,
+                                        "APIRule create failed; sandbox CR remains"
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
                             self.metrics.sandbox_failed(&name, "apirule_failed");
                             tracing::warn!(
                                 sandbox_name = %name,
                                 error = %e,
-                                "APIRule create failed; sandbox CR remains"
+                                "APIRule namespace resolution failed; sandbox CR remains"
                             );
                         }
                     }

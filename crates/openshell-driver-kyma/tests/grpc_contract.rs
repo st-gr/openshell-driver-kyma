@@ -51,7 +51,11 @@ mock! {
         async fn has_gpu_capacity(&self, count: u32) -> Result<bool, DriverError>;
         async fn start_sandbox(&self, sandbox_id: &str) -> Result<(), DriverError>;
         async fn stop_sandbox(&self, sandbox_id: &str) -> Result<(), DriverError>;
-        async fn apply_apirule(&self, manifest: serde_json::Value) -> Result<(), DriverError>;
+        async fn apply_apirule(
+            &self,
+            manifest: serde_json::Value,
+            namespace: &str,
+        ) -> Result<(), DriverError>;
         async fn ensure_workspace(&self, workspace: &str) -> Result<(), DriverError>;
         async fn delete_workspace(&self, workspace: &str) -> Result<(), DriverError>;
     }
@@ -73,6 +77,7 @@ mock! {
             kube_name: &str,
             sandbox_name: &str,
             workspace: &str,
+            namespace: &str,
         ) -> Option<serde_json::Value>;
     }
 }

@@ -929,22 +929,25 @@ impl SandboxProvisioner for KymaProvisioner {
         self.await_pod_gone(sandbox_id).await
     }
 
-    async fn apply_apirule(&self, manifest: serde_json::Value) -> Result<(), DriverError> {
+    async fn apply_apirule(
+        &self,
+        manifest: serde_json::Value,
+        namespace: &str,
+    ) -> Result<(), DriverError> {
         let gvk = GroupVersionKind {
             group: "gateway.kyma-project.io".into(),
             version: "v2".into(),
             kind: "APIRule".into(),
         };
         let ar = ApiResource::from_gvk_with_plural(&gvk, "apirules");
-        let api: Api<DynamicObject> =
-            Api::namespaced_with(self.client.clone(), &self.cfg.namespace, &ar);
+        let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
 
         let name = manifest
             .pointer("/metadata/name")
             .and_then(|v| v.as_str())
             .unwrap_or("");
         let mut obj = DynamicObject::new(name, &ar);
-        obj.metadata.namespace = Some(self.cfg.namespace.clone());
+        obj.metadata.namespace = Some(namespace.to_string());
         if let Some(labels) = manifest
             .pointer("/metadata/labels")
             .and_then(|v| v.as_object())
@@ -963,7 +966,7 @@ impl SandboxProvisioner for KymaProvisioner {
         api.create(&PostParams::default(), &obj).await?;
         tracing::info!(
             apirule = %name,
-            namespace = %self.cfg.namespace,
+            namespace = %namespace,
             "APIRule created"
         );
         Ok(())
