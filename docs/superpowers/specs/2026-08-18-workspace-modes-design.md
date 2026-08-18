@@ -259,26 +259,26 @@ the failure class this repo's upstream tracking exists to prevent.
 
 ## Implementation phasing
 
-Three phases, each independently mergeable and each leaving `main` shippable.
+Five phases, each independently mergeable and each leaving `main` shippable.
 `Shared` stays the default throughout, so nothing changes for the deployed
 cluster until someone opts in.
 
 0. **Proto bump to v0.0.107.** The vendored proto is pinned at v0.0.106 and
    does **not** contain `EnsureWorkspace`/`DeleteWorkspace`. Everything below
    depends on `make proto-vendor TAG=v0.0.107` landing first.
-1. **Shared parity.** `workspace.rs` with all three modes defined, both
+1. **Start/stop.** Sequenced first because it is the only phase closing a
+   functional gap users hit today (`openshell sandbox stop` currently fails).
+   Independent of the workspace work; costs a rebase over later
+   `provisioner.rs` churn, accepted deliberately for earlier value.
+2. **Shared parity.** `workspace.rs` with all three modes defined, both
    workspace RPCs implemented, `Shared` wired end to end. Provisioner switches
    to resolved namespaces. No RBAC change, no chart values beyond
-   `workspaceMode`. Ships a working contract implementation with zero
-   behaviour change.
-2. **Managed.** Bootstrap, guarded delete, conditional ClusterRole,
+   `workspaceMode`. Zero behaviour change.
+3. **Managed.** Bootstrap, guarded delete, conditional ClusterRole,
    `gatewayId`, the `managed` smoke job. The destructive phase; it should not
    share a PR with anything else.
-3. **Operator.** Allowlist config, validation, the documented prerequisite.
+4. **Operator.** Allowlist config, validation, the documented prerequisite.
    Smallest phase; no bootstrap, no namespace lifecycle.
-4. **Start/stop.** Independent of phases 1-3; could land in either order.
-   Sequenced last only because the workspace work touches `provisioner.rs`
-   more heavily and rebasing start/stop over it is cheaper than the reverse.
 
 ## Out of scope
 
