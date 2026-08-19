@@ -12,6 +12,9 @@
 # patch (see each file's "VENDOR LOCAL PATCH" block, when present)
 # reversed. The check script undoes both transformations the same way
 # before hashing, so local edits to the body still fail the check.
+#
+# The provenance header's own `commit:` line is checked too (against
+# `commit` below), so a doctored header no longer passes silently.
 repo = "https://github.com/NVIDIA/OpenShell"
 ref = "v0.0.107"
 commit = "88cf35efe426024eb19fdc403f594a1602f44d49"
@@ -22,3 +25,18 @@ header_lines = 10
 upstream_path = "crates/openshell-core/src/driver_mounts.rs"
 local_path = "crates/openshell-driver-kyma/src/vendor/driver_mounts.rs"
 sha256 = "7a9cd8eeca0f52c6d2046a1b8ad3459422bc12d5cd48239f7ef9cbf1a3f9f610"
+
+# Not itself vendored (it lives in a sibling module we do not pull in — see
+# driver_mounts.rs's "VENDOR LOCAL PATCH" block), but it is the upstream
+# source of truth for CONTROL_ROOTS and OCI_RUNTIME_MOUNT_ROOTS, which our
+# patch block reproduces as literals. kind = "constants" tells the check
+# script to resolve upstream's named constants to their string values and
+# compare those values, in order, against the literals in the patch block —
+# instead of comparing this file byte-for-byte against a local copy we do
+# not have. This is what makes an edit *inside* the patch block (e.g.
+# dropping "/run/openshell" from CONTROL_ROOTS) show up as drift.
+[[files]]
+upstream_path = "crates/openshell-core/src/container_paths.rs"
+local_path = "crates/openshell-driver-kyma/src/vendor/driver_mounts.rs"
+kind = "constants"
+sha256 = "14e240f366a55b056b7a0a831165bc6be574dea0d05a7abb0da28c0734da2cf5"
