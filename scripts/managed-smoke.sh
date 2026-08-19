@@ -171,16 +171,29 @@ kubectl -n "$NS_DEFAULT" get sa openshell-sandbox >/dev/null 2>&1 \
 # guardrail -- the same misconception ASSERT M1 had before its fix, one
 # layer along.
 #
+# A third trap, found the hard way: the same sandbox create that bootstraps
+# $NS_DECOY also leaves the workspace non-empty, and the gateway refuses to
+# delete a non-empty workspace outright -- workspace.rs's
+# "still contains resources" check, status FAILED_PRECONDITION -- before
+# the RPC ever reaches delete_managed_namespace's ownership guardrail. So
+# the sandbox created to trigger the bootstrap must be deleted again before
+# `workspace delete` is called, or this assertion fails for a reason that
+# has nothing to do with ownership.
+#
 # Instead: `workspace create` registers "decoy" with the gateway (needed so
 # `--workspace decoy` below and `workspace delete decoy` further down are
 # valid RPCs rather than 404s), then a real sandbox create scoped to that
 # workspace -- mirroring ASSERT M1's idiom of polling for the CR rather
 # than waiting on the CLI to return, since it never will -- is what
-# actually makes the driver bootstrap and label $NS_DECOY. Only then do we
-# strip exactly the three ownership labels the guardrail checks and call
-# `workspace delete` for real. The RPC reaches delete_managed_namespace's
-# namespace_owned_by check, which must see the mismatch and decline --
-# returning Ok, not erroring.
+# actually makes the driver bootstrap and label $NS_DECOY. Once the
+# ownership labels are confirmed, the sandbox is deleted again (polling for
+# the CR to disappear, then confirming $NS_DECOY itself is untouched -- a
+# sandbox delete only ever removes the CR and its PVC, never the namespace)
+# so the workspace is empty. Only then do we strip exactly the three
+# ownership labels the guardrail checks and call `workspace delete` for
+# real. The RPC reaches delete_managed_namespace's namespace_owned_by
+# check, which must see the mismatch and decline -- returning Ok, not
+# erroring.
 log "ASSERT M2: an UNOWNED namespace is NOT deleted (ownership guardrail)"
 osh workspace create --name decoy || fail "workspace create decoy failed"
 
@@ -206,6 +219,28 @@ for key in openshell.ai/managed-by openshell.ai/gateway-id openshell.ai/sandbox-
 	[[ -n $val ]] || fail "$NS_DECOY is missing ownership label $key"
 done
 
+# The sandbox created above to trigger the bootstrap now has to go: a
+# non-empty workspace is refused by the gateway before the RPC ever reaches
+# the ownership guardrail (see the third trap in the comment above). Delete
+# it and poll for the CR to disappear rather than assuming the delete is
+# synchronous.
+osh sandbox delete --workspace decoy m2 || fail "sandbox delete m2 failed"
+gone=0
+for _ in $(seq 1 40); do
+	if ! kubectl -n "$NS_DECOY" get sandbox m2 >/dev/null 2>&1; then
+		gone=1
+		break
+	fi
+	sleep 3
+done
+[[ $gone == 1 ]] || fail "sandbox m2 was not deleted from ${NS_DECOY}"
+
+# A sandbox delete removes only the CR and its PVC -- it must never touch
+# the namespace. Confirm that before trusting the "workspace delete should
+# succeed" assertion below to mean what it claims.
+kubectl get ns "$NS_DECOY" >/dev/null 2>&1 \
+	|| fail "deleting sandbox m2 unexpectedly removed the managed namespace $NS_DECOY"
+
 # Strip the ownership labels. A trailing '-' on a label key removes it.
 kubectl label namespace "$NS_DECOY" \
 	openshell.ai/managed-by- \
@@ -230,6 +265,22 @@ phase=$(kubectl get ns "$NS_DECOY" -o jsonpath='{.status.phase}')
 
 # --- ASSERT M3: an OWNED namespace IS deleted ------------------------------
 log "ASSERT M3: an OWNED namespace IS deleted"
+# Same trap as ASSERT M2's third one: ASSERT M1's sandbox 'm1' is still
+# sitting in $NS_DEFAULT, and the gateway refuses to delete a non-empty
+# workspace before the RPC ever reaches the driver. Clear it first.
+osh sandbox delete m1 || fail "sandbox delete m1 failed"
+gone=0
+for _ in $(seq 1 40); do
+	if ! kubectl -n "$NS_DEFAULT" get sandbox m1 >/dev/null 2>&1; then
+		gone=1
+		break
+	fi
+	sleep 3
+done
+[[ $gone == 1 ]] || fail "sandbox m1 was not deleted from ${NS_DEFAULT}"
+kubectl get ns "$NS_DEFAULT" >/dev/null 2>&1 \
+	|| fail "deleting sandbox m1 unexpectedly removed the managed namespace $NS_DEFAULT"
+
 osh workspace delete default || fail "workspace delete default failed"
 gone=0
 for _ in $(seq 1 40); do
