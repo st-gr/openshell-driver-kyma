@@ -162,13 +162,42 @@ kubectl -n "$NS_DEFAULT" get sa openshell-sandbox >/dev/null 2>&1 \
 # RPC ever reaches the driver, so the namespace would survive because
 # nothing ran, not because the guardrail declined. That passes vacuously.
 #
-# Instead: let the driver create and label the decoy namespace itself via a
-# real `workspace create`, strip exactly the three ownership labels the
-# guardrail checks, and then call `workspace delete` for real. The RPC
-# reaches delete_managed_namespace's namespace_owned_by check, which must
-# see the mismatch and decline -- returning Ok, not erroring.
+# A second, subtler trap: `openshell workspace create` alone does not
+# bootstrap the namespace either. It only registers the workspace name with
+# the gateway -- ensure_workspace is never called from that path (see the
+# bootstrap comment on KymaProvisioner::create in provisioner.rs), so a
+# decoy built from `workspace create` alone would never see $NS_DECOY come
+# into existence, and this assertion would fail before it ever reached the
+# guardrail -- the same misconception ASSERT M1 had before its fix, one
+# layer along.
+#
+# Instead: `workspace create` registers "decoy" with the gateway (needed so
+# `--workspace decoy` below and `workspace delete decoy` further down are
+# valid RPCs rather than 404s), then a real sandbox create scoped to that
+# workspace -- mirroring ASSERT M1's idiom of polling for the CR rather
+# than waiting on the CLI to return, since it never will -- is what
+# actually makes the driver bootstrap and label $NS_DECOY. Only then do we
+# strip exactly the three ownership labels the guardrail checks and call
+# `workspace delete` for real. The RPC reaches delete_managed_namespace's
+# namespace_owned_by check, which must see the mismatch and decline --
+# returning Ok, not erroring.
 log "ASSERT M2: an UNOWNED namespace is NOT deleted (ownership guardrail)"
 osh workspace create --name decoy || fail "workspace create decoy failed"
+
+osh sandbox create --workspace decoy --name m2 --from ghcr.io/nvidia/openshell-community/sandboxes/base:latest \
+	-- sleep infinity >/tmp/create-m2.log 2>&1 &
+CREATE_PID=$!
+cr=""
+for _ in $(seq 1 40); do
+	if kubectl -n "$NS_DECOY" get sandbox m2 >/dev/null 2>&1; then
+		cr=m2
+		break
+	fi
+	sleep 3
+done
+kill "$CREATE_PID" 2>/dev/null || true
+[[ -n $cr ]] || { cat /tmp/create-m2.log >&2; fail "sandbox CR 'm2' never appeared in ${NS_DECOY}"; }
+
 kubectl get ns "$NS_DECOY" >/dev/null 2>&1 || fail "managed namespace $NS_DECOY was not created"
 
 for key in openshell.ai/managed-by openshell.ai/gateway-id openshell.ai/sandbox-workspace; do
