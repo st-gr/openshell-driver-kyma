@@ -751,7 +751,24 @@ impl KymaProvisioner {
         // Linux user-namespace remap. K8s 1.30+ kubelet-managed UID/GID
         // mapping; container UID 0 lands on a non-root host UID. Pod
         // remains rootful from its own POV but loses host-root.
-        if self.cfg.enable_user_namespaces {
+        //
+        // Per-sandbox `platform_config.host_users` overrides the
+        // cluster-wide `cfg.enable_user_namespaces` default. Note the
+        // inversion: `host_users: true` means "use the host user
+        // namespace" (i.e. do NOT remap), so `use_user_namespaces =
+        // !host_users`. Absent, or present with a non-bool value, falls
+        // back to the cluster-wide default. Mirrors upstream
+        // `driver.rs:3504-3505`:
+        //   let use_user_namespaces = platform_config_bool(template, "host_users")
+        //       .map_or(params.enable_user_namespaces, |host_users| !host_users);
+        let host_users_override = template
+            .and_then(|t| t.platform_config.as_ref())
+            .and_then(|pc| pc.fields.get("host_users"))
+            .and_then(|v| v.kind.as_ref())
+            .and_then(bool_from_value_kind);
+        let use_user_namespaces =
+            host_users_override.map_or(self.cfg.enable_user_namespaces, |host_users| !host_users);
+        if use_user_namespaces {
             pod_spec["hostUsers"] = Value::Bool(false);
         }
 
@@ -783,7 +800,7 @@ impl KymaProvisioner {
         let mut annotations: HashMap<String, String> = HashMap::new();
         annotations.insert(ANNOTATION_SANDBOX_ID.into(), sb.id.clone());
 
-        json!({
+        let mut sandbox_spec = json!({
             "podTemplate": {
                 "metadata": {
                     "labels": labels,
@@ -791,7 +808,22 @@ impl KymaProvisioner {
                 },
                 "spec": pod_spec,
             }
-        })
+        });
+
+        // Optional `agentSocket` passthrough from the template. Set only
+        // when non-empty so sandboxes that don't use it see no change to
+        // the CR body. Mirrors upstream `driver.rs:3344-3349`:
+        //   if !template.agent_socket_path.is_empty() {
+        //       root.insert("agentSocket".to_string(), serde_json::json!(template.agent_socket_path));
+        //   }
+        if let Some(socket_path) = template
+            .map(|t| t.agent_socket_path.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            sandbox_spec["agentSocket"] = Value::String(socket_path.to_string());
+        }
+
+        sandbox_spec
     }
 
     fn build_full_env_list(&self, sb: &DriverSandbox) -> Vec<Value> {
@@ -1047,6 +1079,13 @@ where
 fn string_from_value_kind(kind: &prost_types::value::Kind) -> Option<String> {
     match kind {
         prost_types::value::Kind::StringValue(s) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+fn bool_from_value_kind(kind: &prost_types::value::Kind) -> Option<bool> {
+    match kind {
+        prost_types::value::Kind::BoolValue(b) => Some(*b),
         _ => None,
     }
 }
@@ -1446,6 +1485,18 @@ mod tests {
         KymaProvisioner::new(client, cfg)
     }
 
+    fn make_provisioner_with_user_namespaces(enable_user_namespaces: bool) -> KymaProvisioner {
+        let cfg = Config {
+            namespace: "test-ns".into(),
+            enable_user_namespaces,
+            ..Config::default()
+        };
+        let svc = tower::service_fn(|_req: http::Request<kube::client::Body>| async move {
+            Ok::<_, std::convert::Infallible>(http::Response::new(kube::client::Body::empty()))
+        });
+        KymaProvisioner::new(Client::new(svc, "test-ns"), cfg)
+    }
+
     fn make_sandbox(id: &str, name: &str, image: &str) -> DriverSandbox {
         DriverSandbox {
             id: id.into(),
@@ -1461,6 +1512,15 @@ mod tests {
                 ..Default::default()
             }),
             ..Default::default()
+        }
+    }
+
+    /// Builds a `prost_types::Struct` with a single field, for populating
+    /// `DriverSandboxTemplate.platform_config` in tests.
+    fn platform_config_with(key: &str, kind: prost_types::value::Kind) -> prost_types::Struct {
+        prost_types::Struct {
+            fields: std::iter::once((key.to_string(), prost_types::Value { kind: Some(kind) }))
+                .collect(),
         }
     }
 
@@ -1551,6 +1611,168 @@ mod tests {
         // Pod-level hostUsers: false signals the kubelet to set up a UID/
         // GID remap for this pod.
         assert_eq!(spec["podTemplate"]["spec"]["hostUsers"], false);
+    }
+
+    // ---------- platform_config.host_users overrides ----------
+    //
+    // Upstream (driver.rs:3504-3505):
+    //   let use_user_namespaces = platform_config_bool(template, "host_users")
+    //       .map_or(params.enable_user_namespaces, |host_users| !host_users);
+    //
+    // Note the inversion: `host_users: true` means "use the host user
+    // namespace", i.e. `use_user_namespaces = false`.
+
+    #[tokio::test]
+    async fn build_sandbox_spec_host_users_key_absent_falls_back_to_cluster_default_off() {
+        // platform_config is present (so the accessor walks into it) but the
+        // "host_users" key itself is absent. Catches a mutant that treats
+        // "platform_config is Some" as "override is present" instead of
+        // checking the specific field.
+        let p = make_provisioner_with_user_namespaces(false);
+        let mut sb = make_sandbox("sb-1", "x", "img");
+        sb.spec
+            .as_mut()
+            .unwrap()
+            .template
+            .as_mut()
+            .unwrap()
+            .platform_config = Some(platform_config_with(
+            "unrelated",
+            prost_types::value::Kind::StringValue("x".into()),
+        ));
+        let spec = p.build_sandbox_spec(&sb);
+        assert!(spec["podTemplate"]["spec"].get("hostUsers").is_none());
+    }
+
+    #[tokio::test]
+    async fn build_sandbox_spec_host_users_key_absent_falls_back_to_cluster_default_on() {
+        let p = make_provisioner_with_user_namespaces(true);
+        let mut sb = make_sandbox("sb-1", "x", "img");
+        sb.spec
+            .as_mut()
+            .unwrap()
+            .template
+            .as_mut()
+            .unwrap()
+            .platform_config = Some(platform_config_with(
+            "unrelated",
+            prost_types::value::Kind::StringValue("x".into()),
+        ));
+        let spec = p.build_sandbox_spec(&sb);
+        assert_eq!(spec["podTemplate"]["spec"]["hostUsers"], false);
+    }
+
+    #[tokio::test]
+    async fn build_sandbox_spec_host_users_true_disables_user_namespaces_regardless_of_cluster_flag(
+    ) {
+        // `host_users: true` must win over the cluster-wide default in BOTH
+        // directions. This is the critical inversion test: a backwards
+        // `!host_users` (i.e. using `host_users` directly instead of its
+        // negation) would set hostUsers=false here instead of leaving it
+        // unset when the cluster flag is on.
+        for cluster_default in [false, true] {
+            let p = make_provisioner_with_user_namespaces(cluster_default);
+            let mut sb = make_sandbox("sb-1", "x", "img");
+            sb.spec
+                .as_mut()
+                .unwrap()
+                .template
+                .as_mut()
+                .unwrap()
+                .platform_config = Some(platform_config_with(
+                "host_users",
+                prost_types::value::Kind::BoolValue(true),
+            ));
+            let spec = p.build_sandbox_spec(&sb);
+            assert!(
+                spec["podTemplate"]["spec"].get("hostUsers").is_none(),
+                "host_users:true must disable the namespace remap even when cluster default is {cluster_default}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn build_sandbox_spec_host_users_false_enables_user_namespaces_regardless_of_cluster_flag(
+    ) {
+        // `host_users: false` must win over the cluster-wide default in BOTH
+        // directions. This is the other half of the inversion test: a
+        // backwards mapping would leave hostUsers unset here instead of
+        // false when the cluster flag is off.
+        for cluster_default in [false, true] {
+            let p = make_provisioner_with_user_namespaces(cluster_default);
+            let mut sb = make_sandbox("sb-1", "x", "img");
+            sb.spec
+                .as_mut()
+                .unwrap()
+                .template
+                .as_mut()
+                .unwrap()
+                .platform_config = Some(platform_config_with(
+                "host_users",
+                prost_types::value::Kind::BoolValue(false),
+            ));
+            let spec = p.build_sandbox_spec(&sb);
+            assert_eq!(
+                spec["podTemplate"]["spec"]["hostUsers"], false,
+                "host_users:false must enable the namespace remap even when cluster default is {cluster_default}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn build_sandbox_spec_host_users_non_bool_value_treated_as_absent() {
+        // A non-bool "host_users" value (e.g. a string) must be ignored,
+        // exactly like upstream's `platform_config_bool_returns_none_for_non_bool`
+        // (driver.rs:7100+). Falling back to the cluster default (on, here)
+        // proves it is genuinely treated as absent rather than, say,
+        // truthy-coerced.
+        let p = make_provisioner_with_user_namespaces(true);
+        let mut sb = make_sandbox("sb-1", "x", "img");
+        sb.spec
+            .as_mut()
+            .unwrap()
+            .template
+            .as_mut()
+            .unwrap()
+            .platform_config = Some(platform_config_with(
+            "host_users",
+            prost_types::value::Kind::StringValue("true".into()),
+        ));
+        let spec = p.build_sandbox_spec(&sb);
+        assert_eq!(spec["podTemplate"]["spec"]["hostUsers"], false);
+    }
+
+    // ---------- agent_socket_path passthrough ----------
+    //
+    // Upstream (driver.rs:3344-3349):
+    //   if !template.agent_socket_path.is_empty() {
+    //       root.insert("agentSocket".to_string(), serde_json::json!(template.agent_socket_path));
+    //   }
+
+    #[tokio::test]
+    async fn build_sandbox_spec_agent_socket_path_set_when_non_empty() {
+        let p = make_provisioner();
+        let mut sb = make_sandbox("sb-1", "x", "img");
+        sb.spec
+            .as_mut()
+            .unwrap()
+            .template
+            .as_mut()
+            .unwrap()
+            .agent_socket_path = "/var/run/openshell/agent.sock".into();
+        let spec = p.build_sandbox_spec(&sb);
+        assert_eq!(spec["agentSocket"], "/var/run/openshell/agent.sock");
+    }
+
+    #[tokio::test]
+    async fn build_sandbox_spec_agent_socket_path_absent_when_empty() {
+        // agent_socket_path defaults to "" (proto3 default). The key must
+        // be entirely absent, not present as an empty string, so the CR
+        // body is unchanged for every sandbox that doesn't set this field.
+        let p = make_provisioner();
+        let sb = make_sandbox("sb-1", "x", "img");
+        let spec = p.build_sandbox_spec(&sb);
+        assert!(spec.get("agentSocket").is_none());
     }
 
     #[tokio::test]
