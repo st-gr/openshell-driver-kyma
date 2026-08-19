@@ -10,9 +10,25 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 - **Implemented the `EnsureWorkspace` and `DeleteWorkspace` RPCs**, backed by
   a new `src/workspace.rs` that centralizes every tenancy rule behind three
-  modes: `Shared` (default), `Managed`, and `Operator`. Only `Shared` is
-  implemented today — `Managed` and `Operator` return an explicit "not
-  implemented yet" error; they land in later phases.
+  modes: `Shared` (default), `Managed`, and `Operator`. All three are now
+  fully implemented: `Shared` reproduces this driver's pre-existing
+  single-namespace behavior, `Managed` derives, creates and tears down a
+  namespace per workspace, and `Operator` resolves sandboxes into
+  pre-existing, allowlisted namespaces that a platform team owns — the
+  driver only ever reads them, and never creates or deletes them.
+- **Implemented `Operator` workspace mode.** `ensure_workspace` resolves the
+  namespace through the allowlist check already in `workspace::namespace_for`
+  (`PermissionDenied` for a workspace that isn't allowlisted), then verifies
+  the namespace carries `pod-security.kubernetes.io/enforce=privileged` as a
+  genuine precondition — unlike `Managed`, where the same check is a
+  post-condition on a label the driver itself just applied. `delete_workspace`
+  stays a no-op under `Operator`: the driver never created these namespaces
+  and must never remove them. The chart's ClusterRole for `operator` gains
+  `namespaces: ["get"]` (never `create`/`delete`) so that precondition check
+  can read the namespace; see the new "Operator mode prerequisite" section of
+  `docs/internal/runbook-upstream-sync.md` for what the platform team must
+  prepare — the PSA label and an `openshell-sandbox` ServiceAccount — before
+  adding a namespace to `driver.operatorNamespaceAllowlist`.
 - **Added the `driver.workspaceMode` Helm value**, defaulting to `shared`.
   It is passed to the driver as `--workspace-mode` and accepts `shared`,
   `managed`, or `operator`. A default install is unaffected: `shared`

@@ -39,10 +39,17 @@
 # managed additionally gets namespaces get/create/delete and
 # serviceaccounts create — both are exercised only from
 # provisioner.rs::bootstrap_managed_namespace and ::delete_managed_namespace,
-# which ensure_workspace/delete_workspace call for Managed only (Operator's
-# ensure_workspace is not implemented yet and returns an error; Operator's
-# delete_workspace is a no-op). "list" on namespaces is deliberately absent:
-# nothing in the driver calls it.
+# which ensure_workspace/delete_workspace call for Managed only.
+#
+# operator gets namespaces get ONLY — provisioner.rs::verify_psa_label does
+# Api::<Namespace>::all(client).get(namespace) as a precondition check in
+# ensure_workspace. No create, no delete, no serviceaccounts: those
+# namespaces are pre-existing and platform-team-owned (the allowlist check
+# in workspace::namespace_for is what gates access, not RBAC), and granting
+# the driver write access to them would contradict the entire premise of the
+# mode. Operator's delete_workspace is a no-op and issues no API call at
+# all. "list" on namespaces is deliberately absent in both modes: nothing in
+# the driver calls it.
 #
 # Deliberately does NOT grant networkpolicies:create. The driver never
 # creates a NetworkPolicy in managed mode (see provisioner.rs::
@@ -78,10 +85,12 @@ rules:
     resources: ["apirules"]
     verbs: ["create"]
 {{- end }}
-{{- if eq .Values.driver.workspaceMode "managed" }}
+{{- if or (eq .Values.driver.workspaceMode "managed") (eq .Values.driver.workspaceMode "operator") }}
   - apiGroups: [""]
     resources: ["namespaces"]
-    verbs: ["get", "create", "delete"]
+    verbs: [{{ if eq .Values.driver.workspaceMode "managed" }}"get", "create", "delete"{{ else }}"get"{{ end }}]
+{{- end }}
+{{- if eq .Values.driver.workspaceMode "managed" }}
   - apiGroups: [""]
     resources: ["serviceaccounts"]
     verbs: ["create"]

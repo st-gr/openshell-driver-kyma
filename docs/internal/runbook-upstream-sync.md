@@ -206,6 +206,53 @@ You should see a green run each week on the scheduled day. Silence that means "b
 as silence that means "fine" is the exact failure that let the protos drift
 for two months.
 
+## Workspace modes
+
+Maintainer notes for `driver.workspaceMode`. `Shared` is the default and what
+the live cluster runs; `Managed` and `Operator` are documented here for
+whoever flips them.
+
+### Operator mode prerequisite
+
+Upstream's Operator mode only checks the allowlist; it does not bootstrap.
+This driver pins `openshell-sandbox` into every sandbox pod spec, so an
+operator-managed namespace lacking that ServiceAccount produces pods that
+never start — and `verify_psa_label` hard-fails without the PSA label.
+
+Before adding a namespace to `driver.operatorNamespaceAllowlist`, the
+platform team must prepare it:
+
+```bash
+kubectl label namespace tenant-a pod-security.kubernetes.io/enforce=privileged
+kubectl -n tenant-a create serviceaccount openshell-sandbox
+kubectl -n tenant-a patch serviceaccount openshell-sandbox \
+  -p '{"automountServiceAccountToken": false}'
+```
+
+(`tenant-a` above is an example namespace name — substitute the real one.)
+
+This is deliberate. Granting the driver cluster-wide `serviceaccounts: create`
+would contradict the entire premise of a mode where the platform team owns
+namespace contents; the ClusterRole for `operator` grants `namespaces: ["get"]`
+only, never `create` or `delete`.
+
+The allowlist is read **once at startup**. Adding a namespace requires a
+driver restart, not just a `helm upgrade --reuse-values` — and, as noted
+above, `--reuse-values` carries forward the *old* chart's defaults, so pass
+`driver.operatorNamespaceAllowlist` explicitly on every upgrade rather than
+relying on it being reused.
+
+### Switching workspace modes is breaking
+
+Both the namespace a sandbox lives in and its object names change with the
+mode, so every sandbox created under the old mode becomes unreachable under
+the new one — **orphaned, not deleted.** For example, moving from `shared` to
+`operator` leaves `default--hello` sitting in `openshell-system` with no
+counterpart in whatever namespace `operator` resolves `default` to.
+
+Delete every sandbox before switching `driver.workspaceMode`, then recreate
+them afterwards. Do not flip the mode on a cluster with live sandboxes.
+
 ## One-time setup
 
 1. **No Claude GitHub App is needed.** `upstream-sync.yml` passes

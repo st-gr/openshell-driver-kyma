@@ -418,9 +418,9 @@ impl KymaProvisioner {
     ///
     /// In `Managed` this is a POST-condition: `bootstrap_managed_namespace`
     /// just applied the label, so a failure here means something stripped it
-    /// (a policy webhook, say). In `Operator` it would be a genuine
-    /// PRECONDITION — the platform team owns the namespace and must have
-    /// labelled it themselves — but `Operator` wiring is a later task.
+    /// (a policy webhook, say). In `Operator` this is a genuine
+    /// PRECONDITION: the platform team owns the namespace and must have
+    /// labelled it themselves before the driver ever touches it.
     ///
     /// Kept as the provisioner's own check rather than a call into
     /// `PlatformEnricher::detect_psa`: the provisioner holds no enricher.
@@ -1368,14 +1368,21 @@ impl SandboxProvisioner for KymaProvisioner {
             // by the chart; there is nothing to prepare.
             WorkspaceMode::Shared => Ok(()),
             WorkspaceMode::Managed => self.bootstrap_managed_namespace(workspace).await,
-            // Landing in a later task. Returning an error rather than Ok(())
-            // is deliberate: a silent success here would let someone set
-            // --workspace-mode operator and get sandboxes in a namespace
-            // that was never verified against the allowlist's preconditions.
-            WorkspaceMode::Operator => Err(DriverError::FailedPrecondition(format!(
-                "workspace mode {:?} is not implemented yet",
-                self.cfg.workspace_mode
-            ))),
+            // Upstream's Operator mode only checks the allowlist; it does
+            // not bootstrap. `namespace_for` already performed that check
+            // and returns `PermissionDenied` if `workspace` was not
+            // allowlisted.
+            //
+            // `verify_psa_label` runs here as a genuine PRECONDITION
+            // (unlike Managed, where it is a post-condition on a label the
+            // driver itself just applied): the platform team owns this
+            // namespace's contents, and its existing error message already
+            // names the exact `kubectl label ns` command to run.
+            WorkspaceMode::Operator => {
+                let ns = crate::workspace::namespace_for(&self.cfg, workspace)?;
+                self.verify_psa_label(&ns).await?;
+                Ok(())
+            }
         }
     }
 
@@ -2381,25 +2388,84 @@ mod tests {
             serde_json::from_value(obj).expect("must deserialize into k8s ServiceAccount");
     }
 
-    /// `ensure_workspace` under `Operator` must still surface a
-    /// FailedPrecondition, not silently succeed or panic — Managed's wiring
-    /// (this task) must not have disturbed the still-unimplemented mode.
-    #[tokio::test]
-    async fn ensure_workspace_operator_mode_still_not_implemented() {
+    fn operator_provisioner(client: Client, allowlist: &[&str]) -> KymaProvisioner {
         let cfg = Config {
-            namespace: "test-ns".into(),
             workspace_mode: WorkspaceMode::Operator,
-            operator_namespace_allowlist: vec!["tenant-a".into()],
+            operator_namespace_allowlist: allowlist.iter().map(|s| (*s).to_string()).collect(),
+            namespace: "test-ns".into(),
             ..Config::default()
         };
-        let svc = tower::service_fn(|_req: http::Request<kube::client::Body>| async move {
-            Ok::<_, std::convert::Infallible>(http::Response::new(kube::client::Body::empty()))
-        });
-        let p = KymaProvisioner::new(Client::new(svc, "test-ns"), cfg);
-        let err = p
+        KymaProvisioner::new(client, cfg)
+    }
+
+    /// A namespace as the apiserver would return it, carrying the PSA label
+    /// (or not) but none of `Managed`'s ownership labels — `Operator`
+    /// namespaces predate the driver and were never labelled by it.
+    fn served_operator_namespace(name: &str, psa_labelled: bool) -> String {
+        let mut metadata = serde_json::json!({ "name": name });
+        if psa_labelled {
+            metadata["labels"] =
+                serde_json::json!({ "pod-security.kubernetes.io/enforce": "privileged" });
+        }
+        serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Namespace",
+            "metadata": metadata,
+        })
+        .to_string()
+    }
+
+    /// `namespace_for` must reject a non-allowlisted workspace before
+    /// `ensure_workspace` ever reaches the API server — no bootstrap, no
+    /// probe, nothing. The stub is primed with zero responses, so any
+    /// request at all panics; the recorded-request count enforces it too.
+    #[tokio::test]
+    async fn ensure_workspace_operator_mode_rejects_a_non_allowlisted_workspace_before_any_api_call(
+    ) {
+        let (client, recorder) = recording_client(vec![]);
+        let err = operator_provisioner(client, &["tenant-a"])
+            .ensure_workspace("tenant-b")
+            .await
+            .expect_err("a non-allowlisted workspace must be denied");
+        assert!(matches!(err, DriverError::PermissionDenied(_)), "{err:?}");
+        assert!(
+            recorder.lock().unwrap().is_empty(),
+            "the allowlist check must short-circuit before any API call"
+        );
+    }
+
+    /// The real behaviour this task adds: an allowlisted workspace resolves
+    /// straight to that namespace (bare, undecorated — unlike `Managed`'s
+    /// derived name) and `verify_psa_label` reads it as a precondition.
+    #[tokio::test]
+    async fn ensure_workspace_operator_mode_verifies_the_psa_label_on_the_allowlisted_namespace() {
+        let (client, recorder) =
+            recording_client(vec![(200, served_operator_namespace("tenant-a", true))]);
+        operator_provisioner(client, &["tenant-a"])
             .ensure_workspace("tenant-a")
             .await
-            .expect_err("Operator must still be unimplemented");
+            .expect("an allowlisted, PSA-labelled namespace must succeed");
+        let seen = recorder.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "expected only the GET, saw {seen:?}");
+        assert_eq!(seen[0].method, "GET");
+        assert!(
+            seen[0].uri.starts_with("/api/v1/namespaces/tenant-a"),
+            "Operator must use the bare workspace name, not a derived one, got {}",
+            seen[0].uri
+        );
+    }
+
+    /// The platform team owns this namespace's contents; if they never
+    /// applied the PSA label, `ensure_workspace` must fail loudly rather
+    /// than let sandbox pods land in a namespace where they can't start.
+    #[tokio::test]
+    async fn ensure_workspace_operator_mode_fails_when_the_namespace_lacks_the_psa_label() {
+        let (client, _recorder) =
+            recording_client(vec![(200, served_operator_namespace("tenant-a", false))]);
+        let err = operator_provisioner(client, &["tenant-a"])
+            .ensure_workspace("tenant-a")
+            .await
+            .expect_err("a namespace missing the PSA label must fail");
         assert!(matches!(err, DriverError::FailedPrecondition(_)), "{err:?}");
     }
 }
