@@ -53,6 +53,24 @@ fi
 [[ $commit =~ ^[0-9a-f]{40}$ ]] || die "resolved commit looks wrong: '$commit'"
 printf '  %s = %s (%s tag)\n\n' "$TAG" "$commit" "$obj_type"
 
+# Refuse to vendor backward. proto/UPSTREAM.lock's `ref` is the contract
+# this repo currently implements against; re-vendoring an older tag would
+# silently delete contract surface (RPCs/fields, e.g. EnsureWorkspace /
+# DeleteWorkspace) that this driver may already implement, and the
+# subsequent `cargo build` breakage would look like this repo's code is
+# wrong rather than the vendor target being stale. Equal tags are a no-op
+# and always allowed. A genuine rollback is still possible by setting
+# VENDOR_ALLOW_DOWNGRADE=1.
+if [[ -f proto/UPSTREAM.lock ]]; then
+	current_ref=$(lock_get ref)
+	if [[ -n $current_ref && $TAG != "$current_ref" ]]; then
+		newest=$(printf '%s\n%s\n' "$current_ref" "$TAG" | sort -V | tail -1)
+		if [[ $newest == "$current_ref" && -z ${VENDOR_ALLOW_DOWNGRADE:-} ]]; then
+			die "refusing to vendor $TAG: it is older than the currently locked $current_ref (proto/UPSTREAM.lock). Vendoring backward would delete contract surface this driver may already implement against $current_ref. For a deliberate rollback, re-run with VENDOR_ALLOW_DOWNGRADE=1 set."
+		fi
+	fi
+fi
+
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 

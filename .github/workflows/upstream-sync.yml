@@ -56,6 +56,12 @@ jobs:
     outputs:
       changed: ${{ steps.verdict.outputs.changed }}
       summary: ${{ steps.verdict.outputs.summary }}
+      # The tag a re-vendor should target -- distinct from GATEWAY_TAG
+      # (resolve-upstream-refs.sh, from GATEWAY_REF), which pins the
+      # gateway *image* and can legitimately sit behind the newest
+      # upstream contract tag. See check-proto-drift.sh's VENDOR_TARGET_TAG
+      # line, which this is sourced from.
+      vendor_target_tag: ${{ steps.drift.outputs.vendor_target_tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -87,6 +93,8 @@ jobs:
           else
             echo "behind=false" >> "$GITHUB_OUTPUT"
           fi
+          vendor_target_tag=$(sed -n 's/^VENDOR_TARGET_TAG: //p' /tmp/drift.txt | tail -1)
+          echo "vendor_target_tag=$vendor_target_tag" >> "$GITHUB_OUTPUT"
 
       - name: Compare pinned images against upstream
         id: images
@@ -214,11 +222,26 @@ jobs:
         shell: bash
         run: ./scripts/resolve-upstream-refs.sh | tee -a "$GITHUB_ENV"
 
+      - name: Set proto contract target tag
+        # PROTO_TARGET_TAG (from detect's vendor_target_tag output, itself
+        # sourced from check-proto-drift.sh) is the CONTRACT tag to
+        # re-vendor to. GATEWAY_TAG (from resolve-upstream-refs.sh, i.e.
+        # GATEWAY_REF) is the pinned gateway IMAGE tag. The two can
+        # legitimately differ -- see the file header. Passed through env:
+        # rather than interpolated into the script text, per that header.
+        env:
+          VENDOR_TARGET_TAG: ${{ needs.detect.outputs.vendor_target_tag }}
+        shell: bash
+        run: |
+          tag="${VENDOR_TARGET_TAG:-$GATEWAY_TAG}"
+          echo "PROTO_TARGET_TAG=$tag" >> "$GITHUB_ENV"
+
       - name: Create the working branch
+        shell: bash
         run: |
           git config user.name  "st-gr"
           git config user.email "38470677+st-gr@users.noreply.github.com"
-          git checkout -b "upstream-sync/${GATEWAY_TAG}-${GITHUB_RUN_ID}"
+          git checkout -b "upstream-sync/${PROTO_TARGET_TAG}-${GITHUB_RUN_ID}"
 
       - name: Let Claude perform the sync
         id: claude
@@ -250,14 +273,21 @@ jobs:
           # retrievable. Each cargo cycle costs several turns.
           claude_args: --max-turns 120 --allowedTools "Bash,Read,Edit,Write,Glob,Grep"
           prompt: |
-            Sync this driver to upstream OpenShell ${{ env.GATEWAY_TAG }}.
+            Sync this driver's proto contract to upstream OpenShell ${{ env.PROTO_TARGET_TAG }}.
+
+            Note: this may differ from the pinned gateway image tag
+            (${{ env.GATEWAY_TAG }}) -- upstream can tag a contract release
+            without publishing a matching gateway/supervisor image. Step 1
+            below re-vendors the CONTRACT to ${{ env.PROTO_TARGET_TAG }};
+            step 4 updates the pinned IMAGE digests to ${{ env.GATEWAY_TAG }}
+            separately. Do not conflate the two.
 
             Detection reported: ${{ needs.detect.outputs.summary }}
             Interop smoke result: ${{ needs.smoke.result }}
 
             Do all of the following:
 
-            1. Re-vendor the protos with `make proto-vendor TAG=${{ env.GATEWAY_TAG }}`.
+            1. Re-vendor the protos with `make proto-vendor TAG=${{ env.PROTO_TARGET_TAG }}`.
                NEVER hand-edit anything under proto/ — scripts/check-proto-drift.sh
                exists to catch exactly that, and it will catch you.
             2. Run `cargo build --workspace --all-targets` and fix every compile
@@ -305,6 +335,7 @@ jobs:
 
       - name: Commit and open the pull request
         if: ${{ !cancelled() }}
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DETECT_SUMMARY: ${{ needs.detect.outputs.summary }}
@@ -324,9 +355,9 @@ jobs:
             exit 0
           fi
 
-          branch="upstream-sync/${GATEWAY_TAG}-${GITHUB_RUN_ID}"
+          branch="upstream-sync/${PROTO_TARGET_TAG}-${GITHUB_RUN_ID}"
           git add -A
-          git commit -m "chore: sync to upstream ${GATEWAY_TAG}
+          git commit -m "chore: sync to upstream ${PROTO_TARGET_TAG}
 
           ${DETECT_SUMMARY}
 
@@ -361,9 +392,14 @@ jobs:
           body="$(cat <<EOF
           Automated upstream compatibility sync.
 
+          These two tags can legitimately differ: upstream can tag a proto
+          contract release without publishing a matching gateway/supervisor
+          image.
+
           | | |
           |---|---|
-          | Upstream tag | \`${GATEWAY_TAG}\` |
+          | Proto contract tag (vendor target) | \`${PROTO_TARGET_TAG}\` |
+          | Gateway image tag | \`${GATEWAY_TAG}\` |
           | Detection | ${DETECT_SUMMARY} |
           | Interop smoke | \`${SMOKE_RESULT}\` against gateway \`${SMOKE_GATEWAY_TAG}\` |
           | Local gate | ${gate} |
@@ -382,7 +418,7 @@ jobs:
           )"
 
           gh pr create $draft \
-            --title "chore: sync to upstream ${GATEWAY_TAG}" \
+            --title "chore: sync to upstream ${PROTO_TARGET_TAG}" \
             --body "$body"
 
       - name: Fail the job if the sync did not complete cleanly
