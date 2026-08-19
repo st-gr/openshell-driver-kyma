@@ -141,6 +141,21 @@ pub struct Config {
     /// pass a comma-separated list.
     #[arg(long, value_delimiter = ',')]
     pub operator_namespace_allowlist: Vec<String>,
+
+    /// When false (default), a `driver_config` that declares `volumes[]` or
+    /// `containers.agent.volume_mounts[]` is rejected. `driver_config.rs`'s
+    /// validation constrains a PVC `claim_name` to a DNS-1123 subdomain and
+    /// nothing more -- no ownership check, no allowlist. In `Shared` mode
+    /// (the default, and what production runs) every sandbox's workspace
+    /// PVC lives in one namespace under the predictable name
+    /// `{workspace}--{name}-workspace`, so an unrestricted `claim_name`
+    /// lets a sandbox template mount another sandbox's workspace
+    /// read-write. `driver_config` support is new and unreleased, so
+    /// defaulting this off is not a regression for anyone. The other
+    /// `driver_config` fields (`pod.*`, `containers.agent.resources`) are
+    /// unaffected by this flag -- they are not the exposure.
+    #[arg(long, default_value_t = false, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
+    pub driver_config_allow_volumes: bool,
 }
 
 impl Default for Config {
@@ -167,6 +182,7 @@ impl Default for Config {
             workspace_mode: crate::workspace::WorkspaceMode::Shared,
             gateway_id: String::new(),
             operator_namespace_allowlist: Vec::new(),
+            driver_config_allow_volumes: false,
         }
     }
 }
@@ -210,6 +226,7 @@ mod tests {
         assert_eq!(c.workspace_mode, crate::workspace::WorkspaceMode::Shared);
         assert_eq!(c.gateway_id, "");
         assert!(c.operator_namespace_allowlist.is_empty());
+        assert!(!c.driver_config_allow_volumes);
     }
 
     #[test]
@@ -255,6 +272,18 @@ mod tests {
     }
 
     #[test]
+    fn clap_parses_driver_config_allow_volumes_flag() {
+        let c = Config::parse_from(["openshell-driver-kyma", "--driver-config-allow-volumes"]);
+        assert!(c.driver_config_allow_volumes);
+
+        let c = Config::parse_from([
+            "openshell-driver-kyma",
+            "--driver-config-allow-volumes=false",
+        ]);
+        assert!(!c.driver_config_allow_volumes);
+    }
+
+    #[test]
     fn clap_defaults_match_default_impl() {
         let cli = Config::parse_from(["openshell-driver-kyma"]);
         let dflt = Config::default();
@@ -271,6 +300,10 @@ mod tests {
         assert_eq!(
             cli.operator_namespace_allowlist,
             dflt.operator_namespace_allowlist
+        );
+        assert_eq!(
+            cli.driver_config_allow_volumes,
+            dflt.driver_config_allow_volumes
         );
     }
 }

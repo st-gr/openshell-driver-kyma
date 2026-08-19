@@ -96,6 +96,7 @@ spec:
             {{- if .Values.driver.operatorNamespaceAllowlist }}
             - --operator-namespace-allowlist={{ join "," .Values.driver.operatorNamespaceAllowlist }}
             {{- end }}
+            - --driver-config-allow-volumes={{ .Values.driver.driverConfigAllowVolumes }}
           env:
             - name: RUST_LOG
               value: {{ .Values.driver.logLevel | quote }}

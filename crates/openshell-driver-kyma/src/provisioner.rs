@@ -135,9 +135,11 @@ impl KymaProvisioner {
     /// can't itself express "there is no template".
     fn decode_driver_config(&self, sb: &DriverSandbox) -> Result<DriverConfig, DriverError> {
         match sb.spec.as_ref().and_then(|s| s.template.as_ref()) {
-            Some(template) => {
-                DriverConfig::from_template(template, &self.cfg.supervisor_mount_path)
-            }
+            Some(template) => DriverConfig::from_template(
+                template,
+                &self.cfg.supervisor_mount_path,
+                self.cfg.driver_config_allow_volumes,
+            ),
             None => Ok(DriverConfig::default()),
         }
     }
@@ -1761,6 +1763,23 @@ mod tests {
         KymaProvisioner::new(Client::new(svc, "test-ns"), cfg)
     }
 
+    /// A provisioner with `--driver-config-allow-volumes` set, for tests
+    /// that exercise a genuinely valid `driver_config.volumes`/
+    /// `volume_mounts` payload — with the gate at its real (disabled)
+    /// default those fixtures would now be rejected before ever reaching
+    /// the behavior under test.
+    fn make_provisioner_with_driver_config_allow_volumes() -> KymaProvisioner {
+        let cfg = Config {
+            namespace: "test-ns".into(),
+            driver_config_allow_volumes: true,
+            ..Config::default()
+        };
+        let svc = tower::service_fn(|_req: http::Request<kube::client::Body>| async move {
+            Ok::<_, std::convert::Infallible>(http::Response::new(kube::client::Body::empty()))
+        });
+        KymaProvisioner::new(Client::new(svc, "test-ns"), cfg)
+    }
+
     fn make_sandbox(id: &str, name: &str, image: &str) -> DriverSandbox {
         DriverSandbox {
             id: id.into(),
@@ -2390,7 +2409,11 @@ mod tests {
     // claimName) being wrong.
     #[tokio::test]
     async fn build_sandbox_spec_driver_config_volumes_and_mounts_appended_alongside_ours() {
-        let p = make_provisioner();
+        // Gate enabled: this fixture's volumes/mounts are genuinely valid,
+        // so with the gate at its real default (disabled) `decode_driver_config`
+        // would reject them and `build_sandbox_spec` would fall back to the
+        // default config, defeating the point of this test.
+        let p = make_provisioner_with_driver_config_allow_volumes();
         let sb = make_sandbox_with_driver_config(
             "sb-1",
             "x",
@@ -2448,6 +2471,9 @@ mod tests {
         let cfg = Config {
             namespace: "test-ns".into(),
             sandbox_storage_size: "5Gi".to_string(),
+            // This fixture's volumes/mounts are genuinely valid; without
+            // this the gate's real (disabled) default would reject them.
+            driver_config_allow_volumes: true,
             ..Config::default()
         };
         let svc = tower::service_fn(|_req: http::Request<kube::client::Body>| async move {
@@ -2499,6 +2525,9 @@ mod tests {
         let cfg = Config {
             namespace: "test-ns".into(),
             sandbox_storage_size: "5Gi".to_string(),
+            // This fixture's volumes/mounts are genuinely valid; without
+            // this the gate's real (disabled) default would reject them.
+            driver_config_allow_volumes: true,
             ..Config::default()
         };
         let svc = tower::service_fn(|_req: http::Request<kube::client::Body>| async move {
@@ -2927,6 +2956,97 @@ mod tests {
         assert!(
             recorder.lock().unwrap().is_empty(),
             "an invalid driver_config must short-circuit before any API call"
+        );
+    }
+
+    /// `ValidateSandboxCreate` exists so the gateway learns a request would
+    /// fail before committing to it — that must hold for the
+    /// `driver_config_allow_volumes` gate exactly as it does for a malformed
+    /// `driver_config`. Uses a non-reserved volume name (unlike the
+    /// "invalid_driver_config" tests above) specifically so this is a
+    /// well-formed request the gate alone rejects, distinguishing this
+    /// `PermissionDenied` from the `InvalidArgument` a malformed config gets.
+    /// Catches: the gate check being wired into `create()` only, or into
+    /// `build_sandbox_spec` only (which swallows the error), leaving
+    /// `validate_create` silent about a request that will actually fail.
+    #[tokio::test]
+    async fn validate_create_rejects_driver_config_volumes_when_gate_disabled() {
+        let p = make_provisioner();
+        let sb = make_sandbox_with_driver_config(
+            "sb-1",
+            "x",
+            "img",
+            json!({
+                "volumes": [{
+                    "name": "user-data",
+                    "persistent_volume_claim": { "claim_name": "pvc-user-data", "read_only": true }
+                }],
+                "containers": {
+                    "agent": {
+                        "volume_mounts": [{
+                            "name": "user-data",
+                            "mount_path": "/data",
+                            "read_only": true
+                        }]
+                    }
+                }
+            }),
+        );
+        let err = p
+            .validate_create(&sb)
+            .await
+            .expect_err("driver_config volumes must be rejected while the gate is disabled");
+        assert!(
+            matches!(err, DriverError::PermissionDenied(_)),
+            "expected PermissionDenied, got: {err:?}"
+        );
+        assert!(err.to_string().contains("--driver-config-allow-volumes"));
+    }
+
+    /// The `create()` counterpart of the test above: `create()` cannot rely
+    /// on `ValidateSandboxCreate` having been called first, so it must
+    /// independently enforce the gate too, and short-circuit before any API
+    /// call the same way an invalid `driver_config` does.
+    #[tokio::test]
+    async fn create_rejects_driver_config_volumes_when_gate_disabled() {
+        let (client, recorder) = recording_client(vec![]);
+        let cfg = Config {
+            namespace: "test-ns".into(),
+            ..Config::default()
+        };
+        let p = KymaProvisioner::new(client, cfg);
+        let sb = make_sandbox_with_driver_config(
+            "sb-1",
+            "x",
+            "img",
+            json!({
+                "volumes": [{
+                    "name": "user-data",
+                    "persistent_volume_claim": { "claim_name": "pvc-user-data", "read_only": true }
+                }],
+                "containers": {
+                    "agent": {
+                        "volume_mounts": [{
+                            "name": "user-data",
+                            "mount_path": "/data",
+                            "read_only": true
+                        }]
+                    }
+                }
+            }),
+        );
+        let err = p
+            .create(&sb)
+            .await
+            .expect_err("driver_config volumes must be rejected while the gate is disabled");
+        assert!(
+            matches!(err, DriverError::PermissionDenied(_)),
+            "got: {err:?}"
+        );
+        assert!(err.to_string().contains("--driver-config-allow-volumes"));
+        assert!(
+            recorder.lock().unwrap().is_empty(),
+            "a gate-disabled driver_config must short-circuit before any API call"
         );
     }
 

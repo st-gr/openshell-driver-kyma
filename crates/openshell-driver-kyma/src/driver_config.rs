@@ -150,34 +150,48 @@ impl DriverConfig {
     /// configurable per driver instance, so it cannot be a constant in this
     /// module the way `SA_TOKEN_MOUNT_PATH` can — it has to come from the
     /// caller who knows the running configuration.
+    ///
+    /// `allow_volumes` is the caller's `cfg.driver_config_allow_volumes`
+    /// (`--driver-config-allow-volumes`, default `false`). When false, a
+    /// config that declares `volumes` or `containers.agent.volume_mounts`
+    /// is rejected with `DriverError::PermissionDenied` once it has passed
+    /// structural validation below — see `reject_volumes_when_disabled`'s
+    /// doc comment for why the check runs there and not first.
     pub fn from_template(
         template: &computev1::pb::DriverSandboxTemplate,
         supervisor_mount_path: &str,
+        allow_volumes: bool,
     ) -> Result<Self, DriverError> {
         let Some(config) = template.driver_config.as_ref() else {
             return Ok(Self::default());
         };
-        Self::from_struct(config, supervisor_mount_path)
+        Self::from_struct(config, supervisor_mount_path, allow_volumes)
     }
 
     fn from_struct(
         config: &prost_types::Struct,
         supervisor_mount_path: &str,
+        allow_volumes: bool,
     ) -> Result<Self, DriverError> {
         let json = serde_json::Value::Object(struct_to_json_object(config));
         let config: Self = serde_json::from_value(json)
             .map_err(|err| invalid(format!("invalid driver_config: {err}")))?;
-        config.validate(supervisor_mount_path)?;
+        config.validate(supervisor_mount_path, allow_volumes)?;
         Ok(config)
     }
 
-    fn validate(&self, supervisor_mount_path: &str) -> Result<(), DriverError> {
+    fn validate(
+        &self,
+        supervisor_mount_path: &str,
+        allow_volumes: bool,
+    ) -> Result<(), DriverError> {
         validate_volumes(&self.volumes)?;
         validate_volume_mounts(
             &self.volumes,
             &self.containers.agent.volume_mounts,
             supervisor_mount_path,
-        )
+        )?;
+        reject_volumes_when_disabled(self, allow_volumes)
     }
 
     /// True when the caller declared a mount at or under the workspace
@@ -197,6 +211,48 @@ impl DriverConfig {
 
 fn invalid(message: impl Into<String>) -> DriverError {
     DriverError::InvalidArgument(message.into())
+}
+
+/// Reject `volumes`/`containers.agent.volume_mounts` when
+/// `--driver-config-allow-volumes` is off (the default). See this crate's
+/// `Config::driver_config_allow_volumes` doc comment for the exposure this
+/// guards: in `Shared` mode a `claim_name` is validated only as a
+/// DNS-1123 subdomain, with no ownership check, so an unrestricted caller
+/// can mount another sandbox's workspace PVC.
+///
+/// Runs *after* `validate_volumes`/`validate_volume_mounts` rather than
+/// before them, so this stays a policy decision distinguishable from a
+/// malformed request: a caller who sends a well-formed-but-disallowed
+/// volume gets `PermissionDenied` naming the flag to set, while a caller
+/// who sends e.g. a duplicate volume name still gets the existing
+/// `InvalidArgument` describing that specific mistake — running the
+/// gate first would mask the latter behind the former for anyone testing
+/// with the gate off, and collapse two different failure modes (bad
+/// request vs. disallowed capability) into one message.
+///
+/// Deliberately scoped to only these two fields: `pod.node_selector`,
+/// `pod.runtime_class_name`, `pod.tolerations`, `pod.priority_class_name`,
+/// and `containers.agent.resources` are not the exposure this flag guards
+/// and must keep working with the gate off.
+fn reject_volumes_when_disabled(
+    config: &DriverConfig,
+    allow_volumes: bool,
+) -> Result<(), DriverError> {
+    if allow_volumes
+        || (config.volumes.is_empty() && config.containers.agent.volume_mounts.is_empty())
+    {
+        return Ok(());
+    }
+    Err(DriverError::PermissionDenied(
+        "driver_config volumes and containers.agent.volume_mounts are disabled by default: in \
+         Shared workspace mode every sandbox's workspace PVC lives in one namespace under the \
+         predictable name '{workspace}--{name}-workspace', and driver_config's claim_name \
+         validation has no ownership check, so an unrestricted caller could mount another \
+         sandbox's workspace PVC read-write. Set --driver-config-allow-volumes=true \
+         (driver.driverConfigAllowVolumes in the Helm chart) to allow driver_config volumes on \
+         this driver instance."
+            .to_string(),
+    ))
 }
 
 /// Rule 1-4: DNS-1123 label name, reserved-name rejection, no duplicate
@@ -470,7 +526,7 @@ mod tests {
             }]
         }));
 
-        let config = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH)
+        let config = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH, true)
             .expect("valid config must decode");
 
         assert_eq!(config.pod.node_selector["disktype"], "ssd");
@@ -504,7 +560,7 @@ mod tests {
             }]
         }));
 
-        let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH)
+        let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH, false)
             .unwrap_err()
             .to_string();
 
@@ -525,7 +581,7 @@ mod tests {
                 }]
             }));
 
-            let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH)
+            let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH, false)
                 .unwrap_err()
                 .to_string();
 
@@ -547,7 +603,7 @@ mod tests {
             ]
         }));
 
-        let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH)
+        let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH, false)
             .unwrap_err()
             .to_string();
 
@@ -568,7 +624,7 @@ mod tests {
             }]
         }));
 
-        let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH)
+        let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH, false)
             .unwrap_err()
             .to_string();
 
@@ -587,7 +643,7 @@ mod tests {
                 "persistent_volume_claim": {"claim_name": "pvc.user-data.123"}
             }]
         }));
-        DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH)
+        DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH, true)
             .expect("dotted subdomain claim name must validate");
     }
 
@@ -598,7 +654,7 @@ mod tests {
         config["containers"]["agent"]["volume_mounts"][0]["name"] = json!("User_Data");
         let template = template_with(config);
 
-        let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH)
+        let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH, false)
             .unwrap_err()
             .to_string();
 
@@ -621,7 +677,7 @@ mod tests {
             }
         }));
 
-        let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH)
+        let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH, false)
             .unwrap_err()
             .to_string();
 
@@ -640,7 +696,7 @@ mod tests {
         config["containers"]["agent"]["volume_mounts"][0]["read_only"] = json!(false);
         let template = template_with(config);
 
-        let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH)
+        let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH, false)
             .unwrap_err()
             .to_string();
 
@@ -657,7 +713,7 @@ mod tests {
             json!("/opt/openshell/bin");
         let template = template_with(config);
 
-        let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH)
+        let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH, false)
             .unwrap_err()
             .to_string();
 
@@ -676,7 +732,7 @@ mod tests {
         config["containers"]["agent"]["volume_mounts"][0]["mount_path"] = json!("/sandbox");
         let template = template_with(config);
 
-        let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH)
+        let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH, false)
             .unwrap_err()
             .to_string();
 
@@ -697,7 +753,7 @@ mod tests {
             json!(SA_TOKEN_MOUNT_PATH);
         let template = template_with(config);
 
-        let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH)
+        let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH, false)
             .unwrap_err()
             .to_string();
 
@@ -718,7 +774,7 @@ mod tests {
             json!(format!("{SA_TOKEN_MOUNT_PATH}/token"));
         let template = template_with(config);
 
-        let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH)
+        let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH, false)
             .unwrap_err()
             .to_string();
 
@@ -738,7 +794,7 @@ mod tests {
         config["containers"]["agent"]["volume_mounts"][0]["mount_path"] = json!("/var/run/secrets");
         let template = template_with(config);
 
-        let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH)
+        let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH, false)
             .unwrap_err()
             .to_string();
 
@@ -761,7 +817,7 @@ mod tests {
             json!("/custom/supervisor");
         let template = template_with(config);
 
-        let err = DriverConfig::from_template(&template, "/custom/supervisor")
+        let err = DriverConfig::from_template(&template, "/custom/supervisor", false)
             .unwrap_err()
             .to_string();
 
@@ -781,7 +837,7 @@ mod tests {
             json!("/custom/supervisor/openshell-sandbox");
         let template = template_with(config);
 
-        let err = DriverConfig::from_template(&template, "/custom/supervisor")
+        let err = DriverConfig::from_template(&template, "/custom/supervisor", false)
             .unwrap_err()
             .to_string();
 
@@ -799,7 +855,7 @@ mod tests {
         config["containers"]["agent"]["volume_mounts"][0]["mount_path"] = json!("/custom");
         let template = template_with(config);
 
-        let err = DriverConfig::from_template(&template, "/custom/supervisor")
+        let err = DriverConfig::from_template(&template, "/custom/supervisor", false)
             .unwrap_err()
             .to_string();
 
@@ -866,7 +922,7 @@ mod tests {
                     }
                 }
             }));
-            let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH)
+            let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH, false)
                 .unwrap_err()
                 .to_string();
             assert!(
@@ -885,7 +941,7 @@ mod tests {
                     }
                 }
             }));
-            let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH)
+            let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH, false)
                 .unwrap_err()
                 .to_string();
             assert!(
@@ -915,7 +971,7 @@ mod tests {
             }
         }));
 
-        let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH)
+        let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH, false)
             .unwrap_err()
             .to_string();
 
@@ -934,7 +990,7 @@ mod tests {
             config["containers"]["agent"]["volume_mounts"][0]["sub_path"] = json!(sub_path);
             let template = template_with(config);
 
-            let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH)
+            let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH, false)
                 .unwrap_err()
                 .to_string();
 
@@ -952,7 +1008,7 @@ mod tests {
     fn rejects_unknown_field() {
         let template = template_with(json!({"cdi_devices": ["nvidia.com/gpu=0"]}));
 
-        let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH)
+        let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH, false)
             .unwrap_err()
             .to_string();
 
@@ -966,13 +1022,13 @@ mod tests {
     fn absent_driver_config_yields_default() {
         let template = DriverSandboxTemplate::default();
 
-        let config = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH)
+        let config = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH, false)
             .expect("absent config must not error");
 
         assert_eq!(config, DriverConfig::default());
 
         let template = template_with(json!({}));
-        let config = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH)
+        let config = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH, false)
             .expect("empty config must not error");
         assert_eq!(config, DriverConfig::default());
     }
@@ -1038,5 +1094,113 @@ mod tests {
         };
 
         assert!(!config.has_explicit_sandbox_data_mount());
+    }
+
+    // --- driver_config_allow_volumes gate ---------------------------------
+
+    // Catches: the gate check being dropped entirely, or checking only
+    // `containers.agent.volume_mounts` and forgetting `volumes` — this
+    // fixture has a volume and no mount, so it can only be caught by the
+    // `volumes` half of the condition.
+    #[test]
+    fn rejects_volumes_when_gate_disabled() {
+        let template = template_with(json!({
+            "volumes": [{
+                "name": "user-data",
+                "persistent_volume_claim": {"claim_name": "pvc-user-data", "read_only": true}
+            }]
+        }));
+
+        let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH, false)
+            .expect_err("volumes must be rejected while the gate is disabled");
+
+        assert!(
+            matches!(err, DriverError::PermissionDenied(_)),
+            "expected PermissionDenied (distinguishable from a malformed-config \
+             InvalidArgument), got: {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--driver-config-allow-volumes"),
+            "message must name the flag an operator would set, got: {msg}"
+        );
+    }
+
+    // Catches: checking only `volumes` and forgetting
+    // `containers.agent.volume_mounts` in the gate condition.
+    #[test]
+    fn rejects_volume_mounts_when_gate_disabled() {
+        let template = template_with(valid_volume_and_mount());
+
+        let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH, false)
+            .expect_err("volume mounts must be rejected while the gate is disabled");
+
+        assert!(
+            matches!(err, DriverError::PermissionDenied(_)),
+            "got: {err:?}"
+        );
+        assert!(err.to_string().contains("--driver-config-allow-volumes"));
+    }
+
+    // Isolates the `containers.agent.volume_mounts` half of the gate
+    // condition directly against `reject_volumes_when_disabled`, bypassing
+    // `from_template`'s rule 6 ("a mount must reference a declared
+    // volume"). That rule makes a *valid* mounts-only-with-no-volumes
+    // config unreachable through the public decode path, which would
+    // otherwise let a mutant that checks only `volumes.is_empty()` survive
+    // every test above (both public-API tests above always have a
+    // non-empty `volumes` too, since a valid mount requires one).
+    #[test]
+    fn reject_volumes_when_disabled_catches_mounts_only() {
+        let config = DriverConfig {
+            containers: ContainersConfig {
+                agent: ContainerConfig {
+                    volume_mounts: vec![VolumeMountConfig {
+                        name: "orphan".to_string(),
+                        mount_path: "/data".to_string(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            },
+            ..Default::default()
+        };
+
+        let err = reject_volumes_when_disabled(&config, false)
+            .expect_err("a mounts-only config must be rejected while the gate is disabled");
+        assert!(
+            matches!(err, DriverError::PermissionDenied(_)),
+            "got: {err:?}"
+        );
+
+        reject_volumes_when_disabled(&config, true)
+            .expect("gate enabled must allow a mounts-only config through");
+    }
+
+    // Proves the gate is scoped to volumes/volume_mounts only: the other
+    // driver_config fields (pod.*, containers.agent.resources) are not the
+    // exposure this flag guards and must keep working with the gate off.
+    // Catches: a gate condition that rejects on *any* non-default
+    // driver_config field rather than specifically volumes/volume_mounts.
+    #[test]
+    fn accepts_pod_and_resources_only_when_gate_disabled() {
+        let template = template_with(json!({
+            "pod": {
+                "node_selector": {"disktype": "ssd"},
+                "runtime_class_name": "gvisor",
+                "priority_class_name": "high"
+            },
+            "containers": {
+                "agent": {
+                    "resources": {
+                        "requests": {"cpu": "500m"},
+                        "limits": {"cpu": "1"}
+                    }
+                }
+            }
+        }));
+
+        DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH, false)
+            .expect("pod/resources-only driver_config must be accepted with the gate disabled");
     }
 }

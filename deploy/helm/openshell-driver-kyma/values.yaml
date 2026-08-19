@@ -141,6 +141,18 @@ driver:
   # Required and must be non-empty in that mode. An empty allowlist denies
   # every workspace.
   operatorNamespaceAllowlist: []
+  # Gates driver_config.volumes[] and driver_config.containers.agent.
+  # volume_mounts[] (DriverSandboxTemplate.driver_config, proto field 12).
+  # driver_config.rs validates a PVC claim_name as a DNS-1123 subdomain
+  # and nothing more -- no ownership check, no allowlist. In the default
+  # "shared" workspaceMode every sandbox's workspace PVC lives in ONE
+  # namespace under the predictable name {workspace}--{name}-workspace, so
+  # an unrestricted claim_name lets a sandbox template mount another
+  # sandbox's workspace read-write. Off by default; driver_config support
+  # is new and unreleased, so this is not a regression for anyone. The
+  # other driver_config fields (pod.*, containers.agent.resources) are
+  # unaffected -- they are not the exposure and keep working regardless.
+  driverConfigAllowVolumes: false
 
 # Driver pod resource requests and limits. Modest defaults that fit any
 # Kyma namespace ResourceQuota out of the box.
