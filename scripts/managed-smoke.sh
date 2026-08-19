@@ -31,6 +31,7 @@ RELEASE=oms
 GATEWAY_ID=smoke
 NS_DEFAULT="openshell-${GATEWAY_ID}-default"
 NS_DECOY="openshell-${GATEWAY_ID}-decoy"
+NS_OWNED="openshell-${GATEWAY_ID}-owned"
 CRD_URL="https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/main/k8s/crds/agents.x-k8s.io_sandboxes.yaml"
 
 log()  { printf '\n=== %s\n' "$*"; }
@@ -44,7 +45,7 @@ dump_diagnostics() {
 	printf '\n--- gateway log ---\n' >&2
 	kubectl -n "$NS" logs "deploy/${RELEASE}-openshell-driver-kyma" -c gateway --tail=50 2>&1 >&2 || true
 	printf '\n--- managed namespaces ---\n' >&2
-	kubectl get ns "$NS_DEFAULT" "$NS_DECOY" -o wide 2>&1 >&2 || true
+	kubectl get ns "$NS_DEFAULT" "$NS_DECOY" "$NS_OWNED" -o wide 2>&1 >&2 || true
 }
 
 for v in GATEWAY_IMAGE SUPERVISOR_IMAGE CLI_VERSION DRIVER_IMAGE; do
@@ -180,6 +181,17 @@ kubectl -n "$NS_DEFAULT" get sa openshell-sandbox >/dev/null 2>&1 \
 # `workspace delete` is called, or this assertion fails for a reason that
 # has nothing to do with ownership.
 #
+# A fourth trap, which does not affect ASSERT M2 itself but sank the first
+# version of ASSERT M3 below: the gateway refuses to delete the workspace
+# literally named "default" unconditionally -- workspace.rs's
+# DEFAULT_WORKSPACE_NAME guard returns FAILED_PRECONDITION before either
+# the emptiness check above or delete_managed_namespace ever runs. No
+# amount of emptying or labelling $NS_DEFAULT makes `workspace delete
+# default` succeed. Proving the happy path (an owned, empty namespace
+# really is deleted) therefore needs a workspace that is not "default" --
+# see ASSERT M3, which uses "owned" instead and otherwise follows this
+# exact recipe minus the label strip.
+#
 # Instead: `workspace create` registers "decoy" with the gateway (needed so
 # `--workspace decoy` below and `workspace delete decoy` further down are
 # valid RPCs rather than 404s), then a real sandbox create scoped to that
@@ -264,38 +276,80 @@ phase=$(kubectl get ns "$NS_DECOY" -o jsonpath='{.status.phase}')
 	|| fail "GUARDRAIL BREACH: $NS_DECOY phase is '$phase', expected 'Active'"
 
 # --- ASSERT M3: an OWNED namespace IS deleted ------------------------------
+#
+# Cannot reuse workspace "default" here -- that's the fourth trap recorded
+# above: the gateway refuses to delete "default" unconditionally, before
+# any emptiness or ownership check runs. And it cannot reuse ASSERT M2's
+# "decoy" either, since that workspace's ownership labels were deliberately
+# stripped -- exercising this assertion against it would prove nothing.
+# So this gets its own workspace, "owned", built exactly like "decoy" was
+# in ASSERT M2 (create workspace, create+poll a scoped sandbox to force
+# the bootstrap, delete+poll that sandbox to empty the workspace again)
+# but skipping the label strip -- the one difference that makes this the
+# positive case: an owned, empty namespace really does get deleted.
+#
+# ASSERT M1's sandbox 'm1' is left running in $NS_DEFAULT for the rest of
+# the script on purpose -- nothing deletes workspace "default" any more,
+# so nothing needs it gone.
 log "ASSERT M3: an OWNED namespace IS deleted"
-# Same trap as ASSERT M2's third one: ASSERT M1's sandbox 'm1' is still
-# sitting in $NS_DEFAULT, and the gateway refuses to delete a non-empty
-# workspace before the RPC ever reaches the driver. Clear it first.
-osh sandbox delete m1 || fail "sandbox delete m1 failed"
+osh workspace create --name owned || fail "workspace create owned failed"
+
+osh sandbox create --workspace owned --name m3 --from ghcr.io/nvidia/openshell-community/sandboxes/base:latest \
+	-- sleep infinity >/tmp/create-m3.log 2>&1 &
+CREATE_PID=$!
+cr=""
+for _ in $(seq 1 40); do
+	if kubectl -n "$NS_OWNED" get sandbox m3 >/dev/null 2>&1; then
+		cr=m3
+		break
+	fi
+	sleep 3
+done
+kill "$CREATE_PID" 2>/dev/null || true
+[[ -n $cr ]] || { cat /tmp/create-m3.log >&2; fail "sandbox CR 'm3' never appeared in ${NS_OWNED}"; }
+
+kubectl get ns "$NS_OWNED" >/dev/null 2>&1 || fail "managed namespace $NS_OWNED was not created"
+
+for key in openshell.ai/managed-by openshell.ai/gateway-id openshell.ai/sandbox-workspace; do
+	esc=${key//./\\.}
+	val=$(kubectl get ns "$NS_OWNED" -o jsonpath="{.metadata.labels.${esc}}")
+	[[ -n $val ]] || fail "$NS_OWNED is missing ownership label $key"
+done
+
+# Empty the workspace before calling delete -- same emptiness check as
+# ASSERT M2 applies here too, and this assertion is meant to prove the
+# ownership path succeeds, not get blocked earlier by leftover resources.
+osh sandbox delete --workspace owned m3 || fail "sandbox delete m3 failed"
 gone=0
 for _ in $(seq 1 40); do
-	if ! kubectl -n "$NS_DEFAULT" get sandbox m1 >/dev/null 2>&1; then
+	if ! kubectl -n "$NS_OWNED" get sandbox m3 >/dev/null 2>&1; then
 		gone=1
 		break
 	fi
 	sleep 3
 done
-[[ $gone == 1 ]] || fail "sandbox m1 was not deleted from ${NS_DEFAULT}"
-kubectl get ns "$NS_DEFAULT" >/dev/null 2>&1 \
-	|| fail "deleting sandbox m1 unexpectedly removed the managed namespace $NS_DEFAULT"
+[[ $gone == 1 ]] || fail "sandbox m3 was not deleted from ${NS_OWNED}"
+kubectl get ns "$NS_OWNED" >/dev/null 2>&1 \
+	|| fail "deleting sandbox m3 unexpectedly removed the managed namespace $NS_OWNED"
 
-osh workspace delete default || fail "workspace delete default failed"
+# Labels were never stripped -- this is an owned namespace. The RPC should
+# reach delete_managed_namespace's namespace_owned_by check, find a match,
+# and actually delete it.
+osh workspace delete owned || fail "workspace delete owned failed"
 gone=0
 for _ in $(seq 1 40); do
-	if ! kubectl get ns "$NS_DEFAULT" >/dev/null 2>&1; then
+	if ! kubectl get ns "$NS_OWNED" >/dev/null 2>&1; then
 		gone=1
 		break
 	fi
 	# A namespace stuck Terminating still counts as accepted-for-deletion --
 	# deletion is asynchronous and background-propagated.
-	if [[ "$(kubectl get ns "$NS_DEFAULT" -o jsonpath='{.status.phase}')" == "Terminating" ]]; then
+	if [[ "$(kubectl get ns "$NS_OWNED" -o jsonpath='{.status.phase}')" == "Terminating" ]]; then
 		gone=1
 		break
 	fi
 	sleep 3
 done
-[[ $gone == 1 ]] || fail "owned namespace $NS_DEFAULT was not deleted"
+[[ $gone == 1 ]] || fail "owned namespace $NS_OWNED was not deleted"
 
 log "MANAGED SMOKE PASSED (gateway ${GATEWAY_IMAGE##*@})"
