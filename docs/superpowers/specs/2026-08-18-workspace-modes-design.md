@@ -136,11 +136,24 @@ namespaces (`workspace_delete_requires_namespace_access` is
 ### New failure surface
 
 Today these RPCs return `Unimplemented` and the gateway swallows it. Once
-implemented, **a failure in `EnsureWorkspace` fails sandbox creation.** That is
-correct but new: a mis-set PSA label or a missing RBAC verb becomes a
-create-time error instead of silence. It is also why the bootstrap must be
-genuinely idempotent — the gateway calls `EnsureWorkspace` before *every*
-create, not once per workspace.
+implemented, a failure in `EnsureWorkspace` fails whatever explicitly called
+it. **Correction (2026-08-19): the premise this section originally rested
+on was wrong.** It assumed the gateway calls `EnsureWorkspace` before every
+sandbox create — it does not. Grepping the gateway at v0.0.109,
+`ensure_workspace` appears zero times in `crates/openshell-server/src/grpc/
+sandbox.rs`; its only callers are `grpc/provider.rs:2238`, `:3396`, and
+`provider_refresh.rs:550`, all gated on `stores_provider_credentials()`. It
+is also not called by `openshell workspace create`. Upstream's own
+Kubernetes driver does not rely on the RPC either — it bootstraps the
+managed namespace lazily inside `create_sandbox` itself (`driver.rs:1358`).
+`KymaProvisioner::create` now does the same (see the CI-parity fix report
+under `.superpowers/sdd/2026-08-18-v0.0.107-parity/`): it calls
+`bootstrap_managed_namespace` directly under `Managed`, so a real cluster
+never depends on `EnsureWorkspace` having been called first. The RPC itself
+is unchanged and remains part of the contract; it is simply not the only
+path to bootstrap any more, and the idempotence bootstrap already had turns
+out to matter for a different reason: `create` calls it on every single
+sandbox create, not once per workspace.
 
 ## RBAC and chart wiring
 

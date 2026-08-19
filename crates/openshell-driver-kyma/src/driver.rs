@@ -338,11 +338,17 @@ impl ComputeDriver for Driver {
     }
 
     /// Dispatches to `SandboxProvisioner::ensure_workspace`. Under `Shared`
-    /// mode this is a deliberate successful no-op: the gateway calls
-    /// EnsureWorkspace before every sandbox create, so an error here would
-    /// fail every create in a mode that has no workspace bootstrap to do.
-    /// `Managed`/`Operator` modes gate on the provisioner's real bootstrap
-    /// logic — both are fully implemented (see `workspace.rs`, `provisioner.rs`).
+    /// mode this is a deliberate successful no-op: `Shared` has no
+    /// workspace bootstrap to do, so an error here would only ever be
+    /// spurious. Note this RPC is not the only path to bootstrap — the
+    /// gateway does not call `EnsureWorkspace` before every sandbox create
+    /// (grepping v0.0.109's `grpc/sandbox.rs`, it's called zero times
+    /// there), so `KymaProvisioner::create` also bootstraps `Managed`
+    /// namespaces lazily, itself, on every create (see `provisioner.rs`).
+    /// This RPC remains part of the contract and keeps working as its own
+    /// path. `Managed`/`Operator` modes gate on the provisioner's real
+    /// bootstrap logic — both are fully implemented (see `workspace.rs`,
+    /// `provisioner.rs`).
     async fn ensure_workspace(
         &self,
         req: Request<EnsureWorkspaceRequest>,

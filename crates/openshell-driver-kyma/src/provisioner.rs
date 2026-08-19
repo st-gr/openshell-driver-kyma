@@ -1182,8 +1182,10 @@ fn sandbox_service_account_object(namespace: &str) -> serde_json::Value {
 
 /// `create`, treating an existing object as success.
 ///
-/// Idempotence is not optional here: the gateway calls EnsureWorkspace before
-/// every sandbox create, so the second call onwards always hits this path.
+/// Idempotence is not optional here: `create` calls `bootstrap_managed_namespace`
+/// (which uses this for the sandbox ServiceAccount) on every single sandbox
+/// create under `Managed`, not just the first, so the second call onwards
+/// always hits this path.
 async fn create_tolerating_conflict<K>(api: &Api<K>, obj: K) -> Result<(), DriverError>
 where
     K: kube::Resource + Clone + std::fmt::Debug + serde::de::DeserializeOwned + serde::Serialize,
@@ -1358,6 +1360,38 @@ impl SandboxProvisioner for KymaProvisioner {
         // can reject a bad request up front, but create() cannot rely on
         // it having been called first.
         let driver_config = self.decode_driver_config(sb)?;
+
+        // Bootstrap the managed namespace lazily, here, rather than relying
+        // on the gateway having called EnsureWorkspace first. It doesn't:
+        // grepping the gateway at v0.0.109, `ensure_workspace` is never
+        // called from `grpc/sandbox.rs` (its only callers are
+        // `grpc/provider.rs:2238`, `:3396`, and `provider_refresh.rs:550`,
+        // all gated on `stores_provider_credentials()`), nor from
+        // `openshell workspace create`. Upstream's Kubernetes driver
+        // doesn't rely on it either — it bootstraps lazily inside its own
+        // `create_sandbox` (driver.rs:1358), matched here. `Operator`
+        // performs its own precondition (the allowlist check inside
+        // `namespace_for_workspace`, refused as `PermissionDenied`, matching
+        // upstream's `Precondition` refusal in spirit) and bootstraps
+        // nothing — the platform team owns those namespaces. `Shared`
+        // bootstraps nothing, unchanged.
+        //
+        // Placed after `decode_driver_config` (pure, no I/O) rather than
+        // right after namespace resolution, so a request with a malformed
+        // `driver_config` still fails before touching the cluster at all —
+        // preserving the "reject before any API call" invariant the tests
+        // above this one pin down — instead of paying for a namespace
+        // bootstrap for a create that was always going to be rejected. It
+        // must come before `ensure_sandbox_pvc` and the Sandbox CR create
+        // below, both of which need the namespace to already exist.
+        //
+        // Deviation from upstream: we deliberately do not call
+        // `ensure_image_pull_secrets` or copy OpenShift SCC annotations
+        // here — this is Kyma, and neither concept has an analogue on this
+        // platform.
+        if self.cfg.workspace_mode == WorkspaceMode::Managed {
+            self.bootstrap_managed_namespace(&sb.workspace).await?;
+        }
 
         // Workspace-ownership rule: an explicit driver_config mount at or
         // under /sandbox takes over workspace persistence, so this
@@ -1781,12 +1815,23 @@ mod tests {
     }
 
     fn make_sandbox(id: &str, name: &str, image: &str) -> DriverSandbox {
+        make_sandbox_with_workspace(id, name, "default", image)
+    }
+
+    /// Same as `make_sandbox`, but for tests (`Managed`/`Operator`) that
+    /// need a workspace other than the hardcoded `"default"`.
+    fn make_sandbox_with_workspace(
+        id: &str,
+        name: &str,
+        workspace: &str,
+        image: &str,
+    ) -> DriverSandbox {
         DriverSandbox {
             id: id.into(),
             name: name.into(),
             // Every sandbox the gateway sends carries a workspace since
             // v0.0.91; an empty one is rejected by `validate_kube_resource_name`.
-            workspace: "default".into(),
+            workspace: workspace.into(),
             spec: Some(DriverSandboxSpec {
                 template: Some(DriverSandboxTemplate {
                     image: image.into(),
@@ -3752,5 +3797,147 @@ mod tests {
             .await
             .expect_err("a namespace missing the PSA label must fail");
         assert!(matches!(err, DriverError::FailedPrecondition(_)), "{err:?}");
+    }
+
+    // --- FIX 1: `create` bootstraps `Managed` namespaces lazily ----------
+    //
+    // The CI parity gap this closes: the driver assumed the gateway calls
+    // EnsureWorkspace before every sandbox create. It does not (see the doc
+    // comment on the bootstrap call inside `create`), so a `Managed`
+    // namespace that nothing has explicitly created yet must be bootstrapped
+    // by `create` itself, exactly once per call, before the Sandbox CR is
+    // ever created inside it.
+
+    /// A Sandbox CR as the apiserver would echo it back from a create.
+    fn served_sandbox_cr(namespace: &str, name: &str) -> String {
+        serde_json::json!({
+            "apiVersion": "agents.x-k8s.io/v1alpha1",
+            "kind": "Sandbox",
+            "metadata": { "name": name, "namespace": namespace },
+        })
+        .to_string()
+    }
+
+    /// The core of FIX 1: under `Managed`, `create` must bootstrap the
+    /// namespace (create it, create the sandbox ServiceAccount, verify the
+    /// PSA label) *before* creating the Sandbox CR — in that order — rather
+    /// than assume something else already did it. The stub is primed with
+    /// exactly the four responses this sequence needs, in order; a fifth,
+    /// unexpected request would panic ("stub apiserver received a request
+    /// it was not primed for"), and a dropped one would panic instead on
+    /// `create()` erroring on the wrong response shape.
+    ///
+    /// Mutation this catches: the `if workspace_mode == Managed { bootstrap
+    /// }` call being deleted or accidentally gated on the wrong condition
+    /// (e.g. `Shared`) — either would make this test's stub calls come back
+    /// in the wrong order/count, since the first response served is a bare
+    /// `Sandbox` CR that only satisfies the 4th expected call, not the 1st.
+    /// It also catches the bootstrap being placed *after* the Sandbox CR
+    /// create instead of before: the recorded request order would flip.
+    #[tokio::test]
+    async fn create_bootstraps_the_managed_namespace_before_creating_the_sandbox_cr() {
+        let ns = "openshell-gw1-team-a";
+        let (client, recorder) = recording_client(vec![
+            (201, served_namespace(true, Some("uid-1"))),
+            (201, sandbox_service_account_object(ns).to_string()),
+            (200, served_operator_namespace(ns, true)),
+            (201, served_sandbox_cr(ns, "hello")),
+        ]);
+        let sb = make_sandbox_with_workspace("sb-1", "hello", "team-a", "img");
+        managed_provisioner(client)
+            .create(&sb)
+            .await
+            .expect("create must succeed once the namespace is bootstrapped");
+
+        let seen = recorder.lock().unwrap().clone();
+        assert_eq!(
+            seen.len(),
+            4,
+            "expected namespace create, SA create, PSA-label GET, then the \
+             Sandbox CR create, saw {seen:?}"
+        );
+        assert_eq!(seen[0].method, "POST");
+        assert!(
+            seen[0].uri.starts_with("/api/v1/namespaces?") || seen[0].uri == "/api/v1/namespaces",
+            "first call must create the namespace itself (cluster-scoped \
+             POST), got {}",
+            seen[0].uri
+        );
+        assert_eq!(seen[1].method, "POST");
+        assert!(
+            seen[1]
+                .uri
+                .contains(&format!("/namespaces/{ns}/serviceaccounts")),
+            "second call must create the sandbox ServiceAccount inside the \
+             just-created namespace, got {}",
+            seen[1].uri
+        );
+        assert_eq!(seen[2].method, "GET");
+        assert!(
+            seen[2].uri.contains(&format!("/api/v1/namespaces/{ns}")),
+            "third call must verify the PSA label as a post-condition, got {}",
+            seen[2].uri
+        );
+        assert_eq!(seen[3].method, "POST");
+        assert!(
+            seen[3].uri.contains("sandboxes") && seen[3].uri.contains(ns),
+            "fourth call must create the Sandbox CR inside the bootstrapped \
+             namespace, got {}",
+            seen[3].uri
+        );
+    }
+
+    /// `Shared` behaviour must not change: exactly the Sandbox CR create,
+    /// nothing else. Would catch the bootstrap call becoming unconditional
+    /// on any mode instead of gated on `WorkspaceMode::Managed`
+    /// specifically — the stub has only one response queued, so a bootstrap
+    /// call landing first would consume the Sandbox-CR response and fail
+    /// `create()` on a namespace-shaped body it can't use as a Sandbox CR.
+    #[tokio::test]
+    async fn create_does_not_bootstrap_under_shared_mode() {
+        let (client, recorder) =
+            recording_client(vec![(201, served_sandbox_cr("test-ns", "default--hello"))]);
+        let cfg = Config {
+            namespace: "test-ns".into(),
+            ..Config::default()
+        };
+        let p = KymaProvisioner::new(client, cfg);
+        let sb = make_sandbox("sb-1", "hello", "img");
+        p.create(&sb)
+            .await
+            .expect("shared-mode create must still succeed, unaffected by FIX 1");
+        let seen = recorder.lock().unwrap().clone();
+        assert_eq!(
+            seen.len(),
+            1,
+            "Shared must issue exactly the Sandbox CR create and nothing \
+             else, saw {seen:?}"
+        );
+        assert_eq!(seen[0].method, "POST");
+    }
+
+    /// `Operator` must not bootstrap either — the platform team owns those
+    /// namespaces, matching upstream. Would catch the bootstrap call being
+    /// gated on "not Shared" instead of specifically `Managed`; the stub
+    /// again has only one response queued, so an unexpected bootstrap call
+    /// would panic or fail deserialization the same way as the Shared test
+    /// above.
+    #[tokio::test]
+    async fn create_does_not_bootstrap_under_operator_mode() {
+        let (client, recorder) =
+            recording_client(vec![(201, served_sandbox_cr("tenant-a", "hello"))]);
+        let sb = make_sandbox_with_workspace("sb-1", "hello", "tenant-a", "img");
+        operator_provisioner(client, &["tenant-a"])
+            .create(&sb)
+            .await
+            .expect("operator-mode create against an allowlisted workspace must succeed");
+        let seen = recorder.lock().unwrap().clone();
+        assert_eq!(
+            seen.len(),
+            1,
+            "Operator must issue exactly the Sandbox CR create and nothing \
+             else, saw {seen:?}"
+        );
+        assert_eq!(seen[0].method, "POST");
     }
 }

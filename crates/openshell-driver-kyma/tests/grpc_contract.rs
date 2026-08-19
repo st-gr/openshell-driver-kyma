@@ -515,9 +515,10 @@ async fn grpc_ensure_workspace_rejects_empty_workspace() {
     let _ = handle.await;
 }
 
-/// Shared mode is a no-op, but it must be a *successful* no-op: the gateway
-/// calls EnsureWorkspace before every create, so an error here fails
-/// sandbox creation. `.times(1)` plus `handle.await.unwrap()` (rather than
+/// Shared mode is a no-op, but it must be a *successful* no-op: a caller
+/// (or a future gateway version) may still call EnsureWorkspace directly, and
+/// an error here would surface as a spurious failure even though `Shared`
+/// has no bootstrap to do. `.times(1)` plus `handle.await.unwrap()` (rather than
 /// `let _ = handle.await;`) makes this non-vacuous: mockall's default
 /// call-count is 0..usize::MAX, so an expectation without `.times(..)` is
 /// satisfied by zero calls, and the checkpoint panic that would catch a

@@ -140,6 +140,40 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   literal values against upstream's `container_paths.rs`, and the
   provenance header's `commit:` line against the pin.
 
+### Fixed
+
+- **`create_sandbox` now bootstraps a `Managed`-mode namespace itself,
+  instead of assuming the gateway already called `EnsureWorkspace`.** That
+  assumption was false: grepping the gateway at v0.0.109, `ensure_workspace`
+  is never called from `grpc/sandbox.rs` (its only callers are gated on
+  `stores_provider_credentials()`), nor by `openshell workspace create`. The
+  managed-mode interop smoke caught this in CI: `create sandbox failed:
+  namespaces "openshell-smoke-default" not found`. Matches upstream's
+  Kubernetes driver, which bootstraps lazily inside its own `create_sandbox`
+  (`driver.rs:1358`) for exactly this reason. `KymaProvisioner::create` now
+  calls the existing (already-idempotent) `bootstrap_managed_namespace`
+  under `Managed`, after `driver_config` validation and before the Sandbox
+  CR (and any workspace PVC) are created — so a malformed request still
+  fails before touching the cluster, and the namespace exists before
+  anything is placed in it. `Shared` and `Operator` are unaffected: `Shared`
+  bootstraps nothing (unchanged), and `Operator`'s own precondition (the
+  allowlist check) is unchanged. Deliberately does **not** call
+  `ensure_image_pull_secrets` or copy OpenShift SCC annotations the way
+  upstream's Kubernetes driver does — neither concept has an analogue on
+  Kyma. The `EnsureWorkspace` RPC itself is unchanged and remains part of
+  the contract; it is simply not the only path to bootstrap any more.
+- **Removed `ASSERT 3b` (stop/start) from `scripts/interop-smoke.sh`.** It
+  could never pass there: the gateway refuses `StopSandbox`/`StartSandbox`
+  unless the sandbox's phase is already `Ready`
+  (`crates/openshell-server/src/compute/mod.rs:1082`), and this smoke
+  deliberately installs only the agent-sandbox CRD with no controller, so a
+  sandbox's phase never advances. The RPC was rejected by the gateway
+  itself (gRPC status 9, `FailedPrecondition`) before ever reaching this
+  driver — not a driver bug, and the same gate applies to upstream's own
+  Kubernetes driver. A comment in its place records why, so it isn't
+  re-added; stop/start remain covered by unit tests and by verification
+  against a real cluster with a running controller.
+
 ### Changed
 
 - **Synced the `ComputeDriver` contract to upstream v0.0.107.** Diff against
