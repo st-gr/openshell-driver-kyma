@@ -154,6 +154,25 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   the newest upstream tag. `PIN_REASON`/`PIN_REVIEW_AFTER` metadata keys
   were added to `upstream-compat.env` (currently empty; `GATEWAY_REF`
   remains un-pinned — whether to pin is a decision for the repo owner).
+- **Synced the vendored contract and pinned images to upstream v0.0.109.**
+  Upstream tagged v0.0.107 and v0.0.108 but published no container images
+  for either; v0.0.109 is the newest tag with published images.
+  `proto/UPSTREAM.lock`'s protos and
+  `crates/openshell-driver-kyma/src/vendor/UPSTREAM.lock`'s Rust source are
+  **byte-identical** to v0.0.107 (same per-file checksums recorded under the
+  new ref/commit) — `scripts/check-proto-drift.sh` and
+  `scripts/check-vendor-drift.sh` both confirm this and no driver code
+  changed as a result; this was a pin bump, not a contract migration.
+  `check-proto-drift.sh` no longer emits its "N releases behind"
+  `ADVISORY:` line.
+- **Re-pinned `gateway.image.tag` and `driver.supervisorImage` by digest** to
+  the v0.0.109 builds, resolved via `scripts/resolve-upstream-refs.sh`:
+  - gateway: `sha256:deb2065ed7319e4a481f7b1d01774dc04fabd6457b11f196fb5bd0baf60592ca`
+  - supervisor: `sha256:7cae8e3f477d3281e3a27bd921745e68895d0a80b16d10a107867bdfb386ae5b`
+
+  This closes the last remaining feature-parity gap: until now a default
+  install ran a gateway that predates `EnsureWorkspace`/`DeleteWorkspace`,
+  so this branch's new RPCs were never exercised end to end.
 
 ## [0.3.3] — 2026-08-17
 

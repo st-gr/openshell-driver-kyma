@@ -56,11 +56,11 @@ driver:
   # starting with `sha256:` and the helper emits `<repo>@sha256:<digest>`
   # automatically.
   #
-  # This digest is supervisor v0.0.106, version-matched to gateway.image
+  # This digest is supervisor v0.0.109, version-matched to gateway.image
   # below. It tracked `:latest` until chart 0.3.0 — that tag moved twice
   # in one week, so sandboxes were silently picking up new privileged
   # binaries. Re-pin both together when bumping upstream.
-  supervisorImage: ghcr.io/nvidia/openshell/supervisor@sha256:722f44669722961b7f432b0b81de25b91a58f34a61d6403bef967acaf2b3af01
+  supervisorImage: ghcr.io/nvidia/openshell/supervisor@sha256:7cae8e3f477d3281e3a27bd921745e68895d0a80b16d10a107867bdfb386ae5b
   supervisorBinaryPath: /openshell-sandbox
   supervisorMountPath: /opt/openshell/bin
   gatewayEndpoint: ""
@@ -201,13 +201,16 @@ podLabels: {}
 gateway:
   enabled: false
   image:
-    # Pinned to upstream `0.0.106` (commit c4b500a7). The ComputeDriver
-    # proto contract added the `StartSandbox` RPC vs. `0.0.102` (see
-    # proto/UPSTREAM.lock and scripts/check-proto-drift.sh) — this driver
-    # implements it as `Unimplemented`, matching the existing `StopSandbox`
-    # it is the counterpart to; see driver.rs::start_sandbox. Still carries
-    # forward the external-compute-driver work (NVIDIA/OpenShell#1703), the
-    # AWS Bedrock provider plumbing (NVIDIA/OpenShell#1704), and the TUI
+    # Pinned to upstream `0.0.109` (commit 8d67250a). The ComputeDriver
+    # proto contract is byte-identical to `0.0.107` (see proto/UPSTREAM.lock
+    # and scripts/check-proto-drift.sh) — upstream tagged v0.0.107/v0.0.108
+    # but published no container images for either, so this pin skips
+    # straight to v0.0.109, the first tag since `0.0.106` with published
+    # images. `StartSandbox` (added vs. `0.0.102`) is implemented as
+    # `Unimplemented`, matching the existing `StopSandbox` it is the
+    # counterpart to; see driver.rs::start_sandbox. Still carries forward
+    # the external-compute-driver work (NVIDIA/OpenShell#1703), the AWS
+    # Bedrock provider plumbing (NVIDIA/OpenShell#1704), and the TUI
     # provider config-key form (NVIDIA/OpenShell#2224 / #1798) introduced in
     # earlier releases.
     # Keep this in lockstep with the `openshell` CLI version operators
@@ -216,7 +219,7 @@ gateway:
     # Bump via
     # https://github.com/NVIDIA/OpenShell/pkgs/container/openshell%2Fgateway
     repository: ghcr.io/nvidia/openshell/gateway
-    tag: "sha256:a3804181521e6fe326abee5092a93c80bf3f85da6a7e68316f7d66512782f928"
+    tag: "sha256:deb2065ed7319e4a481f7b1d01774dc04fabd6457b11f196fb5bd0baf60592ca"
     pullPolicy: IfNotPresent
   grpcPort: 8080
   metricsPort: 9091
