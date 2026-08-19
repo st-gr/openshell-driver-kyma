@@ -242,6 +242,38 @@ above, `--reuse-values` carries forward the *old* chart's defaults, so pass
 `driver.operatorNamespaceAllowlist` explicitly on every upgrade rather than
 relying on it being reused.
 
+### `driver_config` volumes are operator-trust-level input
+
+`driver_config.volumes[].persistent_volume_claim.claim_name`
+(`DriverSandboxTemplate.driver_config`, proto field 12) is **not**
+sandboxed against other sandboxes' PVCs. `driver_config.rs`'s validation
+constrains it to a DNS-1123 subdomain and nothing more — no ownership
+check, no allowlist. Treat `driver_config` as operator-trust-level input:
+anything able to set it can mount any PVC in the target namespace, not
+just ones it created.
+
+The concrete exposure in `Shared` mode (the default): every sandbox's
+workspace PVC lives in one namespace under the predictable name
+`{workspace}--{name}-workspace`. A template author who can set
+`driver_config` can name another sandbox's workspace PVC directly in
+`driver_config.volumes[].persistent_volume_claim.claim_name` and mount it
+read-write via `driver_config.containers.agent.volume_mounts`, reading or
+overwriting that sandbox's workspace. `Managed` and `Operator` modes don't
+remove the underlying gap — the claim name is still unchecked — but they
+at least put each workspace in its own namespace, which is what Kubernetes
+RBAC actually scopes.
+
+Upstream's own Kubernetes driver has the identical validation shape (same
+DNS-1123-subdomain-only check, no ownership check either), so this is
+inherited contract behavior, not a defect introduced by this branch. It is
+still worth flagging here: `driver_config` support is new on this branch,
+and `Shared`'s single-namespace default makes the exposure easier to reach
+than it may be for upstream's own callers.
+
+An opt-in gate (e.g. restricting `driver_config` volumes to PVCs the
+caller's own sandbox owns) is under consideration but **not implemented**.
+This is a decision for the repo owner, not something to add unasked.
+
 ### Switching workspace modes is breaking
 
 Both the namespace a sandbox lives in and its object names change with the

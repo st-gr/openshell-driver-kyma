@@ -71,6 +71,60 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   under one mode become unreachable (not deleted — orphaned) once the mode
   changes. Delete every sandbox before switching `driver.workspaceMode`, and
   recreate them afterwards.
+- **Added support for `driver_config` (proto field 12,
+  `DriverSandboxTemplate.driver_config`)** — the structured channel through
+  which a caller configures Kyma-specific pod knobs: node selector,
+  tolerations, priority class name, runtime class name (following
+  `platform_config` > `driver_config.pod` > cluster-default precedence),
+  and per-container resource/volume/volume-mount overrides for the agent
+  container. `src/driver_config.rs` decodes and enforces eleven validation
+  rules ported from upstream's `validate_kubernetes_driver_volumes`/
+  `validate_kubernetes_driver_volume_mounts` (DNS-1123 name shape, reserved-
+  and duplicate-name rejection, PVC claim name shape, a `read_only=false`
+  mount against a `read_only=true` PVC, mount-target conflicts with this
+  driver's own control paths and the `/sandbox` workspace root, duplicate
+  normalized mount targets, sub-path validation), plus two driver-specific
+  checks rejecting a mount that overlaps the projected SA-token mount or
+  the supervisor-binary mount. An explicit `driver_config` mount at or
+  under `/sandbox` now takes over workspace persistence instead of this
+  driver's own PVC injection.
+
+  **`driver_config.volumes[].persistent_volume_claim.claim_name` is
+  operator-trust-level input.** Validation constrains it to a DNS-1123
+  subdomain only — there is no ownership check or allowlist against other
+  sandboxes' PVCs. In `Shared` mode (the default), every sandbox's
+  workspace PVC lives in one namespace under the predictable name
+  `{workspace}--{name}-workspace`, so a template author with `driver_config`
+  access can name another sandbox's workspace PVC and mount it read-write.
+  Upstream's Kubernetes driver has the identical validation shape, so this
+  is inherited contract behavior, not a defect introduced here — but it is
+  a genuinely new capability on this branch, and this driver's `Shared`
+  default co-locates every tenant's sandboxes in one namespace, which makes
+  the exposure easier to hit than it may be for upstream's callers. See
+  "`driver_config` volumes are operator-trust-level input" in
+  `docs/internal/runbook-upstream-sync.md`. An opt-in gate is under
+  consideration; none exists yet.
+- **`platform_config.host_users` and `platform_config.agent_socket_path` are
+  now honored per sandbox**, closing two v0.0.107 parity gaps.
+  `host_users` overrides the cluster-wide `--enable-user-namespaces` default
+  for that one sandbox — **note the inversion: `host_users: true` means the
+  pod uses the *host* user namespace, i.e. Kubernetes' `hostUsers` is left
+  unset and per-sandbox user-namespace isolation is OFF**; a non-bool value
+  is treated as absent, matching upstream's `platform_config_bool`.
+  `agent_socket_path`, when non-empty, is threaded into the Sandbox CR as
+  `agentSocket`; omitted from the CR body entirely when empty, so existing
+  sandboxes' CRs are unchanged.
+- **Vendored `crates/openshell-core/src/driver_mounts.rs` from upstream
+  v0.0.107 (Apache-2.0)** into `src/vendor/driver_mounts.rs`, with one
+  documented, mechanically-reversible local patch (an import this crate
+  can't satisfy, replaced by the same constants inlined by value).
+  Provenance recorded in `src/vendor/UPSTREAM.lock`. The new
+  `scripts/check-vendor-drift.sh` (wired into CI, and into the new `make
+  vendor-check` target) checks the vendored body against upstream at the
+  pinned commit, the recorded checksum, the local patch block's own
+  reversibility, the patch block's `CONTROL_ROOTS`/`OCI_RUNTIME_MOUNT_ROOTS`
+  literal values against upstream's `container_paths.rs`, and the
+  provenance header's `commit:` line against the pin.
 
 ### Changed
 
@@ -78,6 +132,28 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   the previous v0.0.106 pin: `EnsureWorkspace`/`DeleteWorkspace` were added
   (implemented above); `scripts/check-proto-drift.sh` passes against the
   new pin.
+- **Fixed `upstream-sync.yml` conflating the vendored-contract pin with the
+  gateway/supervisor image pin.** `resolve-upstream-refs.sh`'s `GATEWAY_TAG`
+  pins the gateway *image*; `proto/UPSTREAM.lock`'s `ref` pins the vendored
+  *contract* — the sync job previously built its Claude prompt and
+  branch/commit/PR naming entirely from `GATEWAY_TAG`, so pinning it behind
+  the contract pin would have told the next weekly run to re-vendor the
+  protos backward. `check-proto-drift.sh` now emits a stable
+  `VENDOR_TARGET_TAG`; the sync job uses it for every contract-facing string
+  and leaves `GATEWAY_IMAGE`/`SUPERVISOR_IMAGE` alone for the image-digest
+  bump. An empty or malformed `VENDOR_TARGET_TAG` now fails the job loudly
+  instead of silently falling back to `GATEWAY_TAG`. `vendor-proto.sh` also
+  now refuses to vendor a tag older than the current pin without an
+  explicit `VENDOR_ALLOW_DOWNGRADE=1`.
+- **Added `scripts/check-pin-status.sh`**, an advisory (never-failing)
+  reporter on the `GATEWAY_REF` pin in `.github/upstream-compat.env`. While
+  pinned, the weekly detect job's staleness check compares pinned digests
+  against themselves and stays green forever, so a pin whose reason has
+  evaporated could sit unnoticed for months; this script closes that blind
+  spot by checking whether both gateway and supervisor images now exist for
+  the newest upstream tag. `PIN_REASON`/`PIN_REVIEW_AFTER` metadata keys
+  were added to `upstream-compat.env` (currently empty; `GATEWAY_REF`
+  remains un-pinned — whether to pin is a decision for the repo owner).
 
 ## [0.3.3] — 2026-08-17
 
