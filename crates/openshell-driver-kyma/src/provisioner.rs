@@ -753,8 +753,8 @@ impl KymaProvisioner {
         // and mount targets are disjoint from SUPERVISOR_VOLUME,
         // SA_TOKEN_VOLUME, and (when applicable) WORKSPACE_VOLUME/`/sandbox`
         // — see `agent_volume_mounts_disjoint_from_driver_config_reserved_names`
-        // in the test module, which pins that guarantee down directly rather
-        // than merely assuming it.
+        // in driver_config.rs's test module, which pins that guarantee down
+        // directly rather than merely assuming it.
         agent_mounts.extend(
             driver_config
                 .containers

@@ -824,6 +824,77 @@ mod tests {
         );
     }
 
+    // Pins down the guarantee provisioner.rs's `agent_mounts.extend(...)`
+    // comment relies on but that this module does not otherwise state
+    // directly: an agent volume mount can never end up named one of
+    // RESERVED_VOLUME_NAMES (SUPERVISOR_VOLUME/"supervisor-bin",
+    // SA_TOKEN_VOLUME, WORKSPACE_VOLUME), i.e. it can never collide with a
+    // volume this driver manages itself. Two independent checks combine to
+    // make that true, and each half below exercises one of them in
+    // isolation:
+    //
+    //   - half 1: rule 2 (validate_volumes) rejects *declaring* a volume
+    //     under a reserved name, even when a mount also references it.
+    //     Catches: removing the RESERVED_VOLUME_NAMES check from
+    //     validate_volumes — without this half, a caller could declare
+    //     e.g. a "supervisor-bin" PVC volume and this test's first
+    //     assertion would fail (the config would decode instead of erroring).
+    //
+    //   - half 2: rule 6 (validate_volume_mounts) rejects a mount that
+    //     names a reserved name directly with *no* matching volume
+    //     declared — the only way such a mount could ever be attempted,
+    //     since half 1 means the volume itself can never be declared.
+    //     Catches: removing the "mount must reference a declared volume"
+    //     check — without this half, a mount named "supervisor-bin" would
+    //     decode successfully with no volume behind it at all, and this
+    //     test's second assertion would fail.
+    #[test]
+    fn agent_volume_mounts_disjoint_from_driver_config_reserved_names() {
+        for reserved in RESERVED_VOLUME_NAMES {
+            let template = template_with(json!({
+                "volumes": [{
+                    "name": reserved,
+                    "persistent_volume_claim": {"claim_name": "pvc-reserved"}
+                }],
+                "containers": {
+                    "agent": {
+                        "volume_mounts": [{
+                            "name": reserved,
+                            "mount_path": "/data",
+                            "read_only": true
+                        }]
+                    }
+                }
+            }));
+            let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("is reserved for OpenShell-managed volumes"),
+                "expected declaring volume {reserved:?} to be rejected, got: {err}"
+            );
+
+            let template = template_with(json!({
+                "containers": {
+                    "agent": {
+                        "volume_mounts": [{
+                            "name": reserved,
+                            "mount_path": "/data",
+                            "read_only": true
+                        }]
+                    }
+                }
+            }));
+            let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains(&format!("references unknown driver_config volume '{reserved}'")),
+                "expected mount naming {reserved:?} with no declared volume to be rejected, got: {err}"
+            );
+        }
+    }
+
     // Rule 10. Catches: comparing raw (unnormalized) mount paths, which
     // would let "/data" and "/data/" coexist as if they were different
     // targets.
