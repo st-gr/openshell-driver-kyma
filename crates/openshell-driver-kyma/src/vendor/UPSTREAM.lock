@@ -1,0 +1,56 @@
+# Provenance for Rust source vendored from NVIDIA/OpenShell.
+#
+# Separate from proto/UPSTREAM.lock (and never touched by
+# scripts/vendor-proto.sh's re-vendor, which rewrites that file wholesale)
+# because these are a different kind of vendored artifact: hand-copied
+# source, not build output.
+#
+# Verified in CI by scripts/check-vendor-drift.sh.
+#
+# sha256 values are of the PRISTINE upstream file content, i.e. the
+# vendored copy with our provenance header AND our documented local
+# patch (see each file's "VENDOR LOCAL PATCH" block, when present)
+# reversed. The check script undoes both transformations the same way
+# before hashing, so local edits to the body still fail the check.
+#
+# The provenance header's own `commit:` line is checked too (against
+# `commit` below), so a doctored header no longer passes silently.
+repo = "https://github.com/NVIDIA/OpenShell"
+ref = "v0.0.109"
+commit = "8d67250a5d17348eb96c4fa46226b06d8041f2ba"
+vendored_at = "2026-08-19"
+header_lines = 10
+
+[[files]]
+upstream_path = "crates/openshell-core/src/driver_mounts.rs"
+local_path = "crates/openshell-driver-kyma/src/vendor/driver_mounts.rs"
+sha256 = "7a9cd8eeca0f52c6d2046a1b8ad3459422bc12d5cd48239f7ef9cbf1a3f9f610"
+
+# Not itself vendored (it lives in a sibling module we do not pull in — see
+# driver_mounts.rs's "VENDOR LOCAL PATCH" block), but it is the upstream
+# source of truth for CONTROL_ROOTS and OCI_RUNTIME_MOUNT_ROOTS, which our
+# patch block reproduces as literals. kind = "constants" tells the check
+# script to resolve upstream's named constants to their string values and
+# compare those values, in order, against the literals in the patch block —
+# instead of comparing this file byte-for-byte against a local copy we do
+# not have. This is what makes an edit to CONTROL_ROOTS or
+# OCI_RUNTIME_MOUNT_ROOTS *values* (e.g. dropping "/run/openshell") show up
+# as drift.
+#
+# patch_block_sha256 below is a second, independent check on the same
+# entry: the sha256 of the raw bytes between the "VENDOR LOCAL PATCH"
+# BEGIN/END markers in local_path, exactly as they appear (comments
+# included). The values check above only reads the two named arrays, so
+# anything else slipped into the block — e.g. an extra `const` declaration
+# — is invisible to it; this catches that, because any change to the raw
+# block bytes changes the hash. Recompute after any deliberate change to
+# the patch block (including re-vendoring) with:
+#   awk '/^\/\/ --- BEGIN VENDOR LOCAL PATCH ---$/{f=1;next}
+#        /^\/\/ --- END VENDOR LOCAL PATCH ---$/{f=0} f{print}' \
+#     crates/openshell-driver-kyma/src/vendor/driver_mounts.rs | sha256sum
+[[files]]
+upstream_path = "crates/openshell-core/src/container_paths.rs"
+local_path = "crates/openshell-driver-kyma/src/vendor/driver_mounts.rs"
+kind = "constants"
+patch_block_sha256 = "d036321537a308d2bcb9a372f32d9f8fb8069b93db5ba705114d1eda339d23ac"
+sha256 = "14e240f366a55b056b7a0a831165bc6be574dea0d05a7abb0da28c0734da2cf5"

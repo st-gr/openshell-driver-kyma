@@ -70,6 +70,9 @@ jobs:
       - name: Check proto drift
         run: ./scripts/check-proto-drift.sh
 
+      - name: Check vendored driver source drift
+        run: ./scripts/check-vendor-drift.sh
+
   fmt-clippy-test-build:
     name: fmt + clippy + test + build
     runs-on: ubuntu-latest
@@ -119,3 +122,56 @@ jobs:
     uses: ./.github/workflows/interop-smoke.yml
     with:
       gateway_ref: ""
+
+  # Proves the managed-mode ownership guardrail against a real API server:
+  # DeleteWorkspace must decline a namespace it does not own, and must
+  # delete one it does. Unit tests cover the same decision against a
+  # stubbed API server; this closes the gap the interop job does not --
+  # interop only ever exercises the default `shared` workspace mode.
+  #
+  # Roughly doubles smoke runtime relative to interop alone, accepted
+  # deliberately: namespace deletion is precisely the behaviour that must
+  # not ship on unit tests alone. Holds no secrets, needs none.
+  managed-smoke:
+    name: managed workspace mode smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Resolve upstream references
+        # shell: bash is NOT decorative -- see interop-smoke.yml's identical
+        # step for why the default `bash -e {0}` would silently swallow a
+        # failure here via `tee`.
+        shell: bash
+        run: ./scripts/resolve-upstream-refs.sh | tee -a "$GITHUB_ENV"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: false
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: managed
+
+      - name: Build the driver image
+        shell: bash
+        run: docker build -f deploy/Dockerfile -t openshell-driver-kyma:smoke .
+
+      - name: Load the driver image into kind
+        shell: bash
+        run: kind load docker-image openshell-driver-kyma:smoke --name managed
+
+      - name: Run the managed-mode smoke
+        shell: bash
+        env:
+          DRIVER_IMAGE: openshell-driver-kyma:smoke
+        run: ./scripts/managed-smoke.sh
+
+      - name: Tear down
+        if: always()
+        shell: bash
+        run: kind delete cluster --name managed || true

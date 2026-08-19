@@ -7,9 +7,13 @@
 
 pub mod config;
 pub mod driver;
+pub mod driver_config;
 pub mod enricher;
 pub mod error;
 pub mod helpers;
 pub mod interfaces;
+pub mod lifecycle;
 pub mod metrics;
 pub mod provisioner;
+pub mod vendor;
+pub mod workspace;

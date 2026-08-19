@@ -109,3 +109,6 @@ sensitive-*
 *.webp
 # Specific filename safety net for the SCC screenshot.
 sensitive-PII-created-sap-cloud-connector-gitignore.png
+
+# Subagent-driven-development scratch (ledgers, briefs, review packages)
+.superpowers/

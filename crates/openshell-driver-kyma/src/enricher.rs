@@ -107,6 +107,7 @@ impl PlatformEnricher for KymaEnricher {
         kube_name: &str,
         sandbox_name: &str,
         workspace: &str,
+        namespace: &str,
     ) -> Option<Value> {
         if !self.cfg.enable_apirule {
             return None;
@@ -134,7 +135,7 @@ impl PlatformEnricher for KymaEnricher {
             "kind": "APIRule",
             "metadata": {
                 "name": kube_name,
-                "namespace": self.cfg.namespace,
+                "namespace": namespace,
                 "labels": {
                     "openshell.ai/managed-by": "openshell",
                     "openshell.ai/sandbox-id": sandbox_id,
@@ -234,7 +235,7 @@ mod tests {
             ..Config::default()
         });
         assert!(e
-            .render_apirule("id-1", "ws-a--sb-1", "sb-1", "ws-a")
+            .render_apirule("id-1", "ws-a--sb-1", "sb-1", "ws-a", "ns")
             .is_none());
     }
 
@@ -247,7 +248,7 @@ mod tests {
             ..Config::default()
         });
         let m = e
-            .render_apirule("id-1", "ws-a--sb-1", "sb-1", "ws-a")
+            .render_apirule("id-1", "ws-a--sb-1", "sb-1", "ws-a", "openshell-system")
             .unwrap();
         assert_eq!(m["apiVersion"], "gateway.kyma-project.io/v2");
         assert_eq!(m["kind"], "APIRule");
@@ -285,8 +286,47 @@ mod tests {
             ..Config::default()
         });
         let m = e
-            .render_apirule("id-1", "ws-a--sb-1", "sb-1", "ws-a")
+            .render_apirule("id-1", "ws-a--sb-1", "sb-1", "ws-a", "ns")
             .unwrap();
         assert_eq!(m["spec"]["hosts"][0], "ws-a--sb-1.cluster.local");
+    }
+
+    #[tokio::test]
+    async fn render_apirule_namespace_matches_shared_cfg_namespace() {
+        // Shared mode: the namespace passed in is `cfg.namespace` itself, so
+        // this must keep resolving to the same value it always has.
+        let e = make_enricher(Config {
+            namespace: "openshell-system".into(),
+            enable_apirule: true,
+            cluster_domain: "example.com".into(),
+            workspace_mode: crate::workspace::WorkspaceMode::Shared,
+            ..Config::default()
+        });
+        let m = e
+            .render_apirule("id-1", "ws-a--sb-1", "sb-1", "ws-a", "openshell-system")
+            .unwrap();
+        assert_eq!(m["metadata"]["namespace"], "openshell-system");
+    }
+
+    #[tokio::test]
+    async fn render_apirule_namespace_uses_resolved_managed_namespace() {
+        // Managed mode: the caller resolves the workspace's managed
+        // namespace via `crate::workspace::namespace_for` and passes it in —
+        // it must land in the rendered manifest, not `cfg.namespace`.
+        let cfg = Config {
+            namespace: "openshell-system".into(),
+            enable_apirule: true,
+            cluster_domain: "example.com".into(),
+            workspace_mode: crate::workspace::WorkspaceMode::Managed,
+            gateway_id: "gw1".into(),
+            ..Config::default()
+        };
+        let expected_ns = crate::workspace::managed_namespace(&cfg.gateway_id, "ws-a");
+        let e = make_enricher(cfg);
+        let m = e
+            .render_apirule("id-1", "sb-1", "sb-1", "ws-a", &expected_ns)
+            .unwrap();
+        assert_eq!(m["metadata"]["namespace"], expected_ns);
+        assert_ne!(m["metadata"]["namespace"], "openshell-system");
     }
 }

@@ -56,11 +56,11 @@ driver:
   # starting with `sha256:` and the helper emits `<repo>@sha256:<digest>`
   # automatically.
   #
-  # This digest is supervisor v0.0.106, version-matched to gateway.image
+  # This digest is supervisor v0.0.109, version-matched to gateway.image
   # below. It tracked `:latest` until chart 0.3.0 — that tag moved twice
   # in one week, so sandboxes were silently picking up new privileged
   # binaries. Re-pin both together when bumping upstream.
-  supervisorImage: ghcr.io/nvidia/openshell/supervisor@sha256:722f44669722961b7f432b0b81de25b91a58f34a61d6403bef967acaf2b3af01
+  supervisorImage: ghcr.io/nvidia/openshell/supervisor@sha256:7cae8e3f477d3281e3a27bd921745e68895d0a80b16d10a107867bdfb386ae5b
   supervisorBinaryPath: /openshell-sandbox
   supervisorMountPath: /opt/openshell/bin
   gatewayEndpoint: ""
@@ -72,6 +72,9 @@ driver:
   # response field was reserved upstream. With this false, any sandbox that
   # requests a GPU is rejected at create time.
   gpuSupport: true
+  # Must be false when workspaceMode is "managed" -- see the note under
+  # workspaceMode below. The chart refuses that combination at install
+  # time rather than silently downgrading isolation.
   enableNetworkPolicy: true
   # When true, the driver injects `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`
   # into every sandbox pod's env. Pair with an in-cluster LLM gateway that
@@ -103,6 +106,53 @@ driver:
   sandboxStorageClass: ""
   healthPort: 9090
   logLevel: info
+  # How long stop_sandbox waits for the sandbox's pod to terminate before
+  # giving up. Raise it for workloads with long graceful-shutdown handlers.
+  stopTimeoutSecs: 120
+  # Workspace tenancy model. Leave at "shared" unless you have read
+  # docs/superpowers/specs/2026-08-18-workspace-modes-design.md.
+  #
+  #   shared   - every sandbox in .Values.namespace, object names are
+  #              {workspace}--{name}. The only mode before v0.0.107 and the
+  #              only one that renders no cluster-scoped RBAC (see
+  #              templates/clusterrole-workspaces.yaml).
+  #   managed  - one driver-created namespace per workspace (Phase 3)
+  #   operator - pre-existing allowlisted namespaces (Phase 4)
+  #
+  # SWITCHING MODES IS BREAKING. Both the namespace and the object names
+  # change, so existing sandboxes become unreachable. Delete every sandbox
+  # before switching, then recreate.
+  #
+  # "managed" ALSO REQUIRES enableNetworkPolicy: false (see below), because
+  # this chart's stock default for that value is true. That is not a bug in
+  # managed mode being unfinished by accident: managed namespaces receive no
+  # NetworkPolicy today (bootstrap_managed_namespace deliberately does not
+  # create one -- see provisioner.rs), so the driver and the chart both
+  # refuse the combination on purpose, forcing you to consciously accept
+  # losing network isolation before switching. Install fails at `helm
+  # template`/`helm install` with that explanation if you forget.
+  workspaceMode: shared
+  # Gateway identity baked into managed namespace names
+  # (openshell-{gatewayId}-{workspace}). Required when workspaceMode is
+  # "managed". Must be a DNS-1123 label. Defaults from
+  # gateway.sandboxJwt.gatewayId when that is set.
+  gatewayId: ""
+  # Namespaces the driver may use when workspaceMode is "operator".
+  # Required and must be non-empty in that mode. An empty allowlist denies
+  # every workspace.
+  operatorNamespaceAllowlist: []
+  # Gates driver_config.volumes[] and driver_config.containers.agent.
+  # volume_mounts[] (DriverSandboxTemplate.driver_config, proto field 12).
+  # driver_config.rs validates a PVC claim_name as a DNS-1123 subdomain
+  # and nothing more -- no ownership check, no allowlist. In the default
+  # "shared" workspaceMode every sandbox's workspace PVC lives in ONE
+  # namespace under the predictable name {workspace}--{name}-workspace, so
+  # an unrestricted claim_name lets a sandbox template mount another
+  # sandbox's workspace read-write. Off by default; driver_config support
+  # is new and unreleased, so this is not a regression for anyone. The
+  # other driver_config fields (pod.*, containers.agent.resources) are
+  # unaffected -- they are not the exposure and keep working regardless.
+  driverConfigAllowVolumes: false
 
 # Driver pod resource requests and limits. Modest defaults that fit any
 # Kyma namespace ResourceQuota out of the box.
@@ -163,13 +213,18 @@ podLabels: {}
 gateway:
   enabled: false
   image:
-    # Pinned to upstream `0.0.106` (commit c4b500a7). The ComputeDriver
-    # proto contract added the `StartSandbox` RPC vs. `0.0.102` (see
-    # proto/UPSTREAM.lock and scripts/check-proto-drift.sh) — this driver
-    # implements it as `Unimplemented`, matching the existing `StopSandbox`
-    # it is the counterpart to; see driver.rs::start_sandbox. Still carries
-    # forward the external-compute-driver work (NVIDIA/OpenShell#1703), the
-    # AWS Bedrock provider plumbing (NVIDIA/OpenShell#1704), and the TUI
+    # Pinned to upstream `0.0.109` (commit 8d67250a). The ComputeDriver
+    # proto contract is byte-identical to `0.0.107` (see proto/UPSTREAM.lock
+    # and scripts/check-proto-drift.sh) — upstream tagged v0.0.107/v0.0.108
+    # but published no container images for either, so this pin skips
+    # straight to v0.0.109, the first tag since `0.0.106` with published
+    # images. `StartSandbox` (added vs. `0.0.102`) and `StopSandbox` are
+    # both implemented by this driver: `StopSandbox` patches the Sandbox CR
+    # to a stopped state and waits for its pod to actually terminate,
+    # `StartSandbox` performs the matching resume patch; see
+    # driver.rs::stop_sandbox / start_sandbox. Still carries forward
+    # the external-compute-driver work (NVIDIA/OpenShell#1703), the AWS
+    # Bedrock provider plumbing (NVIDIA/OpenShell#1704), and the TUI
     # provider config-key form (NVIDIA/OpenShell#2224 / #1798) introduced in
     # earlier releases.
     # Keep this in lockstep with the `openshell` CLI version operators
@@ -178,7 +233,7 @@ gateway:
     # Bump via
     # https://github.com/NVIDIA/OpenShell/pkgs/container/openshell%2Fgateway
     repository: ghcr.io/nvidia/openshell/gateway
-    tag: "sha256:a3804181521e6fe326abee5092a93c80bf3f85da6a7e68316f7d66512782f928"
+    tag: "sha256:deb2065ed7319e4a481f7b1d01774dc04fabd6457b11f196fb5bd0baf60592ca"
     pullPolicy: IfNotPresent
   grpcPort: 8080
   metricsPort: 9091

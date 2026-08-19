@@ -46,10 +46,35 @@ pub trait SandboxProvisioner: Send + Sync + 'static {
     /// True when a single node can satisfy `count` GPUs.
     async fn has_gpu_capacity(&self, count: u32) -> Result<bool, DriverError>;
 
-    /// POST a rendered Kyma `APIRule` manifest. No-op when the APIRule
-    /// flag is off — the driver layer still gates the call site, this
-    /// method only handles the HTTP for callers that pass a manifest.
-    async fn apply_apirule(&self, manifest: serde_json::Value) -> Result<(), DriverError>;
+    /// Start a stopped sandbox. Keyed by sandbox **id**, like `get`/`delete`.
+    async fn start_sandbox(&self, sandbox_id: &str) -> Result<(), DriverError>;
+    /// Stop a running sandbox and wait until its pod is actually gone.
+    /// Returning before termination would let the gateway believe a sandbox
+    /// is stopped while its pod still runs.
+    async fn stop_sandbox(&self, sandbox_id: &str) -> Result<(), DriverError>;
+
+    /// POST a rendered Kyma `APIRule` manifest into `namespace`. No-op when
+    /// the APIRule flag is off — the driver layer still gates the call
+    /// site, this method only handles the HTTP for callers that pass a
+    /// manifest. `namespace` must be the same value the caller used to
+    /// render `manifest`'s `metadata.namespace` — this method does not
+    /// re-derive it, so a caller that resolves it once for both
+    /// `render_apirule` and `apply_apirule` is what keeps the manifest and
+    /// the API target from disagreeing.
+    async fn apply_apirule(
+        &self,
+        manifest: serde_json::Value,
+        namespace: &str,
+    ) -> Result<(), DriverError>;
+
+    /// Prepare whatever the configured mode needs before a sandbox in
+    /// `workspace` can be created. Must be idempotent: the gateway calls this
+    /// before *every* create, not once per workspace.
+    async fn ensure_workspace(&self, workspace: &str) -> Result<(), DriverError>;
+
+    /// Tear down what `ensure_workspace` created. Only Managed mode has
+    /// anything to remove.
+    async fn delete_workspace(&self, workspace: &str) -> Result<(), DriverError>;
 }
 
 /// Kyma-specific behaviors layered onto the bare provisioner: Pod Security
@@ -77,13 +102,17 @@ pub trait PlatformEnricher: Send + Sync + 'static {
     /// `kube_name` is the `{workspace}--{name}` object name — the APIRule and
     /// the Service it targets are real cluster objects, so they must use the
     /// same name the Sandbox CR does. `sandbox_name` is the bare name, used
-    /// only for the label.
+    /// only for the label. `namespace` is the sandbox's resolved namespace
+    /// (see `crate::workspace::namespace_for`) — the caller resolves it
+    /// once and is expected to pass the same value to `apply_apirule`, so
+    /// the manifest and the API target agree.
     fn render_apirule(
         &self,
         sandbox_id: &str,
         kube_name: &str,
         sandbox_name: &str,
         workspace: &str,
+        namespace: &str,
     ) -> Option<serde_json::Value>;
 }
 

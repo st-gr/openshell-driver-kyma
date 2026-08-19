@@ -3,8 +3,8 @@
 
 // VENDORED from NVIDIA/OpenShell — do not edit by hand.
 //   repo:   https://github.com/NVIDIA/OpenShell
-//   ref:    v0.0.106
-//   commit: c4b500a7de64d0b66e3ee8098f58d14299092162
+//   ref:    v0.0.109
+//   commit: 8d67250a5d17348eb96c4fa46226b06d8041f2ba
 // Re-vendor with `make proto-vendor TAG=<tag>`; provenance + checksums
 // are recorded in proto/UPSTREAM.lock and enforced by CI.
 
@@ -58,6 +58,13 @@ service ComputeDriver {
 
   // Stream sandbox observations from the platform.
   rpc WatchSandboxes(WatchSandboxesRequest) returns (stream WatchSandboxesEvent);
+
+  // Ensure platform resources for a workspace exist (e.g. namespace).
+  // Idempotent: succeeds if resources already exist.
+  rpc EnsureWorkspace(EnsureWorkspaceRequest) returns (EnsureWorkspaceResponse);
+
+  // Tear down platform resources for a workspace.
+  rpc DeleteWorkspace(DeleteWorkspaceRequest) returns (DeleteWorkspaceResponse);
 }
 
 message GetCapabilitiesRequest {}
@@ -346,3 +353,17 @@ message WatchSandboxesEvent {
     WatchSandboxesPlatformEvent platform_event = 3;
   }
 }
+
+message EnsureWorkspaceRequest {
+  // Workspace identifier used by the gateway.
+  string workspace = 1;
+}
+
+message EnsureWorkspaceResponse {}
+
+message DeleteWorkspaceRequest {
+  // Workspace identifier used by the gateway.
+  string workspace = 1;
+}
+
+message DeleteWorkspaceResponse {}

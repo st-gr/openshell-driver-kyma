@@ -6,6 +6,222 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **Implemented the `StopSandbox` and `StartSandbox` RPCs — this branch's
+  headline fix.** `StopSandbox` patches the Sandbox CR to a stopped
+  operating state, then polls until its pod has actually gone, bounded by
+  the new `--stop-timeout-secs` (`driver.stopTimeoutSecs`, default `120`);
+  returning as soon as the patch is accepted would let the gateway believe
+  a sandbox is stopped while its pod keeps running. `StartSandbox` (added
+  in `[0.3.3]` below as an `Unimplemented` placeholder pending this) now
+  performs the matching resume patch. **This supersedes the `[0.3.3]` note
+  that this driver's `StopSandbox`/`StartSandbox` are themselves
+  `Unimplemented` — that statement no longer holds.**
+- **Added `driver.stopTimeoutSecs`** (default `120`), passed as
+  `--stop-timeout-secs`.
+- **Added `driver.gatewayId`** (default `""`, falling back to
+  `gateway.sandboxJwt.gatewayId` when unset — itself defaulting to the
+  chart's fullname), passed as `--gateway-id`. Required, and must be a
+  DNS-1123 label, when `driver.workspaceMode` is `managed` — it becomes
+  part of every managed namespace's name
+  (`openshell-{gatewayId}-{workspace}`).
+- **Added `driver.operatorNamespaceAllowlist`** (default `[]`), passed as
+  `--operator-namespace-allowlist`. Required and non-empty when
+  `driver.workspaceMode` is `operator`; an empty allowlist denies every
+  workspace.
+- **The driver refuses to start with `--workspace-mode managed
+  --enable-network-policy=true`.** Managed-namespace `NetworkPolicy`
+  support is not implemented (`bootstrap_managed_namespace` deliberately
+  does not create one — porting the chart's Helm-templated
+  `NetworkPolicy` into Rust would mean maintaining the same security
+  policy in two languages that must never drift). Continuing anyway would
+  silently give sandboxes in managed namespaces weaker network isolation
+  than the shared namespace's, so `main.rs` refuses to start with that
+  combination rather than let it happen quietly. Use `--workspace-mode
+  shared` (the default) if network policy enforcement is required.
+- **Implemented the `EnsureWorkspace` and `DeleteWorkspace` RPCs**, backed by
+  a new `src/workspace.rs` that centralizes every tenancy rule behind three
+  modes: `Shared` (default), `Managed`, and `Operator`. All three are now
+  fully implemented: `Shared` reproduces this driver's pre-existing
+  single-namespace behavior, `Managed` derives, creates and tears down a
+  namespace per workspace, and `Operator` resolves sandboxes into
+  pre-existing, allowlisted namespaces that a platform team owns — the
+  driver only ever reads them, and never creates or deletes them.
+- **Implemented `Operator` workspace mode.** `ensure_workspace` resolves the
+  namespace through the allowlist check already in `workspace::namespace_for`
+  (`PermissionDenied` for a workspace that isn't allowlisted), then verifies
+  the namespace carries `pod-security.kubernetes.io/enforce=privileged` as a
+  genuine precondition — unlike `Managed`, where the same check is a
+  post-condition on a label the driver itself just applied. `delete_workspace`
+  stays a no-op under `Operator`: the driver never created these namespaces
+  and must never remove them. The chart's ClusterRole for `operator` gains
+  `namespaces: ["get"]` (never `create`/`delete`) so that precondition check
+  can read the namespace; see the new "Operator mode prerequisite" section of
+  `docs/internal/runbook-upstream-sync.md` for what the platform team must
+  prepare — the PSA label and an `openshell-sandbox` ServiceAccount — before
+  adding a namespace to `driver.operatorNamespaceAllowlist`.
+- **Added the `driver.workspaceMode` Helm value**, defaulting to `shared`.
+  It is passed to the driver as `--workspace-mode` and accepts `shared`,
+  `managed`, or `operator`. A default install is unaffected: `shared`
+  reproduces every namespace and object-naming rule this driver used before
+  this change.
+  **Switching workspace modes is breaking.** Both the namespace a sandbox
+  lives in and its object names change with the mode, so sandboxes created
+  under one mode become unreachable (not deleted — orphaned) once the mode
+  changes. Delete every sandbox before switching `driver.workspaceMode`, and
+  recreate them afterwards.
+- **Added support for `driver_config` (proto field 12,
+  `DriverSandboxTemplate.driver_config`)** — the structured channel through
+  which a caller configures Kyma-specific pod knobs: node selector,
+  tolerations, priority class name, runtime class name (following
+  `platform_config` > `driver_config.pod` > cluster-default precedence),
+  and per-container resource/volume/volume-mount overrides for the agent
+  container. `src/driver_config.rs` decodes and enforces eleven validation
+  rules ported from upstream's `validate_kubernetes_driver_volumes`/
+  `validate_kubernetes_driver_volume_mounts` (DNS-1123 name shape, reserved-
+  and duplicate-name rejection, PVC claim name shape, a `read_only=false`
+  mount against a `read_only=true` PVC, mount-target conflicts with this
+  driver's own control paths and the `/sandbox` workspace root, duplicate
+  normalized mount targets, sub-path validation), plus two driver-specific
+  checks rejecting a mount that overlaps the projected SA-token mount or
+  the supervisor-binary mount. An explicit `driver_config` mount at or
+  under `/sandbox` now takes over workspace persistence instead of this
+  driver's own PVC injection.
+
+  **`driver_config.volumes[].persistent_volume_claim.claim_name` is
+  operator-trust-level input.** Validation constrains it to a DNS-1123
+  subdomain only — there is no ownership check or allowlist against other
+  sandboxes' PVCs. In `Shared` mode (the default), every sandbox's
+  workspace PVC lives in one namespace under the predictable name
+  `{workspace}--{name}-workspace`, so a template author with `driver_config`
+  access can name another sandbox's workspace PVC and mount it read-write.
+  Upstream's Kubernetes driver has the identical validation shape, so this
+  is inherited contract behavior, not a defect introduced here — but it is
+  a genuinely new capability on this branch, and this driver's `Shared`
+  default co-locates every tenant's sandboxes in one namespace, which makes
+  the exposure easier to hit than it may be for upstream's callers. See
+  "`driver_config` volumes are operator-trust-level input" in
+  `docs/internal/runbook-upstream-sync.md`. **Gated off by default — see the
+  next entry.**
+- **Added `driver.driverConfigAllowVolumes`** (default `false`), passed as
+  `--driver-config-allow-volumes`. Gates exactly the exposure described
+  above: with it off (the default), a `driver_config` that declares
+  `volumes[]` or `containers.agent.volume_mounts[]` is rejected with
+  `PermissionDenied`, naming this flag, before the request reaches the
+  cluster — enforced from both `CreateSandbox` and `ValidateSandboxCreate`.
+  The rejection is deliberately a different error from a malformed
+  `driver_config` (which still returns `InvalidArgument` with the specific
+  rule it violated) so an operator can tell "this request is disallowed by
+  policy" apart from "this request is broken." Scoped precisely to
+  `volumes`/`containers.agent.volume_mounts` — `driver_config.pod.*` and
+  `containers.agent.resources` are not the exposure and keep working
+  regardless of this flag. `driver_config` support is new and unreleased on
+  this branch, so defaulting this off is not a regression for anyone.
+- **`platform_config.host_users` and `platform_config.agent_socket_path` are
+  now honored per sandbox**, closing two v0.0.107 parity gaps.
+  `host_users` overrides the cluster-wide `--enable-user-namespaces` default
+  for that one sandbox — **note the inversion: `host_users: true` means the
+  pod uses the *host* user namespace, i.e. Kubernetes' `hostUsers` is left
+  unset and per-sandbox user-namespace isolation is OFF**; a non-bool value
+  is treated as absent, matching upstream's `platform_config_bool`.
+  `agent_socket_path`, when non-empty, is threaded into the Sandbox CR as
+  `agentSocket`; omitted from the CR body entirely when empty, so existing
+  sandboxes' CRs are unchanged.
+- **Vendored `crates/openshell-core/src/driver_mounts.rs` from upstream
+  v0.0.107 (Apache-2.0)** into `src/vendor/driver_mounts.rs`, with one
+  documented, mechanically-reversible local patch (an import this crate
+  can't satisfy, replaced by the same constants inlined by value).
+  Provenance recorded in `src/vendor/UPSTREAM.lock`. The new
+  `scripts/check-vendor-drift.sh` (wired into CI, and into the new `make
+  vendor-check` target) checks the vendored body against upstream at the
+  pinned commit, the recorded checksum, the local patch block's own
+  reversibility, the patch block's `CONTROL_ROOTS`/`OCI_RUNTIME_MOUNT_ROOTS`
+  literal values against upstream's `container_paths.rs`, and the
+  provenance header's `commit:` line against the pin.
+
+### Fixed
+
+- **`create_sandbox` now bootstraps a `Managed`-mode namespace itself,
+  instead of assuming the gateway already called `EnsureWorkspace`.** That
+  assumption was false: grepping the gateway at v0.0.109, `ensure_workspace`
+  is never called from `grpc/sandbox.rs` (its only callers are gated on
+  `stores_provider_credentials()`), nor by `openshell workspace create`. The
+  managed-mode interop smoke caught this in CI: `create sandbox failed:
+  namespaces "openshell-smoke-default" not found`. Matches upstream's
+  Kubernetes driver, which bootstraps lazily inside its own `create_sandbox`
+  (`driver.rs:1358`) for exactly this reason. `KymaProvisioner::create` now
+  calls the existing (already-idempotent) `bootstrap_managed_namespace`
+  under `Managed`, after `driver_config` validation and before the Sandbox
+  CR (and any workspace PVC) are created — so a malformed request still
+  fails before touching the cluster, and the namespace exists before
+  anything is placed in it. `Shared` and `Operator` are unaffected: `Shared`
+  bootstraps nothing (unchanged), and `Operator`'s own precondition (the
+  allowlist check) is unchanged. Deliberately does **not** call
+  `ensure_image_pull_secrets` or copy OpenShift SCC annotations the way
+  upstream's Kubernetes driver does — neither concept has an analogue on
+  Kyma. The `EnsureWorkspace` RPC itself is unchanged and remains part of
+  the contract; it is simply not the only path to bootstrap any more.
+- **Removed `ASSERT 3b` (stop/start) from `scripts/interop-smoke.sh`.** It
+  could never pass there: the gateway refuses `StopSandbox`/`StartSandbox`
+  unless the sandbox's phase is already `Ready`
+  (`crates/openshell-server/src/compute/mod.rs:1082`), and this smoke
+  deliberately installs only the agent-sandbox CRD with no controller, so a
+  sandbox's phase never advances. The RPC was rejected by the gateway
+  itself (gRPC status 9, `FailedPrecondition`) before ever reaching this
+  driver — not a driver bug, and the same gate applies to upstream's own
+  Kubernetes driver. A comment in its place records why, so it isn't
+  re-added; stop/start remain covered by unit tests and by verification
+  against a real cluster with a running controller.
+
+### Changed
+
+- **Synced the `ComputeDriver` contract to upstream v0.0.107.** Diff against
+  the previous v0.0.106 pin: `EnsureWorkspace`/`DeleteWorkspace` were added
+  (implemented above); `scripts/check-proto-drift.sh` passes against the
+  new pin.
+- **Fixed `upstream-sync.yml` conflating the vendored-contract pin with the
+  gateway/supervisor image pin.** `resolve-upstream-refs.sh`'s `GATEWAY_TAG`
+  pins the gateway *image*; `proto/UPSTREAM.lock`'s `ref` pins the vendored
+  *contract* — the sync job previously built its Claude prompt and
+  branch/commit/PR naming entirely from `GATEWAY_TAG`, so pinning it behind
+  the contract pin would have told the next weekly run to re-vendor the
+  protos backward. `check-proto-drift.sh` now emits a stable
+  `VENDOR_TARGET_TAG`; the sync job uses it for every contract-facing string
+  and leaves `GATEWAY_IMAGE`/`SUPERVISOR_IMAGE` alone for the image-digest
+  bump. An empty or malformed `VENDOR_TARGET_TAG` now fails the job loudly
+  instead of silently falling back to `GATEWAY_TAG`. `vendor-proto.sh` also
+  now refuses to vendor a tag older than the current pin without an
+  explicit `VENDOR_ALLOW_DOWNGRADE=1`.
+- **Added `scripts/check-pin-status.sh`**, an advisory (never-failing)
+  reporter on the `GATEWAY_REF` pin in `.github/upstream-compat.env`. While
+  pinned, the weekly detect job's staleness check compares pinned digests
+  against themselves and stays green forever, so a pin whose reason has
+  evaporated could sit unnoticed for months; this script closes that blind
+  spot by checking whether both gateway and supervisor images now exist for
+  the newest upstream tag. `PIN_REASON`/`PIN_REVIEW_AFTER` metadata keys
+  were added to `upstream-compat.env` (currently empty; `GATEWAY_REF`
+  remains un-pinned — whether to pin is a decision for the repo owner).
+- **Synced the vendored contract and pinned images to upstream v0.0.109.**
+  Upstream tagged v0.0.107 and v0.0.108 but published no container images
+  for either; v0.0.109 is the newest tag with published images.
+  `proto/UPSTREAM.lock`'s protos and
+  `crates/openshell-driver-kyma/src/vendor/UPSTREAM.lock`'s Rust source are
+  **byte-identical** to v0.0.107 (same per-file checksums recorded under the
+  new ref/commit) — `scripts/check-proto-drift.sh` and
+  `scripts/check-vendor-drift.sh` both confirm this and no driver code
+  changed as a result; this was a pin bump, not a contract migration.
+  `check-proto-drift.sh` no longer emits its "N releases behind"
+  `ADVISORY:` line.
+- **Re-pinned `gateway.image.tag` and `driver.supervisorImage` by digest** to
+  the v0.0.109 builds, resolved via `scripts/resolve-upstream-refs.sh`:
+  - gateway: `sha256:deb2065ed7319e4a481f7b1d01774dc04fabd6457b11f196fb5bd0baf60592ca`
+  - supervisor: `sha256:7cae8e3f477d3281e3a27bd921745e68895d0a80b16d10a107867bdfb386ae5b`
+
+  This closes the last remaining feature-parity gap: until now a default
+  install ran a gateway that predates `EnsureWorkspace`/`DeleteWorkspace`,
+  so this branch's new RPCs were never exercised end to end.
+
 ## [0.3.3] — 2026-08-17
 
 ### Added

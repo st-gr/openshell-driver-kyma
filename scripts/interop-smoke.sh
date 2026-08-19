@@ -209,6 +209,44 @@ ${list_out}"
 printf '%s\n' "$list_out"
 grep -q "$SB" <<<"$list_out" || fail "gateway did not list ${SB} by its bare name"
 
+# --- Assertion 3b removed (2026-08-19): cannot pass in this environment --
+#
+# This used to stop/start the sandbox and assert on spec.replicas. It was
+# removed because it can never pass here, and this has nothing to do with
+# this driver's implementation.
+#
+# The gateway gates StopSandbox/StartSandbox on the sandbox's own phase
+# (crates/openshell-server/src/compute/mod.rs:1082):
+#
+#   if !matches!(phase, SandboxPhase::Ready | SandboxPhase::Stopping) {
+#       return Err(Status::failed_precondition(format!(
+#           "sandbox must be Ready to stop (current phase: {phase:?})")));
+#   }
+#
+# This smoke deliberately installs only the agent-sandbox CRD and runs no
+# controller (see the CRD install step above: "this smoke stops at 'CR
+# created' on purpose and never needs the controller to reconcile a pod"),
+# so the sandbox's phase never advances to Ready -- there is no controller
+# to reconcile a pod and move it there. `openshell sandbox stop` is
+# rejected by the gateway itself, before the RPC ever reaches this driver
+# (observed: gRPC status 9 / FailedPrecondition, in ~1ms). The exact same
+# gate applies to upstream's own Kubernetes driver, so this is not a parity
+# gap and cannot be fixed by changing this driver.
+#
+# Do not re-add this assertion without also installing a real agent-sandbox
+# controller so a sandbox can actually reach Ready -- which this smoke
+# deliberately does not do; its value is exercising the real gateway path
+# without needing a full agent-sandbox deployment in CI. Driving the
+# driver's StopSandbox/StartSandbox RPC directly, bypassing the gateway,
+# would "fix" this smoke but defeat that value -- don't do that either.
+#
+# Stop/start are instead covered by:
+#   - unit tests: the patch-payload builder (lifecycle.rs) across both CRD
+#     API versions and both directions, and the RPC dispatch/NotFound
+#     handling in provisioner.rs/driver.rs
+#   - a real cluster with a running agent-sandbox controller, where a
+#     sandbox does reach Ready
+
 # --- Assertion 4: nothing errored ----------------------------------------
 #
 # Capture the logs into a variable and check kubectl's own exit status

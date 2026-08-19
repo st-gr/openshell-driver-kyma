@@ -114,6 +114,48 @@ pub struct Config {
     /// Tracing log level. `RUST_LOG` overrides this when set.
     #[arg(long, default_value = "info")]
     pub log_level: String,
+
+    /// How long `stop_sandbox` waits for the pod to terminate before giving
+    /// up. Raise it for workloads with long graceful-shutdown handlers.
+    #[arg(long, default_value_t = 120)]
+    pub stop_timeout_secs: u64,
+
+    /// Tenancy model for workspaces. `shared` (default) keeps every sandbox
+    /// in `--namespace` with `{workspace}--{name}` object names — the only
+    /// mode this driver supported before v0.0.107. `managed` creates a
+    /// namespace per workspace; `operator` uses pre-existing namespaces from
+    /// `--operator-namespace-allowlist`.
+    #[arg(long, value_enum, default_value_t = crate::workspace::WorkspaceMode::Shared)]
+    pub workspace_mode: crate::workspace::WorkspaceMode,
+
+    /// Gateway identity used to derive managed namespace names
+    /// (`openshell-{gateway_id}-{workspace}`). Required when
+    /// `--workspace-mode managed`. Deliberately its own flag rather than a
+    /// read of the sandbox-JWT config, because managed mode must work with
+    /// `gateway.sandboxJwt.enabled=false`.
+    #[arg(long, default_value = "")]
+    pub gateway_id: String,
+
+    /// Namespaces this driver may use in `operator` mode. Read once at
+    /// startup; adding a namespace requires a restart. Repeat the flag or
+    /// pass a comma-separated list.
+    #[arg(long, value_delimiter = ',')]
+    pub operator_namespace_allowlist: Vec<String>,
+
+    /// When false (default), a `driver_config` that declares `volumes[]` or
+    /// `containers.agent.volume_mounts[]` is rejected. `driver_config.rs`'s
+    /// validation constrains a PVC `claim_name` to a DNS-1123 subdomain and
+    /// nothing more -- no ownership check, no allowlist. In `Shared` mode
+    /// (the default, and what production runs) every sandbox's workspace
+    /// PVC lives in one namespace under the predictable name
+    /// `{workspace}--{name}-workspace`, so an unrestricted `claim_name`
+    /// lets a sandbox template mount another sandbox's workspace
+    /// read-write. `driver_config` support is new and unreleased, so
+    /// defaulting this off is not a regression for anyone. The other
+    /// `driver_config` fields (`pod.*`, `containers.agent.resources`) are
+    /// unaffected by this flag -- they are not the exposure.
+    #[arg(long, default_value_t = false, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
+    pub driver_config_allow_volumes: bool,
 }
 
 impl Default for Config {
@@ -136,6 +178,11 @@ impl Default for Config {
             sandbox_storage_class: String::new(),
             health_port: 9090,
             log_level: "info".to_string(),
+            stop_timeout_secs: 120,
+            workspace_mode: crate::workspace::WorkspaceMode::Shared,
+            gateway_id: String::new(),
+            operator_namespace_allowlist: Vec::new(),
+            driver_config_allow_volumes: false,
         }
     }
 }
@@ -176,6 +223,10 @@ mod tests {
         assert_eq!(c.sandbox_storage_class, "");
         assert_eq!(c.health_port, 9090);
         assert_eq!(c.log_level, "info");
+        assert_eq!(c.workspace_mode, crate::workspace::WorkspaceMode::Shared);
+        assert_eq!(c.gateway_id, "");
+        assert!(c.operator_namespace_allowlist.is_empty());
+        assert!(!c.driver_config_allow_volumes);
     }
 
     #[test]
@@ -205,6 +256,34 @@ mod tests {
     }
 
     #[test]
+    fn clap_parses_workspace_mode_flags() {
+        let c = Config::parse_from([
+            "openshell-driver-kyma",
+            "--workspace-mode",
+            "managed",
+            "--gateway-id",
+            "gw1",
+            "--operator-namespace-allowlist",
+            "a,b,c",
+        ]);
+        assert_eq!(c.workspace_mode, crate::workspace::WorkspaceMode::Managed);
+        assert_eq!(c.gateway_id, "gw1");
+        assert_eq!(c.operator_namespace_allowlist, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn clap_parses_driver_config_allow_volumes_flag() {
+        let c = Config::parse_from(["openshell-driver-kyma", "--driver-config-allow-volumes"]);
+        assert!(c.driver_config_allow_volumes);
+
+        let c = Config::parse_from([
+            "openshell-driver-kyma",
+            "--driver-config-allow-volumes=false",
+        ]);
+        assert!(!c.driver_config_allow_volumes);
+    }
+
+    #[test]
     fn clap_defaults_match_default_impl() {
         let cli = Config::parse_from(["openshell-driver-kyma"]);
         let dflt = Config::default();
@@ -215,5 +294,16 @@ mod tests {
         assert_eq!(cli.enable_apirule, dflt.enable_apirule);
         assert_eq!(cli.gpu_support, dflt.gpu_support);
         assert_eq!(cli.health_port, dflt.health_port);
+        assert_eq!(cli.stop_timeout_secs, dflt.stop_timeout_secs);
+        assert_eq!(cli.workspace_mode, dflt.workspace_mode);
+        assert_eq!(cli.gateway_id, dflt.gateway_id);
+        assert_eq!(
+            cli.operator_namespace_allowlist,
+            dflt.operator_namespace_allowlist
+        );
+        assert_eq!(
+            cli.driver_config_allow_volumes,
+            dflt.driver_config_allow_volumes
+        );
     }
 }

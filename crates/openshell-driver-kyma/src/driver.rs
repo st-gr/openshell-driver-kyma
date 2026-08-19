@@ -8,13 +8,14 @@ use crate::error::DriverError;
 use crate::interfaces::{DriverMetrics, PlatformEnricher, SandboxProvisioner, WatchEvent};
 use computev1::pb::{
     compute_driver_server::ComputeDriver, CreateSandboxRequest, CreateSandboxResponse,
-    DeleteSandboxRequest, DeleteSandboxResponse, GetCapabilitiesRequest, GetCapabilitiesResponse,
-    GetGatewayListenerRequirementsRequest, GetGatewayListenerRequirementsResponse,
-    GetSandboxRequest, GetSandboxResponse, ListSandboxesRequest, ListSandboxesResponse,
-    StartSandboxRequest, StartSandboxResponse, StopSandboxRequest, StopSandboxResponse,
-    ValidateSandboxCreateRequest, ValidateSandboxCreateResponse, WatchSandboxesDeletedEvent,
-    WatchSandboxesEvent, WatchSandboxesPlatformEvent, WatchSandboxesRequest,
-    WatchSandboxesSandboxEvent,
+    DeleteSandboxRequest, DeleteSandboxResponse, DeleteWorkspaceRequest, DeleteWorkspaceResponse,
+    EnsureWorkspaceRequest, EnsureWorkspaceResponse, GetCapabilitiesRequest,
+    GetCapabilitiesResponse, GetGatewayListenerRequirementsRequest,
+    GetGatewayListenerRequirementsResponse, GetSandboxRequest, GetSandboxResponse,
+    ListSandboxesRequest, ListSandboxesResponse, StartSandboxRequest, StartSandboxResponse,
+    StopSandboxRequest, StopSandboxResponse, ValidateSandboxCreateRequest,
+    ValidateSandboxCreateResponse, WatchSandboxesDeletedEvent, WatchSandboxesEvent,
+    WatchSandboxesPlatformEvent, WatchSandboxesRequest, WatchSandboxesSandboxEvent,
 };
 use futures::Stream;
 use std::pin::Pin;
@@ -148,7 +149,8 @@ impl ComputeDriver for Driver {
         let name = sb.name.clone();
         let id = sb.id.clone();
         let workspace = sb.workspace.clone();
-        let kube_name = crate::provisioner::kube_resource_name(&workspace, &name);
+        let kube_name =
+            crate::workspace::kube_resource_name(self.cfg.workspace_mode, &workspace, &name);
         match self.provisioner.create(&sb).await {
             Ok(()) => {
                 self.metrics
@@ -158,17 +160,41 @@ impl ComputeDriver for Driver {
                 // here does NOT roll back the Sandbox CR; we surface it as
                 // a metric and log so operators can investigate. Returning
                 // the create-success keeps the gateway happy.
+                //
+                // The namespace is resolved once, here, and passed to both
+                // `render_apirule` (so it lands in the manifest) and
+                // `apply_apirule` (so it's the API target) — that is what
+                // keeps the two from disagreeing under Managed/Operator
+                // mode. `create()` already resolved the same value via the
+                // same `namespace_for` for this workspace/mode to place the
+                // Sandbox CR, so a resolution error here is not expected in
+                // practice, but is handled the same way as an apply
+                // failure rather than risked as a silent skip.
                 if self.cfg.enable_apirule {
-                    if let Some(manifest) = self
-                        .enricher
-                        .render_apirule(&id, &kube_name, &name, &workspace)
-                    {
-                        if let Err(e) = self.provisioner.apply_apirule(manifest).await {
+                    match crate::workspace::namespace_for(&self.cfg, &workspace) {
+                        Ok(namespace) => {
+                            if let Some(manifest) = self
+                                .enricher
+                                .render_apirule(&id, &kube_name, &name, &workspace, &namespace)
+                            {
+                                if let Err(e) =
+                                    self.provisioner.apply_apirule(manifest, &namespace).await
+                                {
+                                    self.metrics.sandbox_failed(&name, "apirule_failed");
+                                    tracing::warn!(
+                                        sandbox_name = %name,
+                                        error = %e,
+                                        "APIRule create failed; sandbox CR remains"
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
                             self.metrics.sandbox_failed(&name, "apirule_failed");
                             tracing::warn!(
                                 sandbox_name = %name,
                                 error = %e,
-                                "APIRule create failed; sandbox CR remains"
+                                "APIRule namespace resolution failed; sandbox CR remains"
                             );
                         }
                     }
@@ -206,33 +232,35 @@ impl ComputeDriver for Driver {
 
     async fn stop_sandbox(
         &self,
-        _req: Request<StopSandboxRequest>,
+        req: Request<StopSandboxRequest>,
     ) -> Result<Response<StopSandboxResponse>, Status> {
-        Err(Status::unimplemented(
-            "stop sandbox is not implemented by the kyma compute driver",
-        ))
+        let id = req.into_inner().sandbox_id;
+        if id.is_empty() {
+            return Err(Status::invalid_argument("sandbox_id is required"));
+        }
+        self.provisioner
+            .stop_sandbox(&id)
+            .await
+            .map_err(Status::from)?;
+        Ok(Response::new(StopSandboxResponse {}))
     }
 
     /// Added upstream in v0.0.106 as the counterpart to `StopSandbox`
-    /// (resume a stopped sandbox's platform resources). `stop_sandbox` above
-    /// is itself unimplemented, so there is no "stopped" state this driver
-    /// can ever produce for `start_sandbox` to resume from — returning
-    /// `Unimplemented` here matches that, rather than guessing at behavior
-    /// for a state the driver cannot enter.
-    ///
-    /// TODO(upstream v0.0.106 StartSandbox): once `stop_sandbox` gains a
-    /// real implementation (e.g. scaling the Sandbox CR's workload to zero),
-    /// implement the matching resume here. No upstream Kubernetes driver
-    /// source is vendored into this repo to copy the expected semantics
-    /// from; only the proto contract (`sandbox_id` + `sandbox_name`, no
-    /// other fields) is available.
+    /// (resume a stopped sandbox's platform resources). Delegates to
+    /// `SandboxProvisioner::start_sandbox`, mirroring `stop_sandbox` above.
     async fn start_sandbox(
         &self,
-        _req: Request<StartSandboxRequest>,
+        req: Request<StartSandboxRequest>,
     ) -> Result<Response<StartSandboxResponse>, Status> {
-        Err(Status::unimplemented(
-            "start sandbox is not implemented by the kyma compute driver",
-        ))
+        let id = req.into_inner().sandbox_id;
+        if id.is_empty() {
+            return Err(Status::invalid_argument("sandbox_id is required"));
+        }
+        self.provisioner
+            .start_sandbox(&id)
+            .await
+            .map_err(Status::from)?;
+        Ok(Response::new(StartSandboxResponse {}))
     }
 
     async fn delete_sandbox(
@@ -307,6 +335,48 @@ impl ComputeDriver for Driver {
             Ok(mapped)
         });
         Ok(Response::new(Box::pin(stream) as Self::WatchSandboxesStream))
+    }
+
+    /// Dispatches to `SandboxProvisioner::ensure_workspace`. Under `Shared`
+    /// mode this is a deliberate successful no-op: `Shared` has no
+    /// workspace bootstrap to do, so an error here would only ever be
+    /// spurious. Note this RPC is not the only path to bootstrap — the
+    /// gateway does not call `EnsureWorkspace` before every sandbox create
+    /// (grepping v0.0.109's `grpc/sandbox.rs`, it's called zero times
+    /// there), so `KymaProvisioner::create` also bootstraps `Managed`
+    /// namespaces lazily, itself, on every create (see `provisioner.rs`).
+    /// This RPC remains part of the contract and keeps working as its own
+    /// path. `Managed`/`Operator` modes gate on the provisioner's real
+    /// bootstrap logic — both are fully implemented (see `workspace.rs`,
+    /// `provisioner.rs`).
+    async fn ensure_workspace(
+        &self,
+        req: Request<EnsureWorkspaceRequest>,
+    ) -> Result<Response<EnsureWorkspaceResponse>, Status> {
+        let ws = req.into_inner().workspace;
+        crate::workspace::validate_workspace_name(self.cfg.workspace_mode, &ws)
+            .map_err(Status::from)?;
+        self.provisioner
+            .ensure_workspace(&ws)
+            .await
+            .map_err(Status::from)?;
+        Ok(Response::new(EnsureWorkspaceResponse {}))
+    }
+
+    /// Dispatches to `SandboxProvisioner::delete_workspace`. See
+    /// `ensure_workspace` for why `Shared` mode must succeed as a no-op.
+    async fn delete_workspace(
+        &self,
+        req: Request<DeleteWorkspaceRequest>,
+    ) -> Result<Response<DeleteWorkspaceResponse>, Status> {
+        let ws = req.into_inner().workspace;
+        crate::workspace::validate_workspace_name(self.cfg.workspace_mode, &ws)
+            .map_err(Status::from)?;
+        self.provisioner
+            .delete_workspace(&ws)
+            .await
+            .map_err(Status::from)?;
+        Ok(Response::new(DeleteWorkspaceResponse {}))
     }
 }
 
@@ -419,34 +489,6 @@ mod tests {
             );
         }
         assert_eq!(responses[0], responses[1]);
-    }
-
-    #[tokio::test]
-    async fn stop_sandbox_returns_unimplemented() {
-        let d = make_driver_with_mocks(
-            Config::default(),
-            MockSandboxProvisioner::new(),
-            MockDriverMetrics::new(),
-        );
-        let s = d
-            .stop_sandbox(Request::new(StopSandboxRequest::default()))
-            .await
-            .unwrap_err();
-        assert_eq!(s.code(), tonic::Code::Unimplemented);
-    }
-
-    #[tokio::test]
-    async fn start_sandbox_returns_unimplemented() {
-        let d = make_driver_with_mocks(
-            Config::default(),
-            MockSandboxProvisioner::new(),
-            MockDriverMetrics::new(),
-        );
-        let s = d
-            .start_sandbox(Request::new(StartSandboxRequest::default()))
-            .await
-            .unwrap_err();
-        assert_eq!(s.code(), tonic::Code::Unimplemented);
     }
 
     // ---------- ValidateSandboxCreate ----------

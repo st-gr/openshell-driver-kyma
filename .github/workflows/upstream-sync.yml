@@ -56,6 +56,19 @@ jobs:
     outputs:
       changed: ${{ steps.verdict.outputs.changed }}
       summary: ${{ steps.verdict.outputs.summary }}
+      # The tag a re-vendor should target -- distinct from GATEWAY_TAG
+      # (resolve-upstream-refs.sh, from GATEWAY_REF), which pins the
+      # gateway *image* and can legitimately sit behind the newest
+      # upstream contract tag. See check-proto-drift.sh's VENDOR_TARGET_TAG
+      # line, which this is sourced from.
+      vendor_target_tag: ${{ steps.drift.outputs.vendor_target_tag }}
+      # scripts/check-pin-status.sh's findings, threaded through to the sync
+      # job so it can mention pin status in the PR body. Advisory only --
+      # deliberately NOT part of the changed/summary verdict, see the "Check
+      # gateway pin status" step below.
+      pin_status: ${{ steps.pin.outputs.status }}
+      pinned_ref: ${{ steps.pin.outputs.pinned_ref }}
+      pin_evaporated: ${{ steps.pin.outputs.evaporated }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -87,6 +100,8 @@ jobs:
           else
             echo "behind=false" >> "$GITHUB_OUTPUT"
           fi
+          vendor_target_tag=$(sed -n 's/^VENDOR_TARGET_TAG: //p' /tmp/drift.txt | tail -1)
+          echo "vendor_target_tag=$vendor_target_tag" >> "$GITHUB_OUTPUT"
 
       - name: Compare pinned images against upstream
         id: images
@@ -116,6 +131,37 @@ jobs:
           else
             echo "stale=false" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Check gateway pin status
+        # Advisory only -- check-pin-status.sh always exits 0. Its result is
+        # deliberately NOT fed into the Verdict step below: a stale pin
+        # reason isn't "upstream moved" in the sense this job otherwise
+        # means it. It doesn't need re-vendoring or a new smoke run, it
+        # needs a human to revert one line in .github/upstream-compat.env.
+        # Folding it into `changed` would make this job open a PR for
+        # something a PR can't fix.
+        #
+        # shell: bash for the same pipefail reason as the other steps in
+        # this file -- `tee` would otherwise mask a failure in the pipeline
+        # before it.
+        id: pin
+        shell: bash
+        run: |
+          ./scripts/check-pin-status.sh | tee /tmp/pin-status.txt
+
+          {
+            echo "### Gateway pin status"
+            echo '```'
+            grep -vE '^[A-Z_]+:' /tmp/pin-status.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          status=$(sed -n 's/^PIN_STATUS: //p' /tmp/pin-status.txt | tail -1)
+          pinned_ref=$(sed -n 's/^PINNED_REF: //p' /tmp/pin-status.txt | tail -1)
+          evaporated=$(sed -n 's/^PIN_REASON_EVAPORATED: //p' /tmp/pin-status.txt | tail -1)
+          echo "status=${status:-unknown}" >> "$GITHUB_OUTPUT"
+          echo "pinned_ref=${pinned_ref}" >> "$GITHUB_OUTPUT"
+          echo "evaporated=${evaporated:-false}" >> "$GITHUB_OUTPUT"
 
       - name: Verdict
         id: verdict
@@ -214,11 +260,46 @@ jobs:
         shell: bash
         run: ./scripts/resolve-upstream-refs.sh | tee -a "$GITHUB_ENV"
 
+      - name: Set proto contract target tag
+        # PROTO_TARGET_TAG (from detect's vendor_target_tag output, itself
+        # sourced from check-proto-drift.sh) is the CONTRACT tag to
+        # re-vendor to. GATEWAY_TAG (from resolve-upstream-refs.sh, i.e.
+        # GATEWAY_REF) is the pinned gateway IMAGE tag. The two can
+        # legitimately differ -- see the file header. Passed through env:
+        # rather than interpolated into the script text, per that header.
+        #
+        # No fallback to GATEWAY_TAG here on purpose: that fallback is
+        # exactly the bug this commit removes. An empty or malformed
+        # VENDOR_TARGET_TAG means check-proto-drift.sh changed shape or
+        # failed to emit its line -- fail loudly rather than silently
+        # re-targeting the vendor at the (possibly wrong) image tag.
+        env:
+          VENDOR_TARGET_TAG: ${{ needs.detect.outputs.vendor_target_tag }}
+        shell: bash
+        run: |
+          if [[ -z "$VENDOR_TARGET_TAG" ]]; then
+            echo "error: detect job did not report a VENDOR_TARGET_TAG." >&2
+            echo "This means check-proto-drift.sh changed shape or failed to" >&2
+            echo "print its 'VENDOR_TARGET_TAG: <tag>' line. Refusing to guess" >&2
+            echo "a vendor target -- NOT falling back to GATEWAY_TAG (the" >&2
+            echo "gateway image tag), since that is the exact bug this step" >&2
+            echo "exists to prevent." >&2
+            exit 1
+          fi
+          if [[ ! "$VENDOR_TARGET_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "error: VENDOR_TARGET_TAG ('$VENDOR_TARGET_TAG') is not a" >&2
+            echo "well-formed vX.Y.Z tag. Refusing to feed it into" >&2
+            echo "make proto-vendor TAG=<...>." >&2
+            exit 1
+          fi
+          echo "PROTO_TARGET_TAG=$VENDOR_TARGET_TAG" >> "$GITHUB_ENV"
+
       - name: Create the working branch
+        shell: bash
         run: |
           git config user.name  "st-gr"
           git config user.email "38470677+st-gr@users.noreply.github.com"
-          git checkout -b "upstream-sync/${GATEWAY_TAG}-${GITHUB_RUN_ID}"
+          git checkout -b "upstream-sync/${PROTO_TARGET_TAG}-${GITHUB_RUN_ID}"
 
       - name: Let Claude perform the sync
         id: claude
@@ -250,14 +331,21 @@ jobs:
           # retrievable. Each cargo cycle costs several turns.
           claude_args: --max-turns 120 --allowedTools "Bash,Read,Edit,Write,Glob,Grep"
           prompt: |
-            Sync this driver to upstream OpenShell ${{ env.GATEWAY_TAG }}.
+            Sync this driver's proto contract to upstream OpenShell ${{ env.PROTO_TARGET_TAG }}.
+
+            Note: this may differ from the pinned gateway image tag
+            (${{ env.GATEWAY_TAG }}) -- upstream can tag a contract release
+            without publishing a matching gateway/supervisor image. Step 1
+            below re-vendors the CONTRACT to ${{ env.PROTO_TARGET_TAG }};
+            step 4 updates the pinned IMAGE digests to ${{ env.GATEWAY_TAG }}
+            separately. Do not conflate the two.
 
             Detection reported: ${{ needs.detect.outputs.summary }}
             Interop smoke result: ${{ needs.smoke.result }}
 
             Do all of the following:
 
-            1. Re-vendor the protos with `make proto-vendor TAG=${{ env.GATEWAY_TAG }}`.
+            1. Re-vendor the protos with `make proto-vendor TAG=${{ env.PROTO_TARGET_TAG }}`.
                NEVER hand-edit anything under proto/ — scripts/check-proto-drift.sh
                exists to catch exactly that, and it will catch you.
             2. Run `cargo build --workspace --all-targets` and fix every compile
@@ -305,6 +393,7 @@ jobs:
 
       - name: Commit and open the pull request
         if: ${{ !cancelled() }}
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DETECT_SUMMARY: ${{ needs.detect.outputs.summary }}
@@ -312,6 +401,9 @@ jobs:
           SMOKE_GATEWAY_TAG: ${{ needs.smoke.outputs.tested_gateway_tag }}
           GATE_OUTCOME: ${{ steps.gate.outcome }}
           CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
+          PIN_STATUS: ${{ needs.detect.outputs.pin_status }}
+          PINNED_REF: ${{ needs.detect.outputs.pinned_ref }}
+          PIN_EVAPORATED: ${{ needs.detect.outputs.pin_evaporated }}
         run: |
           # `git diff --quiet` only sees modifications to already-tracked
           # files, so a sync that added only new files (e.g. a brand-new RPC
@@ -324,9 +416,9 @@ jobs:
             exit 0
           fi
 
-          branch="upstream-sync/${GATEWAY_TAG}-${GITHUB_RUN_ID}"
+          branch="upstream-sync/${PROTO_TARGET_TAG}-${GITHUB_RUN_ID}"
           git add -A
-          git commit -m "chore: sync to upstream ${GATEWAY_TAG}
+          git commit -m "chore: sync to upstream ${PROTO_TARGET_TAG}
 
           ${DETECT_SUMMARY}
 
@@ -351,6 +443,17 @@ jobs:
             claude="DID NOT FINISH — likely hit --max-turns; see the 'Let Claude perform the sync' step"
           fi
 
+          # scripts/check-pin-status.sh's finding, worded for a reviewer.
+          # Advisory only -- shown for awareness, never blocks the PR and
+          # never changes whether this job runs.
+          pin_line="not pinned (tracking latest)"
+          if [[ "$PIN_STATUS" == "pinned" ]]; then
+            pin_line="pinned to \`${PINNED_REF}\`"
+            if [[ "$PIN_EVAPORATED" == "true" ]]; then
+              pin_line="${pin_line} -- images for a newer tag now exist; consider reverting to \`latest\` (see the job summary for detail)"
+            fi
+          fi
+
           # Assign the heredoc to a variable first rather than passing
           # `--body "$(cat <<EOF ... EOF)"` directly: under -e, a command
           # substitution used as another command's argument does not abort
@@ -361,15 +464,21 @@ jobs:
           body="$(cat <<EOF
           Automated upstream compatibility sync.
 
+          These two tags can legitimately differ: upstream can tag a proto
+          contract release without publishing a matching gateway/supervisor
+          image.
+
           | | |
           |---|---|
-          | Upstream tag | \`${GATEWAY_TAG}\` |
+          | Proto contract tag (vendor target) | \`${PROTO_TARGET_TAG}\` |
+          | Gateway image tag | \`${GATEWAY_TAG}\` |
           | Detection | ${DETECT_SUMMARY} |
           | Interop smoke | \`${SMOKE_RESULT}\` against gateway \`${SMOKE_GATEWAY_TAG}\` |
           | Local gate | ${gate} |
           | Gateway digest | \`${GATEWAY_IMAGE##*@}\` |
           | Supervisor digest | \`${SUPERVISOR_IMAGE##*@}\` |
           | Proto pin before this sync | \`${PINNED_PROTO_REF}\` |
+          | Gateway pin | ${pin_line} |
 
           Because this PR was created with \`GITHUB_TOKEN\`, GitHub will not
           auto-run \`branch-checks\` on it. The same checks already ran in this
@@ -382,7 +491,7 @@ jobs:
           )"
 
           gh pr create $draft \
-            --title "chore: sync to upstream ${GATEWAY_TAG}" \
+            --title "chore: sync to upstream ${PROTO_TARGET_TAG}" \
             --body "$body"
 
       - name: Fail the job if the sync did not complete cleanly

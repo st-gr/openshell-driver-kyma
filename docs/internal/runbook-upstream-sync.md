@@ -206,6 +206,94 @@ You should see a green run each week on the scheduled day. Silence that means "b
 as silence that means "fine" is the exact failure that let the protos drift
 for two months.
 
+## Workspace modes
+
+Maintainer notes for `driver.workspaceMode`. `Shared` is the default and what
+the live cluster runs; `Managed` and `Operator` are documented here for
+whoever flips them.
+
+### Operator mode prerequisite
+
+Upstream's Operator mode only checks the allowlist; it does not bootstrap.
+This driver pins `openshell-sandbox` into every sandbox pod spec, so an
+operator-managed namespace lacking that ServiceAccount produces pods that
+never start — and `verify_psa_label` hard-fails without the PSA label.
+
+Before adding a namespace to `driver.operatorNamespaceAllowlist`, the
+platform team must prepare it:
+
+```bash
+kubectl label namespace tenant-a pod-security.kubernetes.io/enforce=privileged
+kubectl -n tenant-a create serviceaccount openshell-sandbox
+kubectl -n tenant-a patch serviceaccount openshell-sandbox \
+  -p '{"automountServiceAccountToken": false}'
+```
+
+(`tenant-a` above is an example namespace name — substitute the real one.)
+
+This is deliberate. Granting the driver cluster-wide `serviceaccounts: create`
+would contradict the entire premise of a mode where the platform team owns
+namespace contents; the ClusterRole for `operator` grants `namespaces: ["get"]`
+only, never `create` or `delete`.
+
+The allowlist is read **once at startup**. Adding a namespace requires a
+driver restart, not just a `helm upgrade --reuse-values` — and, as noted
+above, `--reuse-values` carries forward the *old* chart's defaults, so pass
+`driver.operatorNamespaceAllowlist` explicitly on every upgrade rather than
+relying on it being reused.
+
+### `driver_config` volumes are gated off by default
+
+`driver_config.volumes[].persistent_volume_claim.claim_name`
+(`DriverSandboxTemplate.driver_config`, proto field 12) is **not**
+sandboxed against other sandboxes' PVCs. `driver_config.rs`'s validation
+constrains it to a DNS-1123 subdomain and nothing more — no ownership
+check, no allowlist.
+
+The concrete exposure in `Shared` mode (the default): every sandbox's
+workspace PVC lives in one namespace under the predictable name
+`{workspace}--{name}-workspace`. A template author who can set
+`driver_config` can name another sandbox's workspace PVC directly in
+`driver_config.volumes[].persistent_volume_claim.claim_name` and mount it
+read-write via `driver_config.containers.agent.volume_mounts`, reading or
+overwriting that sandbox's workspace. `Managed` and `Operator` modes don't
+remove the underlying gap — the claim name is still unchecked — but they
+at least put each workspace in its own namespace, which is what Kubernetes
+RBAC actually scopes.
+
+Upstream's own Kubernetes driver has the identical validation shape (same
+DNS-1123-subdomain-only check, no ownership check either), so this is
+inherited contract behavior, not a defect introduced by this branch. It is
+still worth flagging here: `driver_config` support is new on this branch,
+and `Shared`'s single-namespace default makes the exposure easier to reach
+than it may be for upstream's own callers.
+
+**Gated.** `--driver-config-allow-volumes` / `driver.driverConfigAllowVolumes`
+defaults to `false`. With it off, `driver_config.rs` rejects any
+`driver_config` that declares `volumes[]` or
+`containers.agent.volume_mounts[]` — with `DriverError::PermissionDenied`
+naming the flag, distinct from the `InvalidArgument` a malformed
+`driver_config` gets — from both `CreateSandbox` and
+`ValidateSandboxCreate`. The gate covers only those two fields;
+`driver_config.pod.*` (node selector, runtime class, tolerations, priority
+class) and `containers.agent.resources` are not the exposure and keep
+working regardless. Set the flag to `true` to allow `driver_config`
+volumes on a driver instance — there is still no ownership check behind
+it, so only enable it where every `driver_config` author is already
+trusted with arbitrary PVC access in the target namespace (e.g. a single
+trusted gateway, not multi-tenant callers).
+
+### Switching workspace modes is breaking
+
+Both the namespace a sandbox lives in and its object names change with the
+mode, so every sandbox created under the old mode becomes unreachable under
+the new one — **orphaned, not deleted.** For example, moving from `shared` to
+`operator` leaves `default--hello` sitting in `openshell-system` with no
+counterpart in whatever namespace `operator` resolves `default` to.
+
+Delete every sandbox before switching `driver.workspaceMode`, then recreate
+them afterwards. Do not flip the mode on a cluster with live sandboxes.
+
 ## One-time setup
 
 1. **No Claude GitHub App is needed.** `upstream-sync.yml` passes

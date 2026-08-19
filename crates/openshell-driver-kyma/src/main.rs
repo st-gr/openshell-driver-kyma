@@ -47,9 +47,25 @@ async fn main() -> Result<()> {
     let cfg = Config::parse();
     init_tracing(&cfg.log_level);
 
+    openshell_driver_kyma::workspace::validate_workspace_mode(&cfg)
+        .map_err(|e| anyhow::anyhow!("invalid workspace configuration: {e}"))?;
+
+    // Fail closed rather than silently downgrading isolation. Kept as its
+    // own check next to `validate_workspace_mode` rather than folded into
+    // it (in `workspace.rs`): `validate_workspace_mode` verifies a config is
+    // internally consistent (e.g. `managed` has a usable `gateway_id`); this
+    // check is about a known gap in what `KymaProvisioner` can actually do
+    // (see `bootstrap_managed_namespace`'s doc comment in `provisioner.rs`),
+    // which belongs at the composition site where the provisioner is wired
+    // up, not inside the mode-validation module itself.
+    if let Some(msg) = managed_network_policy_gap(&cfg) {
+        anyhow::bail!(msg);
+    }
+
     tracing::info!(
         socket = %cfg.socket,
         namespace = %cfg.namespace,
+        workspace_mode = ?cfg.workspace_mode,
         gpu_support = cfg.gpu_support,
         enable_apirule = cfg.enable_apirule,
         istio_inject_sandboxes = cfg.istio_inject_sandboxes,
@@ -59,14 +75,25 @@ async fn main() -> Result<()> {
     let kube_client = build_kube_client().await.context("build kube client")?;
 
     // PSA fail-fast: must happen before we bind the listener, so a
-    // misconfigured cluster never sees a half-up driver.
+    // misconfigured cluster never sees a half-up driver. Only meaningful
+    // under `Shared`, where `cfg.namespace` is the one static namespace the
+    // chart installs ahead of time — under `Managed`/`Operator` there is no
+    // single namespace to check yet at startup; that check moves into the
+    // per-workspace path in later phases.
     let enricher =
         Arc::new(KymaEnricher::new(kube_client.clone(), cfg.clone())) as Arc<dyn PlatformEnricher>;
-    enricher
-        .detect_psa(&cfg.namespace)
-        .await
-        .context("PSA pre-flight check")?;
-    tracing::info!(namespace = %cfg.namespace, "PSA enforce=privileged confirmed");
+    if cfg.workspace_mode == openshell_driver_kyma::workspace::WorkspaceMode::Shared {
+        enricher
+            .detect_psa(&cfg.namespace)
+            .await
+            .context("PSA pre-flight check")?;
+        tracing::info!(namespace = %cfg.namespace, "PSA enforce=privileged confirmed");
+    } else {
+        tracing::info!(
+            workspace_mode = ?cfg.workspace_mode,
+            "skipping startup PSA pre-flight check; not applicable outside Shared mode"
+        );
+    }
 
     let provisioner =
         Arc::new(KymaProvisioner::new(kube_client, cfg.clone())) as Arc<dyn SandboxProvisioner>;
@@ -111,6 +138,35 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Whether the driver must refuse to start.
+///
+/// `Managed` namespace NetworkPolicy support is not implemented yet —
+/// `KymaProvisioner::bootstrap_managed_namespace` creates the namespace,
+/// its PSA label, and the sandbox ServiceAccount, but deliberately no
+/// NetworkPolicy (see that function's doc comment for why: the chart's
+/// sandbox policy depends on Helm-only inputs that don't exist in `Config`).
+/// An operator who explicitly asked for network isolation via
+/// `--enable-network-policy` must never silently get sandboxes in managed
+/// namespaces with weaker isolation than they configured, so this combination
+/// is refused at startup rather than allowed to run unenforced.
+#[must_use]
+fn managed_network_policy_gap(cfg: &Config) -> Option<String> {
+    if cfg.workspace_mode == openshell_driver_kyma::workspace::WorkspaceMode::Managed
+        && cfg.enable_network_policy
+    {
+        Some(
+            "managed-namespace NetworkPolicy support is not implemented yet; refusing to \
+             start with --workspace-mode managed --enable-network-policy=true, since \
+             continuing would give sandboxes in managed namespaces weaker network isolation \
+             than requested. Set --enable-network-policy=false to accept no network isolation \
+             for managed namespaces, or use --workspace-mode shared."
+                .to_string(),
+        )
+    } else {
+        None
+    }
+}
+
 fn init_tracing(level: &str) {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
     tracing_subscriber::fmt()
@@ -133,5 +189,49 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = sigterm.recv() => tracing::info!("SIGTERM received, shutting down"),
         _ = sigint.recv() => tracing::info!("SIGINT received, shutting down"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openshell_driver_kyma::workspace::WorkspaceMode;
+
+    fn cfg_with(mode: WorkspaceMode, enable_network_policy: bool) -> Config {
+        Config {
+            workspace_mode: mode,
+            enable_network_policy,
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn managed_with_network_policy_enabled_is_a_gap() {
+        let cfg = cfg_with(WorkspaceMode::Managed, true);
+        let msg = managed_network_policy_gap(&cfg).expect("must refuse to start");
+        assert!(msg.contains("NetworkPolicy"));
+        assert!(msg.contains("--workspace-mode managed"));
+    }
+
+    #[test]
+    fn managed_without_network_policy_is_fine() {
+        let cfg = cfg_with(WorkspaceMode::Managed, false);
+        assert!(managed_network_policy_gap(&cfg).is_none());
+    }
+
+    #[test]
+    fn shared_with_network_policy_enabled_is_fine() {
+        // Shared's NetworkPolicy is rendered by the chart, not this driver,
+        // so this combination is unaffected by the managed-mode gap.
+        let cfg = cfg_with(WorkspaceMode::Shared, true);
+        assert!(managed_network_policy_gap(&cfg).is_none());
+    }
+
+    #[test]
+    fn operator_with_network_policy_enabled_is_fine() {
+        // Operator namespaces are pre-existing and platform-team-owned;
+        // this task's gap is specific to namespaces this driver bootstraps.
+        let cfg = cfg_with(WorkspaceMode::Operator, true);
+        assert!(managed_network_policy_gap(&cfg).is_none());
     }
 }

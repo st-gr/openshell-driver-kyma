@@ -13,10 +13,11 @@
 use async_trait::async_trait;
 use computev1::pb::{
     compute_driver_client::ComputeDriverClient, compute_driver_server::ComputeDriverServer,
-    watch_sandboxes_event::Payload, CreateSandboxRequest, DeleteSandboxRequest, DriverSandbox,
-    DriverSandboxSpec, DriverSandboxTemplate, GetCapabilitiesRequest,
-    GetGatewayListenerRequirementsRequest, GetSandboxRequest, ListSandboxesRequest,
-    StartSandboxRequest, StopSandboxRequest, ValidateSandboxCreateRequest, WatchSandboxesRequest,
+    watch_sandboxes_event::Payload, CreateSandboxRequest, DeleteSandboxRequest,
+    DeleteWorkspaceRequest, DriverSandbox, DriverSandboxSpec, DriverSandboxTemplate,
+    EnsureWorkspaceRequest, GetCapabilitiesRequest, GetGatewayListenerRequirementsRequest,
+    GetSandboxRequest, ListSandboxesRequest, StartSandboxRequest, StopSandboxRequest,
+    ValidateSandboxCreateRequest, WatchSandboxesRequest,
 };
 use mockall::mock;
 use openshell_driver_kyma::{
@@ -48,7 +49,15 @@ mock! {
         async fn watch(&self) -> Result<mpsc::Receiver<WatchEvent>, DriverError>;
         async fn validate_create(&self, sb: &DriverSandbox) -> Result<(), DriverError>;
         async fn has_gpu_capacity(&self, count: u32) -> Result<bool, DriverError>;
-        async fn apply_apirule(&self, manifest: serde_json::Value) -> Result<(), DriverError>;
+        async fn start_sandbox(&self, sandbox_id: &str) -> Result<(), DriverError>;
+        async fn stop_sandbox(&self, sandbox_id: &str) -> Result<(), DriverError>;
+        async fn apply_apirule(
+            &self,
+            manifest: serde_json::Value,
+            namespace: &str,
+        ) -> Result<(), DriverError>;
+        async fn ensure_workspace(&self, workspace: &str) -> Result<(), DriverError>;
+        async fn delete_workspace(&self, workspace: &str) -> Result<(), DriverError>;
     }
 }
 
@@ -68,6 +77,7 @@ mock! {
             kube_name: &str,
             sandbox_name: &str,
             workspace: &str,
+            namespace: &str,
         ) -> Option<serde_json::Value>;
     }
 }
@@ -101,6 +111,24 @@ async fn start_server(
     tokio::sync::oneshot::Sender<()>,
     tokio::task::JoinHandle<()>,
 ) {
+    start_server_with_config(socket, provisioner, enricher, metrics, Config::default()).await
+}
+
+/// Like `start_server`, but with an explicit `Config` — needed for the tests
+/// that exercise mode-dependent behavior (e.g. the `EnsureWorkspace`/
+/// `DeleteWorkspace` boundary check, which only requires a strict DNS-1123
+/// workspace under `Managed`/`Operator`).
+async fn start_server_with_config(
+    socket: PathBuf,
+    provisioner: MockProvisioner,
+    enricher: MockEnricher,
+    metrics: MockMetrics,
+    cfg: Config,
+) -> (
+    ComputeDriverClient<tonic::transport::Channel>,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<()>,
+) {
     let listener = UnixListener::bind(&socket).expect("bind UDS");
     let stream = UnixListenerStream::new(listener);
 
@@ -108,7 +136,7 @@ async fn start_server(
         Arc::new(provisioner),
         Arc::new(enricher),
         Arc::new(metrics),
-        Config::default(),
+        cfg,
     );
 
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
@@ -309,8 +337,48 @@ async fn grpc_list_returns_empty_when_no_sandboxes() {
     let _ = handle.await;
 }
 
+/// The whole point of Phase 1: these used to return Unimplemented, and the
+/// gateway does NOT swallow that for stop/start — `openshell sandbox stop`
+/// failed against this driver.
 #[tokio::test]
-async fn grpc_stop_returns_unimplemented() {
+async fn grpc_stop_and_start_are_implemented() {
+    let mut p = MockProvisioner::new();
+    p.expect_stop_sandbox().times(1).returning(|_| Ok(()));
+    p.expect_start_sandbox().times(1).returning(|_| Ok(()));
+
+    let (_dir, socket) = temp_socket();
+    let (mut client, shutdown, handle) =
+        start_server(socket, p, MockEnricher::new(), MockMetrics::new()).await;
+
+    client
+        .stop_sandbox(StopSandboxRequest {
+            sandbox_id: "sb-1".into(),
+            sandbox_name: "n".into(),
+        })
+        .await
+        .expect("stop must be implemented");
+    client
+        .start_sandbox(StartSandboxRequest {
+            sandbox_id: "sb-1".into(),
+            sandbox_name: "n".into(),
+        })
+        .await
+        .expect("start must be implemented");
+
+    drop(shutdown);
+    // Unlike other tests here, this one's whole purpose is to catch a
+    // regressed handler that stops calling the provisioner. mockall's
+    // `.times(1)` checkpoint fires on Drop of the mock, which happens
+    // inside the spawned server task as it tears down — a task panic
+    // there surfaces only as `Err` from this JoinHandle, not as a panic
+    // on the current thread. `let _ = handle.await;` (used elsewhere in
+    // this file) would silently swallow that and let the test report
+    // "ok" even when the expectation was violated, so unwrap it instead.
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn grpc_stop_rejects_empty_sandbox_id() {
     let (_dir, socket) = temp_socket();
     let (mut client, shutdown, handle) = start_server(
         socket,
@@ -322,24 +390,19 @@ async fn grpc_stop_returns_unimplemented() {
 
     let err = client
         .stop_sandbox(StopSandboxRequest {
-            sandbox_id: "id".into(),
-            sandbox_name: "x".into(),
+            sandbox_id: String::new(),
+            sandbox_name: "n".into(),
         })
         .await
-        .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::Unimplemented);
+        .expect_err("empty sandbox_id must be rejected");
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
 
     drop(shutdown);
     let _ = handle.await;
 }
 
-/// `StartSandbox` was added upstream in v0.0.106 as the resume counterpart
-/// to `StopSandbox`, which this driver does not implement — see
-/// `grpc_stop_returns_unimplemented`. Proves the RPC is wired into the
-/// server (not a wire-level `Unimplemented` from a missing method) while
-/// still surfacing an application-level `Unimplemented` status.
 #[tokio::test]
-async fn grpc_start_returns_unimplemented() {
+async fn grpc_start_rejects_empty_sandbox_id() {
     let (_dir, socket) = temp_socket();
     let (mut client, shutdown, handle) = start_server(
         socket,
@@ -351,12 +414,12 @@ async fn grpc_start_returns_unimplemented() {
 
     let err = client
         .start_sandbox(StartSandboxRequest {
-            sandbox_id: "id".into(),
-            sandbox_name: "x".into(),
+            sandbox_id: String::new(),
+            sandbox_name: "n".into(),
         })
         .await
-        .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::Unimplemented);
+        .expect_err("empty sandbox_id must be rejected");
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
 
     drop(shutdown);
     let _ = handle.await;
@@ -427,4 +490,181 @@ async fn grpc_watch_streams_two_events_then_closes() {
 
     drop(shutdown);
     let _ = handle.await;
+}
+
+#[tokio::test]
+async fn grpc_ensure_workspace_rejects_empty_workspace() {
+    let (_dir, socket) = temp_socket();
+    let (mut client, shutdown, handle) = start_server(
+        socket,
+        MockProvisioner::new(),
+        MockEnricher::new(),
+        MockMetrics::new(),
+    )
+    .await;
+
+    let err = client
+        .ensure_workspace(EnsureWorkspaceRequest {
+            workspace: String::new(),
+        })
+        .await
+        .expect_err("empty workspace must be rejected");
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+    drop(shutdown);
+    let _ = handle.await;
+}
+
+/// Shared mode is a no-op, but it must be a *successful* no-op: a caller
+/// (or a future gateway version) may still call EnsureWorkspace directly, and
+/// an error here would surface as a spurious failure even though `Shared`
+/// has no bootstrap to do. `.times(1)` plus `handle.await.unwrap()` (rather than
+/// `let _ = handle.await;`) makes this non-vacuous: mockall's default
+/// call-count is 0..usize::MAX, so an expectation without `.times(..)` is
+/// satisfied by zero calls, and the checkpoint panic that would catch a
+/// regressed handler fires inside the spawned server task, which only
+/// surfaces as an `Err` from the JoinHandle.
+#[tokio::test]
+async fn grpc_ensure_workspace_succeeds_in_shared_mode() {
+    let mut p = MockProvisioner::new();
+    p.expect_ensure_workspace().times(1).returning(|_| Ok(()));
+
+    let (_dir, socket) = temp_socket();
+    let (mut client, shutdown, handle) =
+        start_server(socket, p, MockEnricher::new(), MockMetrics::new()).await;
+
+    client
+        .ensure_workspace(EnsureWorkspaceRequest {
+            workspace: "default".into(),
+        })
+        .await
+        .expect("shared mode must succeed");
+
+    drop(shutdown);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn grpc_delete_workspace_rejects_empty_workspace() {
+    let (_dir, socket) = temp_socket();
+    let (mut client, shutdown, handle) = start_server(
+        socket,
+        MockProvisioner::new(),
+        MockEnricher::new(),
+        MockMetrics::new(),
+    )
+    .await;
+
+    let err = client
+        .delete_workspace(DeleteWorkspaceRequest {
+            workspace: String::new(),
+        })
+        .await
+        .expect_err("empty workspace must be rejected");
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+    drop(shutdown);
+    let _ = handle.await;
+}
+
+/// A traversal-shaped workspace must be rejected before it reaches the
+/// provisioner — the mock has no expectations set, so a call that got past
+/// validation would panic inside the spawned server task rather than
+/// surface as a clean `InvalidArgument`. This is a `Managed`/`Operator`
+/// property: under those modes `workspace` becomes a Kubernetes namespace
+/// name and therefore a raw, unencoded URL path segment. `Shared` never
+/// uses `workspace` this way — see
+/// `grpc_ensure_workspace_shared_mode_accepts_a_traversal_shaped_workspace`
+/// below for the property that must hold there instead.
+#[tokio::test]
+async fn grpc_ensure_workspace_rejects_path_traversal() {
+    let (_dir, socket) = temp_socket();
+    let cfg = Config {
+        workspace_mode: openshell_driver_kyma::workspace::WorkspaceMode::Managed,
+        gateway_id: "gw1".into(),
+        ..Config::default()
+    };
+    let (mut client, shutdown, handle) = start_server_with_config(
+        socket,
+        MockProvisioner::new(),
+        MockEnricher::new(),
+        MockMetrics::new(),
+        cfg,
+    )
+    .await;
+
+    let err = client
+        .ensure_workspace(EnsureWorkspaceRequest {
+            workspace: "a/../../../../api/v1/namespaces/kube-system".into(),
+        })
+        .await
+        .expect_err("traversal-shaped workspace must be rejected under Managed");
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+    drop(shutdown);
+    let _ = handle.await;
+}
+
+/// See `grpc_ensure_workspace_rejects_path_traversal` — same boundary check
+/// on the delete side, under the same `Managed`-mode property.
+#[tokio::test]
+async fn grpc_delete_workspace_rejects_path_traversal() {
+    let (_dir, socket) = temp_socket();
+    let cfg = Config {
+        workspace_mode: openshell_driver_kyma::workspace::WorkspaceMode::Managed,
+        gateway_id: "gw1".into(),
+        ..Config::default()
+    };
+    let (mut client, shutdown, handle) = start_server_with_config(
+        socket,
+        MockProvisioner::new(),
+        MockEnricher::new(),
+        MockMetrics::new(),
+        cfg,
+    )
+    .await;
+
+    let err = client
+        .delete_workspace(DeleteWorkspaceRequest {
+            workspace: "a/../../../../api/v1/namespaces/kube-system".into(),
+        })
+        .await
+        .expect_err("traversal-shaped workspace must be rejected under Managed");
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+    drop(shutdown);
+    let _ = handle.await;
+}
+
+/// The regression this whole fix undoes, proven on the wire: before this
+/// branch, `EnsureWorkspace`/`DeleteWorkspace` returned `Unimplemented`
+/// (swallowed by the gateway) under every mode, so `Shared` — the default,
+/// and every existing install's mode — accepted any non-empty workspace
+/// string. A workspace containing a dot (`acme.dev`, a valid Sandbox CR
+/// name character but not a valid DNS-1123 label) must still be accepted
+/// under `Shared` today. A traversal-shaped string is not itself dangerous
+/// under `Shared` (`namespace_for` ignores `workspace` entirely and always
+/// returns `cfg.namespace`), so it doubles as evidence the boundary check no
+/// longer over-narrows `Shared` at all.
+#[tokio::test]
+async fn grpc_ensure_workspace_shared_mode_accepts_a_dotted_workspace() {
+    let mut p = MockProvisioner::new();
+    p.expect_ensure_workspace()
+        .withf(|ws: &str| ws == "acme.dev")
+        .times(1)
+        .returning(|_| Ok(()));
+
+    let (_dir, socket) = temp_socket();
+    let (mut client, shutdown, handle) =
+        start_server(socket, p, MockEnricher::new(), MockMetrics::new()).await;
+
+    client
+        .ensure_workspace(EnsureWorkspaceRequest {
+            workspace: "acme.dev".into(),
+        })
+        .await
+        .expect("Shared must accept a workspace containing a dot");
+
+    drop(shutdown);
+    handle.await.unwrap();
 }

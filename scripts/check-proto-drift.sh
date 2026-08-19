@@ -108,6 +108,13 @@ printf 'All vendored protos match upstream %s.\n' "$ref"
 # and failing the build on someone else's tag push would make CI red for
 # reasons no PR can fix. It escalates the *wording* — not the exit code —
 # when the contract actually differs.
+#
+# Every exit path below also prints a `VENDOR_TARGET_TAG: <tag>` line: the
+# tag a re-vendor should target, as distinct from GATEWAY_REF (which pins
+# the gateway *image*, not the contract, and can legitimately sit behind or
+# ahead of it — see upstream-sync.yml's "Set proto contract target tag"
+# step, which parses this line rather than reusing GATEWAY_TAG). It is
+# always $ref except in the one case where upstream is genuinely ahead.
 # ---------------------------------------------------------------------------
 echo
 latest=$(latest_upstream_tag || true)
@@ -115,11 +122,15 @@ latest=$(latest_upstream_tag || true)
 if [[ -z $latest ]]; then
 	printf 'Note: could not reach upstream to check for newer releases.\n'
 	printf '      The pinned-ref check above still passed.\n'
+	# Nothing indicates upstream moved, so the safe vendor target is the
+	# tag already pinned -- see VENDOR_TARGET_TAG below.
+	printf 'VENDOR_TARGET_TAG: %s\n' "$ref"
 	exit 0
 fi
 
 if [[ $latest == "$ref" ]]; then
 	printf 'Pin is current: %s is the latest upstream release.\n' "$ref"
+	printf 'VENDOR_TARGET_TAG: %s\n' "$ref"
 	exit 0
 fi
 
@@ -128,6 +139,8 @@ fi
 newest=$(printf '%s\n%s\n' "$ref" "$latest" | sort -V | tail -1)
 if [[ $newest == "$ref" ]]; then
 	printf 'Pin (%s) is at or ahead of the latest upstream tag (%s).\n' "$ref" "$latest"
+	# Never regress: the pin is already the newest thing worth vendoring to.
+	printf 'VENDOR_TARGET_TAG: %s\n' "$ref"
 	exit 0
 fi
 
@@ -174,4 +187,5 @@ else
 	printf '          Bumping the pin is optional; nothing here is at risk.\n'
 fi
 
+printf 'VENDOR_TARGET_TAG: %s\n' "$latest"
 exit 0
