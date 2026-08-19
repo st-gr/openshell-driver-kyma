@@ -14,6 +14,7 @@
 //! the Tier-3 tests provide stronger guarantees.
 
 use crate::config::Config;
+use crate::driver_config::DriverConfig;
 use crate::error::DriverError;
 use crate::helpers::{
     build_env_list, build_resources, effective_gpu_count, merge_maps, object_to_driver_sandbox,
@@ -32,8 +33,8 @@ use kube::{
     runtime::watcher,
     Client,
 };
-use serde_json::{json, Value};
-use std::collections::HashMap;
+use serde_json::{json, Map, Value};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 
@@ -113,6 +114,32 @@ impl KymaProvisioner {
     /// Namespace a sandbox in `workspace` lives in, under the configured mode.
     fn namespace_for_workspace(&self, workspace: &str) -> Result<String, DriverError> {
         crate::workspace::namespace_for(&self.cfg, workspace)
+    }
+
+    /// Decode and validate `sb`'s `driver_config`.
+    ///
+    /// Both `validate_create` and `create` call this directly so a
+    /// malformed `driver_config` is rejected the same way from either RPC —
+    /// `ValidateSandboxCreate` exists precisely so a caller learns this
+    /// before anything is created, not after. `build_sandbox_spec` also
+    /// decodes it (via this same method) to apply the validated fields to
+    /// the pod spec, falling back to the default (no-op) config on error —
+    /// mirroring the existing `effective_gpu_count(...).unwrap_or(None)`
+    /// pattern just below: `create`/`validate_create` are what actually
+    /// enforce validity, so `build_sandbox_spec` only ever sees an invalid
+    /// config if it's called directly (e.g. from a test) bypassing both.
+    ///
+    /// A sandbox with no template at all has no `driver_config` to decode,
+    /// so this yields the default config rather than erroring —
+    /// `DriverConfig::from_template` requires a template reference and
+    /// can't itself express "there is no template".
+    fn decode_driver_config(&self, sb: &DriverSandbox) -> Result<DriverConfig, DriverError> {
+        match sb.spec.as_ref().and_then(|s| s.template.as_ref()) {
+            Some(template) => {
+                DriverConfig::from_template(template, &self.cfg.supervisor_mount_path)
+            }
+            None => Ok(DriverConfig::default()),
+        }
     }
 
     /// Sandbox-CR API scoped to `ns`, or cluster-wide when `None`.
@@ -614,6 +641,15 @@ impl KymaProvisioner {
         let spec = sb.spec.as_ref();
         let template = spec.and_then(|s| s.template.as_ref());
 
+        // `create`/`validate_create` already reject an invalid
+        // `driver_config` before this is ever called from that path; see
+        // `decode_driver_config`'s doc comment for why the fallback here is
+        // safe. A sandbox with no `driver_config` at all (the overwhelming
+        // majority) decodes to `DriverConfig::default()`, which every
+        // `apply_*` call below treats as a no-op — this is what keeps the
+        // pod spec byte-identical for that case.
+        let driver_config = self.decode_driver_config(sb).unwrap_or_default();
+
         // ---------- supervisor init container ----------
         // Upstream NVIDIA OpenShell publishes the supervisor as a distroless
         // image containing only the `openshell-sandbox` binary at `/`. There
@@ -686,6 +722,18 @@ impl KymaProvisioner {
         };
         agent_container["resources"] = resources;
 
+        // `driver_config.containers.agent.resources` merges over the
+        // resources above rather than replacing them: mirrors upstream's
+        // `apply_agent_driver_resources` (driver.rs:3794), a per-key
+        // "fill gaps, don't override" merge (see `merge_string_map`
+        // below) rather than a section-level replace.
+        apply_agent_driver_resources(
+            agent_container
+                .as_object_mut()
+                .expect("agent_container is always a JSON object"),
+            &driver_config.containers.agent.resources,
+        );
+
         // Projected ServiceAccount token volume mount on the agent
         // container. The supervisor reads this file and exchanges it
         // for a gateway-minted JWT via IssueSandboxToken at startup.
@@ -699,6 +747,22 @@ impl KymaProvisioner {
             "mountPath": SA_TOKEN_MOUNT_PATH,
             "readOnly": true,
         }));
+
+        // `driver_config.containers.agent.volume_mounts` append after ours.
+        // `driver_config.rs`'s validation already guarantees these names
+        // and mount targets are disjoint from SUPERVISOR_VOLUME,
+        // SA_TOKEN_VOLUME, and (when applicable) WORKSPACE_VOLUME/`/sandbox`
+        // — see `agent_volume_mounts_disjoint_from_driver_config_reserved_names`
+        // in the test module, which pins that guarantee down directly rather
+        // than merely assuming it.
+        agent_mounts.extend(
+            driver_config
+                .containers
+                .agent
+                .volume_mounts
+                .iter()
+                .map(driver_config_volume_mount_to_json),
+        );
 
         // ---------- pod spec ----------
         let mut pod_spec = json!({
@@ -732,7 +796,16 @@ impl KymaProvisioner {
         // created (and deleted) by the create()/delete() methods; here
         // we just thread its name into the pod's `volumes` and the
         // agent container's `volumeMounts`.
-        if !self.cfg.sandbox_storage_size.is_empty() {
+        //
+        // Workspace-ownership rule (upstream driver.rs:3322-3328): an
+        // explicit `driver_config` mount at or under the workspace root
+        // (`/sandbox`) takes ownership of workspace persistence, so we must
+        // not also inject our own PVC there — two volumes fighting over the
+        // same mount path would break scheduling. `create()`/`ensure_sandbox_pvc`
+        // gate the PVC's own creation on this same condition.
+        if !self.cfg.sandbox_storage_size.is_empty()
+            && !driver_config.has_explicit_sandbox_data_mount()
+        {
             let claim_name = format!(
                 "{}-workspace",
                 crate::workspace::kube_resource_name(
@@ -756,6 +829,33 @@ impl KymaProvisioner {
                 "mountPath": "/sandbox",
             }));
         }
+
+        // `driver_config.volumes` append after ours, disjoint by the same
+        // validation guarantee as the agent volume-mount append above.
+        {
+            let volumes = pod_spec["volumes"]
+                .as_array_mut()
+                .expect("volumes initialized above");
+            volumes.extend(
+                driver_config
+                    .volumes
+                    .iter()
+                    .map(driver_config_volume_to_json),
+            );
+        }
+
+        // `driver_config.pod`: node selector merges into (rather than
+        // replaces) any existing `nodeSelector`, `priorityClassName` is set
+        // only if absent, and `tolerations` append to (rather than replace)
+        // any existing array. Mirrors upstream `apply_pod_driver_config`
+        // (driver.rs:3766) exactly; today nothing else in this driver sets
+        // any of the three, so in practice this only ever fills them in.
+        apply_pod_driver_config(
+            pod_spec
+                .as_object_mut()
+                .expect("pod_spec is always a JSON object"),
+            &driver_config.pod,
+        );
 
         // Linux user-namespace remap. K8s 1.30+ kubelet-managed UID/GID
         // mapping; container UID 0 lands on a non-root host UID. Pod
@@ -781,13 +881,22 @@ impl KymaProvisioner {
             pod_spec["hostUsers"] = Value::Bool(false);
         }
 
-        // Optional `runtimeClassName` passthrough from `platform_config`.
-        if let Some(pc) = template.and_then(|t| t.platform_config.as_ref()) {
-            if let Some(rcn) = pc.fields.get("runtime_class_name") {
-                if let Some(s) = rcn.kind.as_ref().and_then(string_from_value_kind) {
-                    pod_spec["runtimeClassName"] = Value::String(s);
-                }
-            }
+        // `runtimeClassName` precedence (upstream driver.rs:3480-3487):
+        // `platform_config.runtime_class_name` wins, then
+        // `driver_config.pod.runtime_class_name`, then any cluster-wide
+        // default (this driver has none today). The `platform_config` read
+        // below is unchanged from before this task — it must keep winning.
+        let platform_runtime_class_name = template
+            .and_then(|t| t.platform_config.as_ref())
+            .and_then(|pc| pc.fields.get("runtime_class_name"))
+            .and_then(|rcn| rcn.kind.as_ref())
+            .and_then(string_from_value_kind);
+        let runtime_class_name = platform_runtime_class_name.or_else(|| {
+            (!driver_config.pod.runtime_class_name.is_empty())
+                .then(|| driver_config.pod.runtime_class_name.clone())
+        });
+        if let Some(s) = runtime_class_name {
+            pod_spec["runtimeClassName"] = Value::String(s);
         }
 
         // ---------- pod template metadata (labels) ----------
@@ -1099,6 +1208,133 @@ fn bool_from_value_kind(kind: &prost_types::value::Kind) -> Option<bool> {
     }
 }
 
+// --- driver_config application -------------------------------------------
+//
+// Ported from upstream driver.rs's `apply_pod_driver_config` (3766),
+// `apply_agent_driver_resources` (3794), and `merge_string_map` (3809): the
+// same asymmetric merge semantics (node selector and tolerations are
+// additive, priority class name only fills a gap, resources merge per-key)
+// against a hand-built `serde_json::Value` pod spec instead of the typed
+// k8s-openapi structs upstream serializes through, since that's the shape
+// `build_sandbox_spec` already builds.
+
+/// `driver_config.pod` -> pod spec. Node selector and tolerations are
+/// additive over whatever is already on `spec` (merge / extend, not
+/// replace); priority class name is set only when `spec` doesn't already
+/// have one. `runtimeClassName` is handled separately by the caller: it has
+/// its own precedence chain against `platform_config`, not a merge.
+fn apply_pod_driver_config(
+    spec: &mut Map<String, Value>,
+    config: &crate::driver_config::PodConfig,
+) {
+    if !config.node_selector.is_empty() {
+        let node_selector = spec
+            .entry("nodeSelector".to_string())
+            .or_insert_with(|| json!({}));
+        merge_string_map(node_selector, &config.node_selector);
+    }
+
+    if !config.priority_class_name.is_empty() {
+        spec.entry("priorityClassName".to_string())
+            .or_insert_with(|| json!(config.priority_class_name));
+    }
+
+    if !config.tolerations.is_empty() {
+        let tolerations = spec
+            .entry("tolerations".to_string())
+            .or_insert_with(|| json!([]));
+        if let Some(existing) = tolerations.as_array_mut() {
+            existing.extend(config.tolerations.iter().cloned());
+        } else {
+            *tolerations = Value::Array(config.tolerations.clone());
+        }
+    }
+}
+
+/// `driver_config.containers.agent.resources` -> agent container. Merges
+/// `requests`/`limits` per-key into whatever `container["resources"]`
+/// already holds (an existing key wins; a driver_config key only fills a
+/// gap) rather than replacing the section outright. A no-op when the
+/// driver_config supplies neither requests nor limits.
+fn apply_agent_driver_resources(
+    container: &mut Map<String, Value>,
+    resources: &crate::driver_config::ContainerResourcesConfig,
+) {
+    if resources.requests.is_empty() && resources.limits.is_empty() {
+        return;
+    }
+
+    let target = container
+        .entry("resources".to_string())
+        .or_insert_with(|| json!({}));
+    apply_resource_quantity_map(target, "requests", &resources.requests);
+    apply_resource_quantity_map(target, "limits", &resources.limits);
+}
+
+/// Per-key merge into a `serde_json::Value` expected to be (or become) a
+/// JSON object: existing keys in `target` win, keys only present in
+/// `values` are filled in. Distinct from `helpers::merge_maps`, which
+/// builds a brand-new map from two `HashMap`s (driver labels winning) for
+/// pod-template metadata; this mutates a pod-spec `Value` in place and the
+/// caller's existing entries win instead.
+fn merge_string_map(target: &mut Value, values: &BTreeMap<String, String>) {
+    if !target.is_object() {
+        *target = json!({});
+    }
+    let target = target
+        .as_object_mut()
+        .expect("target was just converted to an object");
+    for (key, value) in values {
+        target.entry(key.clone()).or_insert_with(|| json!(value));
+    }
+}
+
+fn apply_resource_quantity_map(
+    target: &mut Value,
+    section: &str,
+    values: &BTreeMap<String, String>,
+) {
+    if values.is_empty() {
+        return;
+    }
+    if !target.is_object() {
+        *target = json!({});
+    }
+    let target = target
+        .as_object_mut()
+        .expect("target was just converted to an object");
+    let section_value = target
+        .entry(section.to_string())
+        .or_insert_with(|| json!({}));
+    merge_string_map(section_value, values);
+}
+
+/// `driver_config.volumes[]` -> pod `volumes[]`. Only the PVC-backed shape
+/// `driver_config.rs` supports today.
+fn driver_config_volume_to_json(volume: &crate::driver_config::VolumeConfig) -> Value {
+    json!({
+        "name": volume.name,
+        "persistentVolumeClaim": {
+            "claimName": volume.persistent_volume_claim.claim_name,
+            "readOnly": volume.persistent_volume_claim.read_only,
+        }
+    })
+}
+
+/// `driver_config.containers.agent.volume_mounts[]` -> agent container
+/// `volumeMounts[]`.
+fn driver_config_volume_mount_to_json(mount: &crate::driver_config::VolumeMountConfig) -> Value {
+    let mut v = json!({
+        "name": mount.name,
+        "mountPath": mount.mount_path,
+        "readOnly": mount.read_only,
+    });
+    if let Some(sub_path) = mount.sub_path.as_ref() {
+        v["subPath"] = Value::String(sub_path.clone());
+    }
+    v
+}
+
 #[async_trait]
 impl SandboxProvisioner for KymaProvisioner {
     async fn create(&self, sb: &DriverSandbox) -> Result<(), DriverError> {
@@ -1114,7 +1350,20 @@ impl SandboxProvisioner for KymaProvisioner {
         )?;
         let namespace = self.namespace_for_workspace(&sb.workspace)?;
 
-        if !self.cfg.sandbox_storage_size.is_empty() {
+        // Decode + validate driver_config before touching the cluster. A
+        // malformed driver_config must fail create() the same way it fails
+        // validate_create() — ValidateSandboxCreate exists so the gateway
+        // can reject a bad request up front, but create() cannot rely on
+        // it having been called first.
+        let driver_config = self.decode_driver_config(sb)?;
+
+        // Workspace-ownership rule: an explicit driver_config mount at or
+        // under /sandbox takes over workspace persistence, so this
+        // driver's own PVC must not be created either — mirrors the same
+        // gate build_sandbox_spec applies when wiring the PVC into the pod.
+        if !self.cfg.sandbox_storage_size.is_empty()
+            && !driver_config.has_explicit_sandbox_data_mount()
+        {
             self.ensure_sandbox_pvc(sb, &namespace).await?;
         }
 
@@ -1347,6 +1596,12 @@ impl SandboxProvisioner for KymaProvisioner {
         // itself is unused; only the validation matters here.
         crate::workspace::namespace_for(&self.cfg, &sb.workspace)?;
 
+        // Decode + validate driver_config so a request that would fail at
+        // the real create() call (invalid volume/mount, reserved name,
+        // control-path conflict, ...) fails here too, before the gateway
+        // commits to it — the same reasoning as the two checks above.
+        self.decode_driver_config(sb)?;
+
         if let Some(spec) = sb.spec.as_ref() {
             // `count: 0` is an invalid request and surfaces as InvalidArgument.
             if let Some(count) = effective_gpu_count(spec.resource_requirements.as_ref())? {
@@ -1531,6 +1786,60 @@ mod tests {
             fields: std::iter::once((key.to_string(), prost_types::Value { kind: Some(kind) }))
                 .collect(),
         }
+    }
+
+    // --- driver_config test support -------------------------------------
+    // Mirror of driver_config.rs's own test-only encode direction
+    // (serde_json::Value -> prost_types::Struct): production code only
+    // ever decodes a driver_config, so building one is test-only, and that
+    // module's helpers aren't `pub`, so this crate-test-local copy exists
+    // to populate `DriverSandboxTemplate.driver_config` here too.
+
+    fn json_struct(value: serde_json::Value) -> prost_types::Struct {
+        let serde_json::Value::Object(object) = value else {
+            panic!("expected a JSON object");
+        };
+        prost_types::Struct {
+            fields: object
+                .into_iter()
+                .map(|(key, value)| (key, json_to_prost_value(value)))
+                .collect(),
+        }
+    }
+
+    fn json_to_prost_value(value: serde_json::Value) -> prost_types::Value {
+        use prost_types::value::Kind;
+        let kind = match value {
+            serde_json::Value::Null => Kind::NullValue(0),
+            serde_json::Value::Bool(b) => Kind::BoolValue(b),
+            serde_json::Value::Number(n) => {
+                Kind::NumberValue(n.as_f64().expect("test numbers fit in f64"))
+            }
+            serde_json::Value::String(s) => Kind::StringValue(s),
+            serde_json::Value::Array(values) => Kind::ListValue(prost_types::ListValue {
+                values: values.into_iter().map(json_to_prost_value).collect(),
+            }),
+            serde_json::Value::Object(object) => {
+                Kind::StructValue(json_struct(serde_json::Value::Object(object)))
+            }
+        };
+        prost_types::Value { kind: Some(kind) }
+    }
+
+    /// `make_sandbox`, with `driver_config` set on the template.
+    fn make_sandbox_with_driver_config(
+        id: &str,
+        name: &str,
+        image: &str,
+        driver_config: serde_json::Value,
+    ) -> DriverSandbox {
+        let mut sb = make_sandbox(id, name, image);
+        sb.spec
+            .as_mut()
+            .and_then(|s| s.template.as_mut())
+            .expect("make_sandbox always sets spec.template")
+            .driver_config = Some(json_struct(driver_config));
+        sb
     }
 
     #[tokio::test]
@@ -1840,6 +2149,472 @@ mod tests {
         assert_eq!(m["mountPath"], "/sandbox");
     }
 
+    // ---------- driver_config wiring (part 2) ----------
+    //
+    // `apply_pod_driver_config`/`apply_agent_driver_resources` are tested
+    // directly against a hand-built `Map<String, Value>` for the "there was
+    // already a value here" cases: unlike upstream, nothing else in this
+    // driver's own pod-spec construction ever sets nodeSelector,
+    // priorityClassName, or tolerations, so there's no way to reach that
+    // state by going through `build_sandbox_spec` alone.
+
+    /// Unwrap a `json!({...})` into its `Map`, for building the
+    /// `Map<String, Value>` `apply_pod_driver_config`/
+    /// `apply_agent_driver_resources` take directly.
+    fn as_object(value: Value) -> Map<String, Value> {
+        match value {
+            Value::Object(m) => m,
+            other => panic!("expected a JSON object, got {other:?}"),
+        }
+    }
+
+    // Catches: replacing `nodeSelector` wholesale (e.g. `spec.insert(...)`)
+    // instead of merging into it (upstream's `merge_string_map`), which
+    // would silently drop `zone`.
+    #[test]
+    fn apply_pod_driver_config_merges_node_selector_into_existing() {
+        let mut spec = as_object(json!({ "nodeSelector": { "zone": "us-east" } }));
+        let config = crate::driver_config::PodConfig {
+            node_selector: BTreeMap::from([("disktype".to_string(), "ssd".to_string())]),
+            ..Default::default()
+        };
+        apply_pod_driver_config(&mut spec, &config);
+        assert_eq!(spec["nodeSelector"]["zone"], "us-east");
+        assert_eq!(spec["nodeSelector"]["disktype"], "ssd");
+    }
+
+    // Catches: the merge overwriting an existing key instead of a per-key
+    // "fill gaps only" merge (upstream's `merge_string_map` uses
+    // `.entry().or_insert_with()`, not unconditional insert).
+    #[test]
+    fn apply_pod_driver_config_node_selector_existing_key_wins() {
+        let mut spec = as_object(json!({ "nodeSelector": { "disktype": "hdd" } }));
+        let config = crate::driver_config::PodConfig {
+            node_selector: BTreeMap::from([("disktype".to_string(), "ssd".to_string())]),
+            ..Default::default()
+        };
+        apply_pod_driver_config(&mut spec, &config);
+        assert_eq!(spec["nodeSelector"]["disktype"], "hdd");
+    }
+
+    // Catches: unconditionally setting priorityClassName (`.insert(...)`
+    // instead of `.entry().or_insert_with()`), which would let a
+    // driver_config value silently override one already on the pod spec.
+    #[test]
+    fn apply_pod_driver_config_priority_class_name_not_overridden_when_present() {
+        let mut spec = as_object(json!({ "priorityClassName": "existing" }));
+        let config = crate::driver_config::PodConfig {
+            priority_class_name: "from-driver-config".to_string(),
+            ..Default::default()
+        };
+        apply_pod_driver_config(&mut spec, &config);
+        assert_eq!(spec["priorityClassName"], "existing");
+    }
+
+    // Catches: the "only if absent" guard also skipping the absent case
+    // (e.g. an early return instead of `.or_insert_with`), which would
+    // silently drop priority_class_name entirely.
+    #[test]
+    fn apply_pod_driver_config_priority_class_name_applied_when_absent() {
+        let mut spec = as_object(json!({}));
+        let config = crate::driver_config::PodConfig {
+            priority_class_name: "high".to_string(),
+            ..Default::default()
+        };
+        apply_pod_driver_config(&mut spec, &config);
+        assert_eq!(spec["priorityClassName"], "high");
+    }
+
+    // Catches: replacing the `tolerations` array (upstream's `.extend(...)`
+    // vs. an unconditional `spec.insert(...)`), which would silently drop
+    // whatever was already scheduled to tolerate.
+    #[test]
+    fn apply_pod_driver_config_tolerations_append_to_existing() {
+        let mut spec = as_object(json!({
+            "tolerations": [{ "key": "existing", "operator": "Exists" }]
+        }));
+        let config = crate::driver_config::PodConfig {
+            tolerations: vec![json!({ "key": "from-driver-config", "operator": "Exists" })],
+            ..Default::default()
+        };
+        apply_pod_driver_config(&mut spec, &config);
+        let tolerations = spec["tolerations"].as_array().unwrap();
+        assert_eq!(tolerations.len(), 2);
+        assert_eq!(tolerations[0]["key"], "existing");
+        assert_eq!(tolerations[1]["key"], "from-driver-config");
+    }
+
+    // Catches: gating the whole `tolerations` block on something that also
+    // suppresses the absent case, dropping driver_config's tolerations
+    // entirely when the pod spec had none of its own.
+    #[test]
+    fn apply_pod_driver_config_tolerations_applied_when_absent() {
+        let mut spec = as_object(json!({}));
+        let config = crate::driver_config::PodConfig {
+            tolerations: vec![json!({ "key": "from-driver-config", "operator": "Exists" })],
+            ..Default::default()
+        };
+        apply_pod_driver_config(&mut spec, &config);
+        assert_eq!(spec["tolerations"][0]["key"], "from-driver-config");
+    }
+
+    // Catches: `apply_agent_driver_resources` replacing the `resources`
+    // section outright instead of merging per key (upstream's
+    // `apply_resource_quantity_map`), which would silently drop whatever
+    // requests/limits the template or GPU sizing already computed.
+    #[test]
+    fn apply_agent_driver_resources_merges_per_key_existing_wins() {
+        let mut container = as_object(json!({
+            "resources": {
+                "requests": { "cpu": "1" },
+                "limits": { "memory": "1Gi" }
+            }
+        }));
+        let resources = crate::driver_config::ContainerResourcesConfig {
+            requests: BTreeMap::from([
+                ("cpu".to_string(), "999m".to_string()),
+                ("memory".to_string(), "2Gi".to_string()),
+            ]),
+            limits: BTreeMap::from([
+                ("memory".to_string(), "999Mi".to_string()),
+                ("cpu".to_string(), "2".to_string()),
+            ]),
+        };
+        apply_agent_driver_resources(&mut container, &resources);
+        // Existing keys win...
+        assert_eq!(container["resources"]["requests"]["cpu"], "1");
+        assert_eq!(container["resources"]["limits"]["memory"], "1Gi");
+        // ...driver_config only fills the gaps.
+        assert_eq!(container["resources"]["requests"]["memory"], "2Gi");
+        assert_eq!(container["resources"]["limits"]["cpu"], "2");
+    }
+
+    // Catches: unconditionally inserting an empty `resources` object even
+    // when driver_config supplies neither requests nor limits.
+    #[test]
+    fn apply_agent_driver_resources_noop_when_config_empty() {
+        let mut container = as_object(json!({}));
+        apply_agent_driver_resources(
+            &mut container,
+            &crate::driver_config::ContainerResourcesConfig::default(),
+        );
+        assert!(!container.contains_key("resources"));
+    }
+
+    // The property that must not break: a sandbox with no driver_config at
+    // all must not gain nodeSelector/priorityClassName/tolerations, and its
+    // resources/volumes/volumeMounts must be exactly what they were before
+    // this task. Catches: any apply_* call above being invoked
+    // unconditionally instead of being gated on the (default, empty)
+    // decoded driver_config.
+    #[tokio::test]
+    async fn build_sandbox_spec_absent_driver_config_has_no_scheduling_keys() {
+        let p = make_provisioner();
+        let sb = make_sandbox("sb-1", "x", "img");
+        let spec = p.build_sandbox_spec(&sb);
+        let pod_spec = &spec["podTemplate"]["spec"];
+
+        assert!(pod_spec.get("nodeSelector").is_none());
+        assert!(pod_spec.get("priorityClassName").is_none());
+        assert!(pod_spec.get("tolerations").is_none());
+        assert_eq!(
+            pod_spec["containers"][0]["resources"],
+            json!({
+                "requests": { "cpu": "100m", "memory": "128Mi" },
+                "limits":   { "cpu": "500m", "memory": "512Mi" },
+            })
+        );
+        let volumes = pod_spec["volumes"].as_array().unwrap();
+        assert_eq!(
+            volumes.len(),
+            2,
+            "only supervisor-bin + sa-token, got {volumes:?}"
+        );
+        let mounts = pod_spec["containers"][0]["volumeMounts"]
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            mounts.len(),
+            2,
+            "only supervisor-bin + sa-token, got {mounts:?}"
+        );
+    }
+
+    // Precedence rule 1/2 (driver.rs:3480-3487): platform_config wins over
+    // driver_config.pod even when both are set. Catches: the `.or_else`
+    // chain being reversed, or driver_config unconditionally overwriting
+    // whatever platform_config already computed.
+    #[tokio::test]
+    async fn build_sandbox_spec_runtime_class_platform_config_wins_over_driver_config() {
+        let p = make_provisioner();
+        let mut sb = make_sandbox("sb-1", "x", "img");
+        {
+            let template = sb.spec.as_mut().unwrap().template.as_mut().unwrap();
+            template.platform_config = Some(platform_config_with(
+                "runtime_class_name",
+                prost_types::value::Kind::StringValue("platform-rc".to_string()),
+            ));
+            template.driver_config = Some(json_struct(json!({
+                "pod": { "runtime_class_name": "driver-config-rc" }
+            })));
+        }
+        let spec = p.build_sandbox_spec(&sb);
+        assert_eq!(
+            spec["podTemplate"]["spec"]["runtimeClassName"],
+            "platform-rc"
+        );
+    }
+
+    // Precedence rule 3 (driver.rs:3480-3487): driver_config.pod applies
+    // when platform_config says nothing. Catches: forgetting to wire
+    // driver_config.pod.runtime_class_name in at all.
+    #[tokio::test]
+    async fn build_sandbox_spec_runtime_class_driver_config_applies_when_platform_silent() {
+        let p = make_provisioner();
+        let sb = make_sandbox_with_driver_config(
+            "sb-1",
+            "x",
+            "img",
+            json!({ "pod": { "runtime_class_name": "driver-config-rc" } }),
+        );
+        let spec = p.build_sandbox_spec(&sb);
+        assert_eq!(
+            spec["podTemplate"]["spec"]["runtimeClassName"],
+            "driver-config-rc"
+        );
+    }
+
+    // Catches: driver_config volumes/mounts replacing (instead of
+    // appending to) the pod's volumes / the agent container's
+    // volumeMounts, or the JSON field mapping (mountPath/persistentVolumeClaim/
+    // claimName) being wrong.
+    #[tokio::test]
+    async fn build_sandbox_spec_driver_config_volumes_and_mounts_appended_alongside_ours() {
+        let p = make_provisioner();
+        let sb = make_sandbox_with_driver_config(
+            "sb-1",
+            "x",
+            "img",
+            json!({
+                "volumes": [{
+                    "name": "user-data",
+                    "persistent_volume_claim": { "claim_name": "pvc-user-data", "read_only": true }
+                }],
+                "containers": {
+                    "agent": {
+                        "volume_mounts": [{
+                            "name": "user-data",
+                            "mount_path": "/data",
+                            "read_only": true
+                        }]
+                    }
+                }
+            }),
+        );
+        let spec = p.build_sandbox_spec(&sb);
+        let pod_spec = &spec["podTemplate"]["spec"];
+
+        let volumes = pod_spec["volumes"].as_array().unwrap();
+        assert!(volumes.iter().any(|v| v["name"] == SUPERVISOR_VOLUME));
+        assert!(volumes.iter().any(|v| v["name"] == SA_TOKEN_VOLUME));
+        let user_vol = volumes
+            .iter()
+            .find(|v| v["name"] == "user-data")
+            .expect("driver_config volume should be appended");
+        assert_eq!(
+            user_vol["persistentVolumeClaim"]["claimName"],
+            "pvc-user-data"
+        );
+
+        let mounts = pod_spec["containers"][0]["volumeMounts"]
+            .as_array()
+            .unwrap();
+        assert!(mounts.iter().any(|m| m["name"] == SUPERVISOR_VOLUME));
+        assert!(mounts.iter().any(|m| m["name"] == SA_TOKEN_VOLUME));
+        let user_mount = mounts
+            .iter()
+            .find(|m| m["name"] == "user-data")
+            .expect("driver_config mount should be appended");
+        assert_eq!(user_mount["mountPath"], "/data");
+    }
+
+    // The workspace-ownership rule (driver.rs:3322-3328): an explicit
+    // driver_config mount at or under `/sandbox` suppresses our own
+    // workspace PVC injection so the two don't fight over the same mount
+    // path. Catches: `has_explicit_sandbox_data_mount()` not being wired
+    // into the PVC-injection gate at all.
+    #[tokio::test]
+    async fn build_sandbox_spec_explicit_sandbox_mount_suppresses_workspace_pvc_injection() {
+        let cfg = Config {
+            namespace: "test-ns".into(),
+            sandbox_storage_size: "5Gi".to_string(),
+            ..Config::default()
+        };
+        let svc = tower::service_fn(|_req: http::Request<kube::client::Body>| async move {
+            Ok::<_, std::convert::Infallible>(http::Response::new(kube::client::Body::empty()))
+        });
+        let p = KymaProvisioner::new(Client::new(svc, "test-ns"), cfg);
+        let sb = make_sandbox_with_driver_config(
+            "sb-1",
+            "my-sandbox",
+            "img",
+            json!({
+                "volumes": [{
+                    "name": "user-data",
+                    "persistent_volume_claim": { "claim_name": "pvc-user-data", "read_only": true }
+                }],
+                "containers": {
+                    "agent": {
+                        "volume_mounts": [{
+                            "name": "user-data",
+                            "mount_path": "/sandbox/project",
+                            "read_only": true
+                        }]
+                    }
+                }
+            }),
+        );
+        let spec = p.build_sandbox_spec(&sb);
+        let pod_spec = &spec["podTemplate"]["spec"];
+
+        let volumes = pod_spec["volumes"].as_array().unwrap();
+        assert!(
+            !volumes.iter().any(|v| v["name"] == WORKSPACE_VOLUME),
+            "our workspace PVC must not be injected when the caller has an explicit /sandbox mount, got {volumes:?}"
+        );
+        let mounts = pod_spec["containers"][0]["volumeMounts"]
+            .as_array()
+            .unwrap();
+        assert!(!mounts.iter().any(|m| m["name"] == WORKSPACE_VOLUME));
+        assert!(mounts.iter().any(|m| m["mountPath"] == "/sandbox/project"));
+    }
+
+    // The other half of the same rule: a driver_config mount that is NOT
+    // at or under `/sandbox` must not suppress our workspace PVC. Catches:
+    // an overly broad suppression condition (e.g. suppressing whenever any
+    // driver_config volume is present, rather than specifically a
+    // /sandbox-rooted mount).
+    #[tokio::test]
+    async fn build_sandbox_spec_mount_elsewhere_does_not_suppress_workspace_pvc_injection() {
+        let cfg = Config {
+            namespace: "test-ns".into(),
+            sandbox_storage_size: "5Gi".to_string(),
+            ..Config::default()
+        };
+        let svc = tower::service_fn(|_req: http::Request<kube::client::Body>| async move {
+            Ok::<_, std::convert::Infallible>(http::Response::new(kube::client::Body::empty()))
+        });
+        let p = KymaProvisioner::new(Client::new(svc, "test-ns"), cfg);
+        let sb = make_sandbox_with_driver_config(
+            "sb-1",
+            "my-sandbox",
+            "img",
+            json!({
+                "volumes": [{
+                    "name": "user-data",
+                    "persistent_volume_claim": { "claim_name": "pvc-user-data", "read_only": true }
+                }],
+                "containers": {
+                    "agent": {
+                        "volume_mounts": [{
+                            "name": "user-data",
+                            "mount_path": "/data",
+                            "read_only": true
+                        }]
+                    }
+                }
+            }),
+        );
+        let spec = p.build_sandbox_spec(&sb);
+        let pod_spec = &spec["podTemplate"]["spec"];
+
+        let volumes = pod_spec["volumes"].as_array().unwrap();
+        assert!(
+            volumes.iter().any(|v| v["name"] == WORKSPACE_VOLUME),
+            "a mount elsewhere must not suppress our workspace PVC, got {volumes:?}"
+        );
+    }
+
+    // Part 1's validation is what actually guarantees the disjointness the
+    // append logic above relies on; this proves that guarantee holds when
+    // reached through this driver's real decode path (real
+    // cfg.supervisor_mount_path, RESERVED_VOLUME_NAMES built from this
+    // module's own constants) rather than only within driver_config.rs's
+    // own isolated unit tests.
+    #[tokio::test]
+    async fn decode_driver_config_rejects_volume_name_colliding_with_ours() {
+        let p = make_provisioner();
+        for reserved in [SUPERVISOR_VOLUME, SA_TOKEN_VOLUME, WORKSPACE_VOLUME] {
+            let sb = make_sandbox_with_driver_config(
+                "sb-1",
+                "x",
+                "img",
+                json!({
+                    "volumes": [{
+                        "name": reserved,
+                        "persistent_volume_claim": { "claim_name": "pvc-x" }
+                    }]
+                }),
+            );
+            let err = p
+                .decode_driver_config(&sb)
+                .expect_err(&format!("{reserved} must be rejected"))
+                .to_string();
+            assert!(
+                err.contains("is reserved for OpenShell-managed volumes"),
+                "got: {err}"
+            );
+        }
+    }
+
+    // Uses a configured `supervisor_mount_path` that is NOT under any
+    // `vendor/driver_mounts.rs` `CONTROL_ROOTS` entry — mirrors
+    // `driver_config.rs`'s own
+    // `rejects_mount_overlapping_supervisor_mount_configured_non_default_exact`
+    // test — so this exercises the parameterised
+    // `validate_mount_control_path(target, supervisor_mount_path)` check
+    // specifically (proving `cfg.supervisor_mount_path` is genuinely
+    // threaded through this driver's real decode path), rather than the
+    // default `/opt/openshell/bin`, which the more general CONTROL_ROOTS
+    // check (rule 8) would catch first and mask this one.
+    #[tokio::test]
+    async fn decode_driver_config_rejects_mount_overlapping_supervisor_control_path() {
+        let cfg = Config {
+            namespace: "test-ns".into(),
+            supervisor_mount_path: "/custom/supervisor".into(),
+            ..Config::default()
+        };
+        let svc = tower::service_fn(|_req: http::Request<kube::client::Body>| async move {
+            Ok::<_, std::convert::Infallible>(http::Response::new(kube::client::Body::empty()))
+        });
+        let p = KymaProvisioner::new(Client::new(svc, "test-ns"), cfg);
+        let sb = make_sandbox_with_driver_config(
+            "sb-1",
+            "x",
+            "img",
+            json!({
+                "volumes": [{
+                    "name": "user-data",
+                    "persistent_volume_claim": { "claim_name": "pvc-x" }
+                }],
+                "containers": {
+                    "agent": {
+                        "volume_mounts": [{
+                            "name": "user-data",
+                            "mount_path": "/custom/supervisor"
+                        }]
+                    }
+                }
+            }),
+        );
+        let err = p.decode_driver_config(&sb).unwrap_err().to_string();
+        assert!(
+            err.contains("conflicts with OpenShell control path"),
+            "got: {err}"
+        );
+        assert!(err.contains("/custom/supervisor"), "got: {err}");
+    }
+
     #[tokio::test]
     async fn build_sandbox_spec_service_account_pinned() {
         let p = make_provisioner();
@@ -2078,6 +2853,81 @@ mod tests {
         p.validate_create(&sb)
             .await
             .expect("Shared must accept a dotted workspace");
+    }
+
+    /// `ValidateSandboxCreate` exists so the gateway can reject a bad
+    /// request before creating anything; a `driver_config` that fails
+    /// validation must fail here too, not just at `create()`. Catches:
+    /// `validate_create` never calling `decode_driver_config` at all,
+    /// which would let an invalid config pass validation and only fail
+    /// later at the real `create()` — exactly the split this RPC exists
+    /// to prevent.
+    #[tokio::test]
+    async fn validate_create_rejects_invalid_driver_config() {
+        let p = make_provisioner();
+        let sb = make_sandbox_with_driver_config(
+            "sb-1",
+            "x",
+            "img",
+            json!({
+                "volumes": [{
+                    "name": "workspace",
+                    "persistent_volume_claim": { "claim_name": "pvc-x" }
+                }]
+            }),
+        );
+        let err = p
+            .validate_create(&sb)
+            .await
+            .expect_err("reserved volume name must fail validate_create")
+            .to_string();
+        assert!(
+            err.contains("is reserved for OpenShell-managed volumes"),
+            "got: {err}"
+        );
+    }
+
+    /// `create()` cannot rely on the gateway having called
+    /// `ValidateSandboxCreate` first, so it must independently reject an
+    /// invalid `driver_config` too — and do so before issuing any API
+    /// call, matching the "short-circuit before any API call" pattern the
+    /// charset-workspace test above already establishes. Catches:
+    /// `create()` only decoding driver_config inside `build_sandbox_spec`
+    /// (which falls back to the default config on error rather than
+    /// failing), so an invalid config would silently produce a pod spec
+    /// with no driver_config applied instead of failing the RPC.
+    #[tokio::test]
+    async fn create_rejects_invalid_driver_config_before_touching_cluster() {
+        let (client, recorder) = recording_client(vec![]);
+        let cfg = Config {
+            namespace: "test-ns".into(),
+            ..Config::default()
+        };
+        let p = KymaProvisioner::new(client, cfg);
+        let sb = make_sandbox_with_driver_config(
+            "sb-1",
+            "x",
+            "img",
+            json!({
+                "volumes": [{
+                    "name": "workspace",
+                    "persistent_volume_claim": { "claim_name": "pvc-x" }
+                }]
+            }),
+        );
+        let err = p
+            .create(&sb)
+            .await
+            .expect_err("reserved volume name must fail create")
+            .to_string();
+        assert!(
+            err.contains("is reserved for OpenShell-managed volumes"),
+            "got: {err}"
+        );
+        assert!(
+            recorder.lock().unwrap().is_empty(),
+            "an invalid driver_config must short-circuit before any API call"
+        );
     }
 
     /// The CR must carry every label `object_to_driver_sandbox` reads back,
