@@ -123,12 +123,19 @@ osh() { openshell --gateway-endpoint "http://127.0.0.1:8080" "$@"; }
 # no agent-sandbox controller, so it never will be. Run backgrounded and
 # poll kubectl instead of waiting on the CLI to return.
 #
-# The gateway calls EnsureWorkspace before every sandbox create (see
-# driver.rs's ensure_workspace doc comment), so both the namespace and the
-# Sandbox CR are expected to exist by the time the CR appears. Managed mode
-# uses bare object names -- no sandbox create call ever names a workspace
-# here, so the gateway's default workspace ("default") is what gets
-# bootstrapped, giving openshell-smoke-default.
+# The gateway does not call EnsureWorkspace before sandbox create -- at
+# upstream v0.0.109 ensure_workspace appears nowhere in
+# crates/openshell-server/src/grpc/sandbox.rs, only in two provider
+# handlers and the provider-refresh loop, all gated on storing provider
+# credentials. The namespace exists by the time the CR appears because
+# this driver bootstraps it lazily inside KymaProvisioner::create under
+# Managed, matching upstream's own create_sandbox -> ensure_namespace
+# (openshell-driver-kubernetes/src/driver.rs:1358). That lazy bootstrap on
+# the sandbox-create path is exactly what this assertion proves, not a
+# gateway guarantee it relies on. Managed mode uses bare object names --
+# no sandbox create call ever names a workspace here, so an unscoped
+# create lands in the gateway's default workspace ("default"), giving
+# openshell-smoke-default.
 log "ASSERT M1: creating a sandbox bootstraps the managed workspace namespace"
 osh sandbox create --name m1 --from ghcr.io/nvidia/openshell-community/sandboxes/base:latest \
 	-- sleep infinity >/tmp/create-m1.log 2>&1 &
