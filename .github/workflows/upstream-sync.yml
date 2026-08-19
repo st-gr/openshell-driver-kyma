@@ -62,6 +62,13 @@ jobs:
       # upstream contract tag. See check-proto-drift.sh's VENDOR_TARGET_TAG
       # line, which this is sourced from.
       vendor_target_tag: ${{ steps.drift.outputs.vendor_target_tag }}
+      # scripts/check-pin-status.sh's findings, threaded through to the sync
+      # job so it can mention pin status in the PR body. Advisory only --
+      # deliberately NOT part of the changed/summary verdict, see the "Check
+      # gateway pin status" step below.
+      pin_status: ${{ steps.pin.outputs.status }}
+      pinned_ref: ${{ steps.pin.outputs.pinned_ref }}
+      pin_evaporated: ${{ steps.pin.outputs.evaporated }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -124,6 +131,37 @@ jobs:
           else
             echo "stale=false" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Check gateway pin status
+        # Advisory only -- check-pin-status.sh always exits 0. Its result is
+        # deliberately NOT fed into the Verdict step below: a stale pin
+        # reason isn't "upstream moved" in the sense this job otherwise
+        # means it. It doesn't need re-vendoring or a new smoke run, it
+        # needs a human to revert one line in .github/upstream-compat.env.
+        # Folding it into `changed` would make this job open a PR for
+        # something a PR can't fix.
+        #
+        # shell: bash for the same pipefail reason as the other steps in
+        # this file -- `tee` would otherwise mask a failure in the pipeline
+        # before it.
+        id: pin
+        shell: bash
+        run: |
+          ./scripts/check-pin-status.sh | tee /tmp/pin-status.txt
+
+          {
+            echo "### Gateway pin status"
+            echo '```'
+            grep -vE '^[A-Z_]+:' /tmp/pin-status.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          status=$(sed -n 's/^PIN_STATUS: //p' /tmp/pin-status.txt | tail -1)
+          pinned_ref=$(sed -n 's/^PINNED_REF: //p' /tmp/pin-status.txt | tail -1)
+          evaporated=$(sed -n 's/^PIN_REASON_EVAPORATED: //p' /tmp/pin-status.txt | tail -1)
+          echo "status=${status:-unknown}" >> "$GITHUB_OUTPUT"
+          echo "pinned_ref=${pinned_ref}" >> "$GITHUB_OUTPUT"
+          echo "evaporated=${evaporated:-false}" >> "$GITHUB_OUTPUT"
 
       - name: Verdict
         id: verdict
@@ -363,6 +401,9 @@ jobs:
           SMOKE_GATEWAY_TAG: ${{ needs.smoke.outputs.tested_gateway_tag }}
           GATE_OUTCOME: ${{ steps.gate.outcome }}
           CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
+          PIN_STATUS: ${{ needs.detect.outputs.pin_status }}
+          PINNED_REF: ${{ needs.detect.outputs.pinned_ref }}
+          PIN_EVAPORATED: ${{ needs.detect.outputs.pin_evaporated }}
         run: |
           # `git diff --quiet` only sees modifications to already-tracked
           # files, so a sync that added only new files (e.g. a brand-new RPC
@@ -402,6 +443,17 @@ jobs:
             claude="DID NOT FINISH — likely hit --max-turns; see the 'Let Claude perform the sync' step"
           fi
 
+          # scripts/check-pin-status.sh's finding, worded for a reviewer.
+          # Advisory only -- shown for awareness, never blocks the PR and
+          # never changes whether this job runs.
+          pin_line="not pinned (tracking latest)"
+          if [[ "$PIN_STATUS" == "pinned" ]]; then
+            pin_line="pinned to \`${PINNED_REF}\`"
+            if [[ "$PIN_EVAPORATED" == "true" ]]; then
+              pin_line="${pin_line} -- images for a newer tag now exist; consider reverting to \`latest\` (see the job summary for detail)"
+            fi
+          fi
+
           # Assign the heredoc to a variable first rather than passing
           # `--body "$(cat <<EOF ... EOF)"` directly: under -e, a command
           # substitution used as another command's argument does not abort
@@ -426,6 +478,7 @@ jobs:
           | Gateway digest | \`${GATEWAY_IMAGE##*@}\` |
           | Supervisor digest | \`${SUPERVISOR_IMAGE##*@}\` |
           | Proto pin before this sync | \`${PINNED_PROTO_REF}\` |
+          | Gateway pin | ${pin_line} |
 
           Because this PR was created with \`GITHUB_TOKEN\`, GitHub will not
           auto-run \`branch-checks\` on it. The same checks already ran in this
