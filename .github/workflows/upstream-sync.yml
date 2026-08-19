@@ -229,12 +229,32 @@ jobs:
         # GATEWAY_REF) is the pinned gateway IMAGE tag. The two can
         # legitimately differ -- see the file header. Passed through env:
         # rather than interpolated into the script text, per that header.
+        #
+        # No fallback to GATEWAY_TAG here on purpose: that fallback is
+        # exactly the bug this commit removes. An empty or malformed
+        # VENDOR_TARGET_TAG means check-proto-drift.sh changed shape or
+        # failed to emit its line -- fail loudly rather than silently
+        # re-targeting the vendor at the (possibly wrong) image tag.
         env:
           VENDOR_TARGET_TAG: ${{ needs.detect.outputs.vendor_target_tag }}
         shell: bash
         run: |
-          tag="${VENDOR_TARGET_TAG:-$GATEWAY_TAG}"
-          echo "PROTO_TARGET_TAG=$tag" >> "$GITHUB_ENV"
+          if [[ -z "$VENDOR_TARGET_TAG" ]]; then
+            echo "error: detect job did not report a VENDOR_TARGET_TAG." >&2
+            echo "This means check-proto-drift.sh changed shape or failed to" >&2
+            echo "print its 'VENDOR_TARGET_TAG: <tag>' line. Refusing to guess" >&2
+            echo "a vendor target -- NOT falling back to GATEWAY_TAG (the" >&2
+            echo "gateway image tag), since that is the exact bug this step" >&2
+            echo "exists to prevent." >&2
+            exit 1
+          fi
+          if [[ ! "$VENDOR_TARGET_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "error: VENDOR_TARGET_TAG ('$VENDOR_TARGET_TAG') is not a" >&2
+            echo "well-formed vX.Y.Z tag. Refusing to feed it into" >&2
+            echo "make proto-vendor TAG=<...>." >&2
+            exit 1
+          fi
+          echo "PROTO_TARGET_TAG=$VENDOR_TARGET_TAG" >> "$GITHUB_ENV"
 
       - name: Create the working branch
         shell: bash
