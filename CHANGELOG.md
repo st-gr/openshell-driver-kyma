@@ -102,8 +102,22 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   default co-locates every tenant's sandboxes in one namespace, which makes
   the exposure easier to hit than it may be for upstream's callers. See
   "`driver_config` volumes are operator-trust-level input" in
-  `docs/internal/runbook-upstream-sync.md`. An opt-in gate is under
-  consideration; none exists yet.
+  `docs/internal/runbook-upstream-sync.md`. **Gated off by default — see the
+  next entry.**
+- **Added `driver.driverConfigAllowVolumes`** (default `false`), passed as
+  `--driver-config-allow-volumes`. Gates exactly the exposure described
+  above: with it off (the default), a `driver_config` that declares
+  `volumes[]` or `containers.agent.volume_mounts[]` is rejected with
+  `PermissionDenied`, naming this flag, before the request reaches the
+  cluster — enforced from both `CreateSandbox` and `ValidateSandboxCreate`.
+  The rejection is deliberately a different error from a malformed
+  `driver_config` (which still returns `InvalidArgument` with the specific
+  rule it violated) so an operator can tell "this request is disallowed by
+  policy" apart from "this request is broken." Scoped precisely to
+  `volumes`/`containers.agent.volume_mounts` — `driver_config.pod.*` and
+  `containers.agent.resources` are not the exposure and keep working
+  regardless of this flag. `driver_config` support is new and unreleased on
+  this branch, so defaulting this off is not a regression for anyone.
 - **`platform_config.host_users` and `platform_config.agent_socket_path` are
   now honored per sandbox**, closing two v0.0.107 parity gaps.
   `host_users` overrides the cluster-wide `--enable-user-namespaces` default

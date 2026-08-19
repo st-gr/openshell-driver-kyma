@@ -242,15 +242,13 @@ above, `--reuse-values` carries forward the *old* chart's defaults, so pass
 `driver.operatorNamespaceAllowlist` explicitly on every upgrade rather than
 relying on it being reused.
 
-### `driver_config` volumes are operator-trust-level input
+### `driver_config` volumes are gated off by default
 
 `driver_config.volumes[].persistent_volume_claim.claim_name`
 (`DriverSandboxTemplate.driver_config`, proto field 12) is **not**
 sandboxed against other sandboxes' PVCs. `driver_config.rs`'s validation
 constrains it to a DNS-1123 subdomain and nothing more — no ownership
-check, no allowlist. Treat `driver_config` as operator-trust-level input:
-anything able to set it can mount any PVC in the target namespace, not
-just ones it created.
+check, no allowlist.
 
 The concrete exposure in `Shared` mode (the default): every sandbox's
 workspace PVC lives in one namespace under the predictable name
@@ -270,9 +268,20 @@ still worth flagging here: `driver_config` support is new on this branch,
 and `Shared`'s single-namespace default makes the exposure easier to reach
 than it may be for upstream's own callers.
 
-An opt-in gate (e.g. restricting `driver_config` volumes to PVCs the
-caller's own sandbox owns) is under consideration but **not implemented**.
-This is a decision for the repo owner, not something to add unasked.
+**Gated.** `--driver-config-allow-volumes` / `driver.driverConfigAllowVolumes`
+defaults to `false`. With it off, `driver_config.rs` rejects any
+`driver_config` that declares `volumes[]` or
+`containers.agent.volume_mounts[]` — with `DriverError::PermissionDenied`
+naming the flag, distinct from the `InvalidArgument` a malformed
+`driver_config` gets — from both `CreateSandbox` and
+`ValidateSandboxCreate`. The gate covers only those two fields;
+`driver_config.pod.*` (node selector, runtime class, tolerations, priority
+class) and `containers.agent.resources` are not the exposure and keep
+working regardless. Set the flag to `true` to allow `driver_config`
+volumes on a driver instance — there is still no ownership check behind
+it, so only enable it where every `driver_config` author is already
+trusted with arbitrary PVC access in the target namespace (e.g. a single
+trusted gateway, not multi-tenant callers).
 
 ### Switching workspace modes is breaking
 
