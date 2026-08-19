@@ -70,6 +70,9 @@ jobs:
       - name: Check proto drift
         run: ./scripts/check-proto-drift.sh
 
+      - name: Check vendored driver source drift
+        run: ./scripts/check-vendor-drift.sh
+
   fmt-clippy-test-build:
     name: fmt + clippy + test + build
     runs-on: ubuntu-latest

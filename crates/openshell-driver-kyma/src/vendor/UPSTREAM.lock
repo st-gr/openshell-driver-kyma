@@ -1,0 +1,24 @@
+# Provenance for Rust source vendored from NVIDIA/OpenShell.
+#
+# Separate from proto/UPSTREAM.lock (and never touched by
+# scripts/vendor-proto.sh's re-vendor, which rewrites that file wholesale)
+# because these are a different kind of vendored artifact: hand-copied
+# source, not build output.
+#
+# Verified in CI by scripts/check-vendor-drift.sh.
+#
+# sha256 values are of the PRISTINE upstream file content, i.e. the
+# vendored copy with our provenance header AND our documented local
+# patch (see each file's "VENDOR LOCAL PATCH" block, when present)
+# reversed. The check script undoes both transformations the same way
+# before hashing, so local edits to the body still fail the check.
+repo = "https://github.com/NVIDIA/OpenShell"
+ref = "v0.0.107"
+commit = "88cf35efe426024eb19fdc403f594a1602f44d49"
+vendored_at = "2026-08-18"
+header_lines = 10
+
+[[files]]
+upstream_path = "crates/openshell-core/src/driver_mounts.rs"
+local_path = "crates/openshell-driver-kyma/src/vendor/driver_mounts.rs"
+sha256 = "7a9cd8eeca0f52c6d2046a1b8ad3459422bc12d5cd48239f7ef9cbf1a3f9f610"

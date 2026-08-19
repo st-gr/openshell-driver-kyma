@@ -31,6 +31,7 @@ help:
 	@echo "  dev-shell-with-kube  shell with \$$HOME/.kube mounted read-only"
 	@echo ""
 	@echo "  proto                regenerate tonic/prost bindings (rare)"
+	@echo "  vendor-check         verify vendored driver source matches upstream"
 	@echo "  fmt                  cargo fmt --all"
 	@echo "  fmt-check            cargo fmt --all --check"
 	@echo "  clippy               cargo clippy with pedantic warnings as errors"
@@ -82,6 +83,13 @@ ifeq ($(strip $(TAG)),)
 	$(error TAG must be set, e.g. make proto-vendor TAG=v0.0.91)
 endif
 	./scripts/vendor-proto.sh $(TAG)
+
+# Verify vendored Rust source (crates/openshell-driver-kyma/src/vendor/)
+# still matches the upstream ref pinned in that directory's UPSTREAM.lock.
+# Runs on the host (needs network), not in the container.
+.PHONY: vendor-check
+vendor-check:
+	./scripts/check-vendor-drift.sh
 
 .PHONY: fmt
 fmt:

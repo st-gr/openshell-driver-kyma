@@ -10,6 +10,14 @@ this project.
   License: Apache-2.0
   The SPDX header in the file is preserved verbatim.
 
+- `crates/openshell-driver-kyma/src/vendor/driver_mounts.rs`
+  Source: NVIDIA/OpenShell (https://github.com/NVIDIA/OpenShell),
+  `crates/openshell-core/src/driver_mounts.rs`
+  License: Apache-2.0
+  The SPDX header in the file is preserved verbatim. One line is replaced
+  with a documented, mechanically-reversed local patch; see the file's
+  header comment and `crates/openshell-driver-kyma/src/vendor/UPSTREAM.lock`.
+
 ## Generated at release time
 
 The set of transitive Rust dependencies is captured by `Cargo.lock`. A
