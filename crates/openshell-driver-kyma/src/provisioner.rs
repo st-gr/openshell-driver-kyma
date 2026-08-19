@@ -52,7 +52,13 @@ const LABEL_ISTIO_INJECT: &str = "sidecar.istio.io/inject";
 // Note the differing TLD vs LABEL_SANDBOX_ID: that's intentional, the
 // upstream gateway uses `.io/` for annotations and `.ai/` for labels.
 const ANNOTATION_SANDBOX_ID: &str = "openshell.io/sandbox-id";
-const SUPERVISOR_VOLUME: &str = "supervisor-bin";
+// pub(crate): read directly by driver_config.rs so its reserved-volume-name
+// list can never silently drift from the volume this driver actually
+// creates (see driver_config.rs's RESERVED_VOLUME_NAMES).
+pub(crate) const SUPERVISOR_VOLUME: &str = "supervisor-bin";
+// Same reasoning: the literal name of the optional per-sandbox workspace
+// PVC volume, read by driver_config.rs.
+pub(crate) const WORKSPACE_VOLUME: &str = "workspace";
 const AGENT_CONTAINER_NAME: &str = "agent";
 const SUPERVISOR_INIT_NAME: &str = "supervisor-init";
 const SANDBOX_SERVICE_ACCOUNT: &str = "openshell-sandbox";
@@ -72,8 +78,11 @@ const GPU_RESOURCE: &str = "nvidia.com/gpu";
 // for the same reason. Nothing in this crate logs a whole DriverSandbox or
 // DriverSandboxSpec either — every tracing call names scalar fields
 // explicitly — so the secret cannot reach the logs by accident.
-const SA_TOKEN_VOLUME: &str = "openshell-sa-token";
-const SA_TOKEN_MOUNT_PATH: &str = "/var/run/secrets/openshell";
+// pub(crate): both read directly by driver_config.rs — the volume name
+// for its reserved-volume-name list, the mount path as a protected
+// control path a caller's driver_config mount must not overlap.
+pub(crate) const SA_TOKEN_VOLUME: &str = "openshell-sa-token";
+pub(crate) const SA_TOKEN_MOUNT_PATH: &str = "/var/run/secrets/openshell";
 const SA_TOKEN_AUDIENCE: &str = "openshell-gateway";
 const SA_TOKEN_TTL_SECS: i64 = 3600;
 
@@ -736,14 +745,14 @@ impl KymaProvisioner {
                 .as_array_mut()
                 .expect("volumes initialized above");
             volumes.push(json!({
-                "name": "workspace",
+                "name": WORKSPACE_VOLUME,
                 "persistentVolumeClaim": { "claimName": claim_name },
             }));
             let mounts = pod_spec["containers"][0]["volumeMounts"]
                 .as_array_mut()
                 .expect("agent volumeMounts initialized above");
             mounts.push(json!({
-                "name": "workspace",
+                "name": WORKSPACE_VOLUME,
                 "mountPath": "/sandbox",
             }));
         }

@@ -11,43 +11,48 @@
 //! validates the same way here — it is a contract, not an implementation
 //! detail we're free to reshape.
 //!
-//! This module is intentionally self-contained: pure decode + validate, no
-//! Kubernetes API calls, no dependency on `provisioner.rs`. Nothing in this
-//! crate constructs a `DriverConfig` yet; a later change wires
-//! `DriverConfig::from_template` into `KymaProvisioner::build_sandbox_spec`
-//! and applies the validated fields to the pod spec.
+//! This module is intentionally self-contained in the sense that matters:
+//! pure decode + validate, no Kubernetes API calls, no I/O. It does read
+//! three `pub(crate)` constants from `provisioner.rs` (see
+//! `RESERVED_VOLUME_NAMES` below) rather than restating their values, so
+//! the two can never silently disagree. Nothing in this crate constructs a
+//! `DriverConfig` yet; a later change wires `DriverConfig::from_template`
+//! into `KymaProvisioner::build_sandbox_spec` and applies the validated
+//! fields to the pod spec.
 //!
 //! `#[serde(deny_unknown_fields)]` on every struct here is deliberate and
 //! must not be dropped: silently accepting an unknown key would let a
 //! caller believe a setting took effect when it did not.
 
 use crate::error::DriverError;
+use crate::provisioner::{
+    SA_TOKEN_MOUNT_PATH, SA_TOKEN_VOLUME, SUPERVISOR_VOLUME, WORKSPACE_VOLUME,
+};
 use crate::vendor::driver_mounts;
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
-/// Volume names this driver manages itself (see `provisioner.rs`).
+/// Volume names this driver manages itself.
 ///
 /// Upstream reserves its *own* managed volume names here
 /// (`openshell-client-tls`, `openshell-sa-token`, `spiffe-workload-api`,
 /// its supervisor volume, its workspace volume). Ours are different because
-/// this driver's pod shape is different — no client-TLS or SPIFFE volumes,
-/// and different literal names for the two it does create:
-///
-/// - `"supervisor-bin"` — `SUPERVISOR_VOLUME` in `provisioner.rs`, the
-///   `emptyDir` the supervisor binary is copied into.
-/// - `"openshell-sa-token"` — `SA_TOKEN_VOLUME` in `provisioner.rs`, the
-///   projected ServiceAccount token volume the supervisor reads to obtain
-///   its gateway JWT.
-/// - `"workspace"` — the literal volume name `provisioner.rs` gives the
-///   optional per-sandbox workspace PVC.
+/// this driver's pod shape is different — no client-TLS or SPIFFE volumes —
+/// and, critically, this list is not a second copy of the three names it
+/// does use: each entry is the actual `pub(crate)` constant `provisioner.rs`
+/// uses to create that volume, not a restated string literal. If someone
+/// renames `SUPERVISOR_VOLUME` there, this list renames with it — a
+/// hardcoded copy would instead silently stop protecting the volume, which
+/// is exactly the failure mode this indirection exists to rule out.
+/// `reserved_volume_names_match_provisioner_managed_volumes` in the test
+/// module pins this relationship down explicitly.
 ///
 /// A caller-supplied volume with one of these names would silently shadow
 /// (or fail to schedule alongside) a volume this driver itself creates,
 /// which would break every sandbox — hence rejecting it here rather than
 /// downstream.
-const RESERVED_VOLUME_NAMES: &[&str] = &["supervisor-bin", "openshell-sa-token", "workspace"];
+const RESERVED_VOLUME_NAMES: &[&str] = &[SUPERVISOR_VOLUME, SA_TOKEN_VOLUME, WORKSPACE_VOLUME];
 
 /// Root of the typed `driver_config` schema.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -139,26 +144,40 @@ impl DriverConfig {
     /// Decode and validate `template.driver_config`. An absent field (the
     /// common case today, since nothing sends it yet) yields the default
     /// config with no error — mirrors upstream's `from_template`.
+    ///
+    /// `supervisor_mount_path` must be the caller's `cfg.supervisor_mount_path`
+    /// (`--supervisor-mount-path`, default `/opt/openshell/bin`): it is
+    /// configurable per driver instance, so it cannot be a constant in this
+    /// module the way `SA_TOKEN_MOUNT_PATH` can — it has to come from the
+    /// caller who knows the running configuration.
     pub fn from_template(
         template: &computev1::pb::DriverSandboxTemplate,
+        supervisor_mount_path: &str,
     ) -> Result<Self, DriverError> {
         let Some(config) = template.driver_config.as_ref() else {
             return Ok(Self::default());
         };
-        Self::from_struct(config)
+        Self::from_struct(config, supervisor_mount_path)
     }
 
-    fn from_struct(config: &prost_types::Struct) -> Result<Self, DriverError> {
+    fn from_struct(
+        config: &prost_types::Struct,
+        supervisor_mount_path: &str,
+    ) -> Result<Self, DriverError> {
         let json = serde_json::Value::Object(struct_to_json_object(config));
         let config: Self = serde_json::from_value(json)
             .map_err(|err| invalid(format!("invalid driver_config: {err}")))?;
-        config.validate()?;
+        config.validate(supervisor_mount_path)?;
         Ok(config)
     }
 
-    fn validate(&self) -> Result<(), DriverError> {
+    fn validate(&self, supervisor_mount_path: &str) -> Result<(), DriverError> {
         validate_volumes(&self.volumes)?;
-        validate_volume_mounts(&self.volumes, &self.containers.agent.volume_mounts)
+        validate_volume_mounts(
+            &self.volumes,
+            &self.containers.agent.volume_mounts,
+            supervisor_mount_path,
+        )
     }
 
     /// True when the caller declared a mount at or under the workspace
@@ -207,9 +226,19 @@ fn validate_volumes(volumes: &[VolumeConfig]) -> Result<(), DriverError> {
 /// `read_only=false` against a `read_only=true` PVC is rejected, container
 /// mount target validates, workspace mount target validates, no duplicate
 /// normalized mount targets, sub-path (if present) validates.
+///
+/// Plus two driver-specific checks beyond the eleven ported rules, mirroring
+/// how upstream protects its own static paths from a *different* call site
+/// (`validate_kubernetes_protected_path_conflicts`, not part of what this
+/// module ports): a mount must not overlap the projected SA-token mount
+/// (`SA_TOKEN_MOUNT_PATH`, fixed) or the supervisor-binary mount
+/// (`supervisor_mount_path`, configurable). Either overlap would break or
+/// subvert the sandbox — the SA token is what the supervisor authenticates
+/// to the gateway with, and the supervisor binary is what runs at all.
 fn validate_volume_mounts(
     volumes: &[VolumeConfig],
     volume_mounts: &[VolumeMountConfig],
+    supervisor_mount_path: &str,
 ) -> Result<(), DriverError> {
     let mut volume_read_only = BTreeMap::new();
     for volume in volumes {
@@ -240,6 +269,10 @@ fn validate_volume_mounts(
             driver_mounts::DEFAULT_WORKSPACE_ROOT,
         )
         .map_err(invalid)?;
+        driver_mounts::validate_mount_control_path(&mount.mount_path, SA_TOKEN_MOUNT_PATH)
+            .map_err(invalid)?;
+        driver_mounts::validate_mount_control_path(&mount.mount_path, supervisor_mount_path)
+            .map_err(invalid)?;
         let normalized_mount_path = driver_mounts::normalize_mount_target(&mount.mount_path);
         if !mount_paths.insert(normalized_mount_path.clone()) {
             return Err(invalid(format!(
@@ -341,6 +374,12 @@ mod tests {
     use computev1::pb::DriverSandboxTemplate;
     use serde_json::json;
 
+    // Matches config.rs's `Config::supervisor_mount_path` default, so most
+    // tests exercise the realistic case. `rejects_mount_overlapping_supervisor_mount_configured_non_default`
+    // uses a different value specifically to prove this is genuinely
+    // parameterised, not hardcoded.
+    const TEST_SUPERVISOR_MOUNT_PATH: &str = "/opt/openshell/bin";
+
     // --- test-only encode direction: serde_json::Value -> Struct ---------
     // The mirror of struct_to_json_object/value_to_json above. Production
     // code never needs to build a Struct, only decode one, so this stays
@@ -431,7 +470,8 @@ mod tests {
             }]
         }));
 
-        let config = DriverConfig::from_template(&template).expect("valid config must decode");
+        let config = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH)
+            .expect("valid config must decode");
 
         assert_eq!(config.pod.node_selector["disktype"], "ssd");
         assert_eq!(config.pod.runtime_class_name, "gvisor");
@@ -464,7 +504,7 @@ mod tests {
             }]
         }));
 
-        let err = DriverConfig::from_template(&template)
+        let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH)
             .unwrap_err()
             .to_string();
 
@@ -485,7 +525,7 @@ mod tests {
                 }]
             }));
 
-            let err = DriverConfig::from_template(&template)
+            let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH)
                 .unwrap_err()
                 .to_string();
 
@@ -507,7 +547,7 @@ mod tests {
             ]
         }));
 
-        let err = DriverConfig::from_template(&template)
+        let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH)
             .unwrap_err()
             .to_string();
 
@@ -528,7 +568,7 @@ mod tests {
             }]
         }));
 
-        let err = DriverConfig::from_template(&template)
+        let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH)
             .unwrap_err()
             .to_string();
 
@@ -547,7 +587,8 @@ mod tests {
                 "persistent_volume_claim": {"claim_name": "pvc.user-data.123"}
             }]
         }));
-        DriverConfig::from_template(&template).expect("dotted subdomain claim name must validate");
+        DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH)
+            .expect("dotted subdomain claim name must validate");
     }
 
     // Rule 5. Catches: forgetting to validate the mount name at all.
@@ -557,7 +598,7 @@ mod tests {
         config["containers"]["agent"]["volume_mounts"][0]["name"] = json!("User_Data");
         let template = template_with(config);
 
-        let err = DriverConfig::from_template(&template)
+        let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH)
             .unwrap_err()
             .to_string();
 
@@ -580,7 +621,7 @@ mod tests {
             }
         }));
 
-        let err = DriverConfig::from_template(&template)
+        let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH)
             .unwrap_err()
             .to_string();
 
@@ -599,7 +640,7 @@ mod tests {
         config["containers"]["agent"]["volume_mounts"][0]["read_only"] = json!(false);
         let template = template_with(config);
 
-        let err = DriverConfig::from_template(&template)
+        let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH)
             .unwrap_err()
             .to_string();
 
@@ -616,7 +657,7 @@ mod tests {
             json!("/opt/openshell/bin");
         let template = template_with(config);
 
-        let err = DriverConfig::from_template(&template)
+        let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH)
             .unwrap_err()
             .to_string();
 
@@ -635,13 +676,151 @@ mod tests {
         config["containers"]["agent"]["volume_mounts"][0]["mount_path"] = json!("/sandbox");
         let template = template_with(config);
 
-        let err = DriverConfig::from_template(&template)
+        let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH)
             .unwrap_err()
             .to_string();
 
         assert!(
             err.contains("reserved for the OpenShell workspace"),
             "got: {err}"
+        );
+    }
+
+    // Fix round 1, check A. Catches: not calling validate_mount_control_path
+    // against SA_TOKEN_MOUNT_PATH at all, which would let a caller's mount
+    // replace the projected ServiceAccount token the supervisor
+    // authenticates to the gateway with.
+    #[test]
+    fn rejects_mount_overlapping_sa_token_path_exact() {
+        let mut config = valid_volume_and_mount();
+        config["containers"]["agent"]["volume_mounts"][0]["mount_path"] =
+            json!(SA_TOKEN_MOUNT_PATH);
+        let template = template_with(config);
+
+        let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH)
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            err.contains("conflicts with OpenShell control path"),
+            "got: {err}"
+        );
+        assert!(err.contains(SA_TOKEN_MOUNT_PATH), "got: {err}");
+    }
+
+    // Fix round 1, check A. Catches: only checking exact equality instead of
+    // "contains or is contained by" — a mount one level under the SA token
+    // path would still shadow it via the kubelet's directory-mount semantics.
+    #[test]
+    fn rejects_mount_overlapping_sa_token_path_under() {
+        let mut config = valid_volume_and_mount();
+        config["containers"]["agent"]["volume_mounts"][0]["mount_path"] =
+            json!(format!("{SA_TOKEN_MOUNT_PATH}/token"));
+        let template = template_with(config);
+
+        let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH)
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            err.contains("conflicts with OpenShell control path"),
+            "got: {err}"
+        );
+    }
+
+    // Fix round 1, check A. Catches: checking only "is the mount under the
+    // control path", missing the reverse direction — a mount at a *parent*
+    // of the control path would also make the SA token disappear from where
+    // the supervisor expects it.
+    #[test]
+    fn rejects_mount_overlapping_sa_token_path_containing() {
+        let mut config = valid_volume_and_mount();
+        config["containers"]["agent"]["volume_mounts"][0]["mount_path"] = json!("/var/run/secrets");
+        let template = template_with(config);
+
+        let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH)
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            err.contains("conflicts with OpenShell control path"),
+            "got: {err}"
+        );
+    }
+
+    // Fix round 1, check B. Uses a configured supervisor_mount_path that is
+    // NOT the /opt/openshell/bin default, and NOT under any vendor/
+    // driver_mounts.rs CONTROL_ROOTS entry — so this can only be rejected by
+    // the parameterised control-path check, not by rule 8's container mount
+    // target check. Catches: hardcoding the default path (or the CONTROL_ROOTS
+    // constant) instead of genuinely threading the caller's configured value.
+    #[test]
+    fn rejects_mount_overlapping_supervisor_mount_configured_non_default_exact() {
+        let mut config = valid_volume_and_mount();
+        config["containers"]["agent"]["volume_mounts"][0]["mount_path"] =
+            json!("/custom/supervisor");
+        let template = template_with(config);
+
+        let err = DriverConfig::from_template(&template, "/custom/supervisor")
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            err.contains("conflicts with OpenShell control path"),
+            "got: {err}"
+        );
+        assert!(err.contains("/custom/supervisor"), "got: {err}");
+    }
+
+    // Fix round 1, check B. Same non-default path; mount nested under it.
+    // Catches: exact-equality-only comparison missing a mount one level in.
+    #[test]
+    fn rejects_mount_overlapping_supervisor_mount_configured_non_default_under() {
+        let mut config = valid_volume_and_mount();
+        config["containers"]["agent"]["volume_mounts"][0]["mount_path"] =
+            json!("/custom/supervisor/openshell-sandbox");
+        let template = template_with(config);
+
+        let err = DriverConfig::from_template(&template, "/custom/supervisor")
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            err.contains("conflicts with OpenShell control path"),
+            "got: {err}"
+        );
+    }
+
+    // Fix round 1, check B. Same non-default path; mount at a parent of it.
+    // Catches: missing the reverse "contains" direction.
+    #[test]
+    fn rejects_mount_overlapping_supervisor_mount_configured_non_default_containing() {
+        let mut config = valid_volume_and_mount();
+        config["containers"]["agent"]["volume_mounts"][0]["mount_path"] = json!("/custom");
+        let template = template_with(config);
+
+        let err = DriverConfig::from_template(&template, "/custom/supervisor")
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            err.contains("conflicts with OpenShell control path"),
+            "got: {err}"
+        );
+    }
+
+    // Fix round 1, check C. This assertion is definitionally true today
+    // because RESERVED_VOLUME_NAMES is built *from* these same provisioner.rs
+    // constants (not restated literals) — see the doc comment above
+    // RESERVED_VOLUME_NAMES. Catches: a future edit that reintroduces a
+    // hardcoded string literal into RESERVED_VOLUME_NAMES that then drifts
+    // from the real constant, silently unprotecting a volume this driver
+    // manages.
+    #[test]
+    fn reserved_volume_names_match_provisioner_managed_volumes() {
+        assert_eq!(
+            RESERVED_VOLUME_NAMES,
+            [SUPERVISOR_VOLUME, SA_TOKEN_VOLUME, WORKSPACE_VOLUME]
         );
     }
 
@@ -665,7 +844,7 @@ mod tests {
             }
         }));
 
-        let err = DriverConfig::from_template(&template)
+        let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH)
             .unwrap_err()
             .to_string();
 
@@ -684,7 +863,7 @@ mod tests {
             config["containers"]["agent"]["volume_mounts"][0]["sub_path"] = json!(sub_path);
             let template = template_with(config);
 
-            let err = DriverConfig::from_template(&template)
+            let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH)
                 .unwrap_err()
                 .to_string();
 
@@ -702,7 +881,7 @@ mod tests {
     fn rejects_unknown_field() {
         let template = template_with(json!({"cdi_devices": ["nvidia.com/gpu=0"]}));
 
-        let err = DriverConfig::from_template(&template)
+        let err = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH)
             .unwrap_err()
             .to_string();
 
@@ -716,12 +895,14 @@ mod tests {
     fn absent_driver_config_yields_default() {
         let template = DriverSandboxTemplate::default();
 
-        let config = DriverConfig::from_template(&template).expect("absent config must not error");
+        let config = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH)
+            .expect("absent config must not error");
 
         assert_eq!(config, DriverConfig::default());
 
         let template = template_with(json!({}));
-        let config = DriverConfig::from_template(&template).expect("empty config must not error");
+        let config = DriverConfig::from_template(&template, TEST_SUPERVISOR_MOUNT_PATH)
+            .expect("empty config must not error");
         assert_eq!(config, DriverConfig::default());
     }
 
