@@ -3,8 +3,8 @@
 
 // VENDORED from NVIDIA/OpenShell — do not edit by hand.
 //   repo:    https://github.com/NVIDIA/OpenShell
-//   ref:     v0.0.107
-//   commit:  88cf35efe426024eb19fdc403f594a1602f44d49
+//   ref:     v0.0.109
+//   commit:  8d67250a5d17348eb96c4fa46226b06d8041f2ba
 //   path:    crates/openshell-core/src/driver_mounts.rs
 // Provenance, checksum, and the one documented deviation (see the
 // "VENDOR LOCAL PATCH" block below) are recorded in

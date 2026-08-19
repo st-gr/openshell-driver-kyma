@@ -16,9 +16,9 @@
 # The provenance header's own `commit:` line is checked too (against
 # `commit` below), so a doctored header no longer passes silently.
 repo = "https://github.com/NVIDIA/OpenShell"
-ref = "v0.0.107"
-commit = "88cf35efe426024eb19fdc403f594a1602f44d49"
-vendored_at = "2026-08-18"
+ref = "v0.0.109"
+commit = "8d67250a5d17348eb96c4fa46226b06d8041f2ba"
+vendored_at = "2026-08-19"
 header_lines = 10
 
 [[files]]
