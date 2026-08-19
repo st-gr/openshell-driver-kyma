@@ -33,10 +33,24 @@ sha256 = "7a9cd8eeca0f52c6d2046a1b8ad3459422bc12d5cd48239f7ef9cbf1a3f9f610"
 # script to resolve upstream's named constants to their string values and
 # compare those values, in order, against the literals in the patch block —
 # instead of comparing this file byte-for-byte against a local copy we do
-# not have. This is what makes an edit *inside* the patch block (e.g.
-# dropping "/run/openshell" from CONTROL_ROOTS) show up as drift.
+# not have. This is what makes an edit to CONTROL_ROOTS or
+# OCI_RUNTIME_MOUNT_ROOTS *values* (e.g. dropping "/run/openshell") show up
+# as drift.
+#
+# patch_block_sha256 below is a second, independent check on the same
+# entry: the sha256 of the raw bytes between the "VENDOR LOCAL PATCH"
+# BEGIN/END markers in local_path, exactly as they appear (comments
+# included). The values check above only reads the two named arrays, so
+# anything else slipped into the block — e.g. an extra `const` declaration
+# — is invisible to it; this catches that, because any change to the raw
+# block bytes changes the hash. Recompute after any deliberate change to
+# the patch block (including re-vendoring) with:
+#   awk '/^\/\/ --- BEGIN VENDOR LOCAL PATCH ---$/{f=1;next}
+#        /^\/\/ --- END VENDOR LOCAL PATCH ---$/{f=0} f{print}' \
+#     crates/openshell-driver-kyma/src/vendor/driver_mounts.rs | sha256sum
 [[files]]
 upstream_path = "crates/openshell-core/src/container_paths.rs"
 local_path = "crates/openshell-driver-kyma/src/vendor/driver_mounts.rs"
 kind = "constants"
+patch_block_sha256 = "d036321537a308d2bcb9a372f32d9f8fb8069b93db5ba705114d1eda339d23ac"
 sha256 = "14e240f366a55b056b7a0a831165bc6be574dea0d05a7abb0da28c0734da2cf5"

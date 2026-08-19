@@ -14,7 +14,7 @@
 # `vendor-proto.sh`-style automation for this file — re-vendoring is manual,
 # documented in the header of vendor/driver_mounts.rs.
 #
-# Five things are checked:
+# Six things are checked:
 #
 #   1. local (header + local patch reversed) == upstream at the pinned commit
 #      -> catches someone hand-editing the vendored file body
@@ -27,10 +27,17 @@
 #      "VENDOR LOCAL PATCH" block, resolved and compared in order against
 #      upstream's crates/openshell-core/src/container_paths.rs (a `kind =
 #      "constants"` [[files]] entry — see UPSTREAM.lock), must match
-#      -> catches an edit *inside* the patch block itself (e.g. dropping
+#      -> catches an edit to those two arrays' *values* (e.g. dropping
 #         "/run/openshell"), which (1)-(3) cannot see because the patch
 #         block is deliberately excluded from the byte-for-byte comparison
-#   5. the provenance header's `commit:` line == the `commit` pinned in
+#   5. the raw bytes of the "VENDOR LOCAL PATCH" block (everything between
+#      the BEGIN/END markers, verbatim) hash to the `patch_block_sha256`
+#      recorded on the same `kind = "constants"` entry
+#      -> catches anything else slipped into the block that (4) does not
+#         read at all — e.g. an extra `const` declaration alongside
+#         CONTROL_ROOTS/OCI_RUNTIME_MOUNT_ROOTS — since (1)-(3) exclude the
+#         whole block and (4) only ever looks at those two named arrays
+#   6. the provenance header's `commit:` line == the `commit` pinned in
 #      UPSTREAM.lock
 #      -> catches a falsified header, which is otherwise stripped by
 #         header_lines before any of the above ever sees it
@@ -161,6 +168,19 @@ extract_local_constants() {
 	' "$1"
 }
 
+# Raw bytes of the "VENDOR LOCAL PATCH" block, verbatim (markers excluded,
+# everything between them included as-is — comments and all). Unlike
+# extract_local_constants above, this reads nothing selectively, so content
+# added anywhere in the block that is not one of the two named arrays still
+# changes the hash.
+extract_patch_block_raw() {
+	awk '
+		/^\/\/ --- BEGIN VENDOR LOCAL PATCH ---$/ { in_patch = 1; next }
+		/^\/\/ --- END VENDOR LOCAL PATCH ---$/ { in_patch = 0; next }
+		in_patch { print }
+	' "$1"
+}
+
 # The provenance header's `commit:` line, stripped by header_lines before
 # every other check runs — so it needs its own, separate assertion against
 # the commit pinned in UPSTREAM.lock.
@@ -172,7 +192,7 @@ header_commit_of() {
 # kind defaults to "file" (byte-for-byte, via reverse_local_patch); a
 # "constants" entry compares resolved CONTROL_ROOTS / OCI_RUNTIME_MOUNT_ROOTS
 # values instead, and has no local file of its own to fetch from upstream.
-while read -r upstream_path local_path kind recorded_sha; do
+while read -r upstream_path local_path kind recorded_sha recorded_patch_block_sha; do
 	[[ -n $upstream_path ]] || continue
 
 	if [[ ! -f $local_path ]]; then
@@ -189,6 +209,16 @@ while read -r upstream_path local_path kind recorded_sha; do
 		extract_local_constants "$local_path" >"$tmp/local_extracted"
 		upstream_sha=$(sha256_of "$tmp/upstream_extracted")
 		local_sha=$(sha256_of "$tmp/local_extracted")
+
+		if [[ -n $recorded_patch_block_sha ]]; then
+			extract_patch_block_raw "$local_path" >"$tmp/local_patch_block_raw"
+			patch_block_sha=$(sha256_of "$tmp/local_patch_block_raw")
+			if [[ $patch_block_sha != "$recorded_patch_block_sha" ]]; then
+				printf '  DRIFT    %s: raw "VENDOR LOCAL PATCH" block bytes (sha256 %s) do not match patch_block_sha256 recorded in %s (%s)\n' \
+					"$local_path" "$patch_block_sha" "$LOCK" "$recorded_patch_block_sha"
+				status=1
+			fi
+		fi
 	else
 		label="$local_path"
 		upstream_sha=$(sha256_of "$tmp/upstream")
@@ -221,11 +251,12 @@ while read -r upstream_path local_path kind recorded_sha; do
 		printf '  ok       %s\n' "$label"
 	fi
 done < <(awk '
-	/^\[\[files\]\]/      { u=""; l=""; s=""; k="file"; next }
+	/^\[\[files\]\]/      { u=""; l=""; s=""; k="file"; p=""; next }
 	/^upstream_path/      { gsub(/.*= *"|"/, ""); u=$0; next }
 	/^local_path/         { gsub(/.*= *"|"/, ""); l=$0; next }
 	/^kind/                { gsub(/.*= *"|"/, ""); k=$0; next }
-	/^sha256/             { gsub(/.*= *"|"/, ""); s=$0; print u, l, k, s; next }
+	/^patch_block_sha256/ { gsub(/.*= *"|"/, ""); p=$0; next }
+	/^sha256/             { gsub(/.*= *"|"/, ""); s=$0; print u, l, k, s, p; next }
 ' "$LOCK")
 
 echo

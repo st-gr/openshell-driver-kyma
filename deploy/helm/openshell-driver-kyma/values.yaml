@@ -218,9 +218,11 @@ gateway:
     # and scripts/check-proto-drift.sh) — upstream tagged v0.0.107/v0.0.108
     # but published no container images for either, so this pin skips
     # straight to v0.0.109, the first tag since `0.0.106` with published
-    # images. `StartSandbox` (added vs. `0.0.102`) is implemented as
-    # `Unimplemented`, matching the existing `StopSandbox` it is the
-    # counterpart to; see driver.rs::start_sandbox. Still carries forward
+    # images. `StartSandbox` (added vs. `0.0.102`) and `StopSandbox` are
+    # both implemented by this driver: `StopSandbox` patches the Sandbox CR
+    # to a stopped state and waits for its pod to actually terminate,
+    # `StartSandbox` performs the matching resume patch; see
+    # driver.rs::stop_sandbox / start_sandbox. Still carries forward
     # the external-compute-driver work (NVIDIA/OpenShell#1703), the AWS
     # Bedrock provider plumbing (NVIDIA/OpenShell#1704), and the TUI
     # provider config-key form (NVIDIA/OpenShell#2224 / #1798) introduced in
