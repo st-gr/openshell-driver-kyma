@@ -111,6 +111,24 @@ async fn start_server(
     tokio::sync::oneshot::Sender<()>,
     tokio::task::JoinHandle<()>,
 ) {
+    start_server_with_config(socket, provisioner, enricher, metrics, Config::default()).await
+}
+
+/// Like `start_server`, but with an explicit `Config` — needed for the tests
+/// that exercise mode-dependent behavior (e.g. the `EnsureWorkspace`/
+/// `DeleteWorkspace` boundary check, which only requires a strict DNS-1123
+/// workspace under `Managed`/`Operator`).
+async fn start_server_with_config(
+    socket: PathBuf,
+    provisioner: MockProvisioner,
+    enricher: MockEnricher,
+    metrics: MockMetrics,
+    cfg: Config,
+) -> (
+    ComputeDriverClient<tonic::transport::Channel>,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<()>,
+) {
     let listener = UnixListener::bind(&socket).expect("bind UDS");
     let stream = UnixListenerStream::new(listener);
 
@@ -118,7 +136,7 @@ async fn start_server(
         Arc::new(provisioner),
         Arc::new(enricher),
         Arc::new(metrics),
-        Config::default(),
+        cfg,
     );
 
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
@@ -551,15 +569,26 @@ async fn grpc_delete_workspace_rejects_empty_workspace() {
 /// A traversal-shaped workspace must be rejected before it reaches the
 /// provisioner — the mock has no expectations set, so a call that got past
 /// validation would panic inside the spawned server task rather than
-/// surface as a clean `InvalidArgument`.
+/// surface as a clean `InvalidArgument`. This is a `Managed`/`Operator`
+/// property: under those modes `workspace` becomes a Kubernetes namespace
+/// name and therefore a raw, unencoded URL path segment. `Shared` never
+/// uses `workspace` this way — see
+/// `grpc_ensure_workspace_shared_mode_accepts_a_traversal_shaped_workspace`
+/// below for the property that must hold there instead.
 #[tokio::test]
 async fn grpc_ensure_workspace_rejects_path_traversal() {
     let (_dir, socket) = temp_socket();
-    let (mut client, shutdown, handle) = start_server(
+    let cfg = Config {
+        workspace_mode: openshell_driver_kyma::workspace::WorkspaceMode::Managed,
+        gateway_id: "gw1".into(),
+        ..Config::default()
+    };
+    let (mut client, shutdown, handle) = start_server_with_config(
         socket,
         MockProvisioner::new(),
         MockEnricher::new(),
         MockMetrics::new(),
+        cfg,
     )
     .await;
 
@@ -568,7 +597,7 @@ async fn grpc_ensure_workspace_rejects_path_traversal() {
             workspace: "a/../../../../api/v1/namespaces/kube-system".into(),
         })
         .await
-        .expect_err("traversal-shaped workspace must be rejected");
+        .expect_err("traversal-shaped workspace must be rejected under Managed");
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
 
     drop(shutdown);
@@ -576,15 +605,21 @@ async fn grpc_ensure_workspace_rejects_path_traversal() {
 }
 
 /// See `grpc_ensure_workspace_rejects_path_traversal` — same boundary check
-/// on the delete side.
+/// on the delete side, under the same `Managed`-mode property.
 #[tokio::test]
 async fn grpc_delete_workspace_rejects_path_traversal() {
     let (_dir, socket) = temp_socket();
-    let (mut client, shutdown, handle) = start_server(
+    let cfg = Config {
+        workspace_mode: openshell_driver_kyma::workspace::WorkspaceMode::Managed,
+        gateway_id: "gw1".into(),
+        ..Config::default()
+    };
+    let (mut client, shutdown, handle) = start_server_with_config(
         socket,
         MockProvisioner::new(),
         MockEnricher::new(),
         MockMetrics::new(),
+        cfg,
     )
     .await;
 
@@ -593,9 +628,42 @@ async fn grpc_delete_workspace_rejects_path_traversal() {
             workspace: "a/../../../../api/v1/namespaces/kube-system".into(),
         })
         .await
-        .expect_err("traversal-shaped workspace must be rejected");
+        .expect_err("traversal-shaped workspace must be rejected under Managed");
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
 
     drop(shutdown);
     let _ = handle.await;
+}
+
+/// The regression this whole fix undoes, proven on the wire: before this
+/// branch, `EnsureWorkspace`/`DeleteWorkspace` returned `Unimplemented`
+/// (swallowed by the gateway) under every mode, so `Shared` — the default,
+/// and every existing install's mode — accepted any non-empty workspace
+/// string. A workspace containing a dot (`acme.dev`, a valid Sandbox CR
+/// name character but not a valid DNS-1123 label) must still be accepted
+/// under `Shared` today. A traversal-shaped string is not itself dangerous
+/// under `Shared` (`namespace_for` ignores `workspace` entirely and always
+/// returns `cfg.namespace`), so it doubles as evidence the boundary check no
+/// longer over-narrows `Shared` at all.
+#[tokio::test]
+async fn grpc_ensure_workspace_shared_mode_accepts_a_dotted_workspace() {
+    let mut p = MockProvisioner::new();
+    p.expect_ensure_workspace()
+        .withf(|ws: &str| ws == "acme.dev")
+        .times(1)
+        .returning(|_| Ok(()));
+
+    let (_dir, socket) = temp_socket();
+    let (mut client, shutdown, handle) =
+        start_server(socket, p, MockEnricher::new(), MockMetrics::new()).await;
+
+    client
+        .ensure_workspace(EnsureWorkspaceRequest {
+            workspace: "acme.dev".into(),
+        })
+        .await
+        .expect("Shared must accept a workspace containing a dot");
+
+    drop(shutdown);
+    handle.await.unwrap();
 }

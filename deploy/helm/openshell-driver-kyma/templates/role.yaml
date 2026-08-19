@@ -24,14 +24,23 @@ rules:
     resources: ["services"]
     verbs: ["get", "list", "create", "delete", "patch"]
 {{- end }}
-{{- if and .Values.gateway.enabled .Values.gateway.sandboxJwt.enabled }}
-  # Per-sandbox identity resolution: after TokenReview validates the
-  # supervisor's projected SA token, the gateway looks up the bound pod
-  # to read its `openshell.io/sandbox-id` annotation. Read-only.
+  # Unconditional: provisioner.rs::await_pod_gone polls this pod's
+  # existence during StopSandbox (Api::<Pod>::namespaced(...).get), in
+  # every workspace mode -- so this must NOT be made conditional on the
+  # gateway's JWT settings again. It previously lived only inside the
+  # `gateway.enabled && gateway.sandboxJwt.enabled` block below, which
+  # exists for the *gateway* container's own per-sandbox identity
+  # resolution (after TokenReview validates the supervisor's projected SA
+  # token, the gateway looks up the bound pod to read its
+  # `openshell.io/sandbox-id` annotation). Both containers share this
+  # ServiceAccount, but the driver's own need for `pods: get` does not
+  # depend on sandboxJwt being enabled, and `values.yaml` ships that
+  # disabled by default -- a default install therefore granted `pods` no
+  # verb at all, and StopSandbox 403'd on this GET. One rule serves both
+  # callers; do not add a second `pods` rule when sandboxJwt.enabled=true.
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get"]
-{{- end }}
   # K8s Event correlation in WatchSandboxes (Phase 2b T5): the driver
   # surfaces type=Warning Events on sandbox CRs and pods as
   # WatchSandboxesPlatformEvent payloads.

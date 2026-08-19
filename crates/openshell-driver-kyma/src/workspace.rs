@@ -34,14 +34,37 @@ pub fn managed_namespace(gateway_id: &str, workspace: &str) -> String {
 
 /// Namespace a sandbox in `workspace` belongs in.
 ///
+/// Under `Managed`/`Operator`, `workspace` becomes a Kubernetes namespace
+/// *name* and is therefore a path segment on every namespaced API call this
+/// driver makes for it (`kube-core`'s `validate_name` only rejects the empty
+/// string before splicing the name raw and unencoded into the request URL).
+/// This is the one place that check needs to live: every caller that turns a
+/// `workspace` into a namespace — `create`, `validate_create` (both via
+/// `namespace_for_workspace`/direct call), `ensure_workspace`/
+/// `delete_workspace`'s `Operator` arm, and (via
+/// `KymaProvisioner::namespace_for_workspace`, reused in place of a direct
+/// `managed_namespace` call) `Managed`'s `bootstrap_managed_namespace`/
+/// `delete_managed_namespace` — routes through here, so validating here
+/// covers all of them at once and the checks cannot drift apart.
+///
+/// `Shared` never uses `workspace` for anything (`cfg.namespace` is
+/// returned unconditionally), so it is intentionally exempt: this must not
+/// narrow what `Shared` accepts, since `Shared` is the mode every existing
+/// install runs today.
+///
 /// # Errors
-/// `PermissionDenied` when the mode is `Operator` and `workspace` is not in
-/// the configured allowlist.
+/// `InvalidArgument` when the mode is `Managed`/`Operator` and `workspace`
+/// is not a DNS-1123 label. `PermissionDenied` when the mode is `Operator`
+/// and `workspace` is not in the configured allowlist.
 pub fn namespace_for(cfg: &Config, workspace: &str) -> Result<String, DriverError> {
     match cfg.workspace_mode {
         WorkspaceMode::Shared => Ok(cfg.namespace.clone()),
-        WorkspaceMode::Managed => Ok(managed_namespace(&cfg.gateway_id, workspace)),
+        WorkspaceMode::Managed => {
+            require_dns1123_workspace(workspace)?;
+            Ok(managed_namespace(&cfg.gateway_id, workspace))
+        }
         WorkspaceMode::Operator => {
+            require_dns1123_workspace(workspace)?;
             if cfg
                 .operator_namespace_allowlist
                 .iter()
@@ -139,20 +162,58 @@ pub fn validate_kube_resource_name(
     Ok(())
 }
 
-/// Validate a caller-supplied `workspace` string at the gRPC boundary.
+/// Validate a caller-supplied `workspace` string at the gRPC boundary, for
+/// the `EnsureWorkspace`/`DeleteWorkspace` RPCs.
 ///
-/// `workspace` ends up in `managed_namespace` and, in `Managed` mode, as a
-/// Kubernetes resource *name* — interpolated into the request URL path raw
-/// and unencoded, since `kube-core`'s own `validate_name` only rejects the
-/// empty string. Requiring a DNS-1123 label here closes that off at the
-/// boundary: a traversal-shaped workspace like `a/../../../api/v1/...` is
-/// rejected before it ever reaches `kube::Api`.
+/// Mode-aware, matching `namespace_for`'s own gate (this is a second,
+/// earlier check that exists purely for a better error message at the RPC
+/// boundary; `namespace_for` is what actually protects every path — see its
+/// doc comment):
+///
+/// - Under `Managed`/`Operator`, `workspace` becomes a Kubernetes resource
+///   *name* — interpolated into the request URL path raw and unencoded,
+///   since `kube-core`'s own `validate_name` only rejects the empty string.
+///   Requiring a DNS-1123 label here closes that off: a traversal-shaped
+///   workspace like `a/../../../api/v1/...` is rejected before it ever
+///   reaches `kube::Api`.
+/// - Under `Shared`, `namespace_for` ignores `workspace` entirely (it always
+///   returns `cfg.namespace`), so this must not narrow what `Shared`
+///   accepts beyond what it always required: non-empty. Before this
+///   function existed, `EnsureWorkspace`/`DeleteWorkspace` returned
+///   `Unimplemented` (swallowed by the gateway) for every mode, so `Shared`
+///   accepted any non-empty workspace string, dots included — e.g.
+///   `acme.dev`. A strict DNS-1123 check here would silently reject that
+///   workspace today, which is the regression this mode-awareness exists to
+///   undo.
 ///
 /// # Errors
-/// `InvalidArgument` when `workspace` is not a DNS-1123 label (empty,
-/// contains anything other than lowercase ASCII letters/digits/hyphens,
-/// starts/ends with a hyphen, or exceeds 63 characters).
-pub fn validate_workspace_name(workspace: &str) -> Result<(), DriverError> {
+/// Under `Shared`: `InvalidArgument` when `workspace` is empty.
+/// Under `Managed`/`Operator`: `InvalidArgument` when `workspace` is not a
+/// DNS-1123 label (empty, contains anything other than lowercase ASCII
+/// letters/digits/hyphens, starts/ends with a hyphen, or exceeds 63
+/// characters).
+pub fn validate_workspace_name(mode: WorkspaceMode, workspace: &str) -> Result<(), DriverError> {
+    match mode {
+        WorkspaceMode::Shared => {
+            if workspace.is_empty() {
+                Err(DriverError::InvalidArgument(
+                    "workspace is required".to_string(),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+        WorkspaceMode::Managed | WorkspaceMode::Operator => require_dns1123_workspace(workspace),
+    }
+}
+
+/// Strict DNS-1123 label check, shared by `namespace_for`'s `Managed`/
+/// `Operator` arms (the actual protection: every path that turns
+/// `workspace` into a namespace name routes through `namespace_for`) and
+/// `validate_workspace_name`'s `Managed`/`Operator` arm (the earlier,
+/// better-worded gRPC-boundary error). Kept as one function so the two
+/// checks cannot drift apart.
+fn require_dns1123_workspace(workspace: &str) -> Result<(), DriverError> {
     if is_dns1123_label(workspace) {
         Ok(())
     } else {
@@ -234,9 +295,48 @@ mod tests {
         let err = namespace_for(&c, "tenant-a-extra").expect_err("superstring must be denied");
         assert!(matches!(err, DriverError::PermissionDenied(_)));
 
-        // The comparison must be case-sensitive.
-        let err = namespace_for(&c, "TENANT-A").expect_err("case variant must be denied");
-        assert!(matches!(err, DriverError::PermissionDenied(_)));
+        // Uppercase is not a valid DNS-1123 label, so under Operator this is
+        // now caught by the charset gate before the allowlist comparison
+        // ever runs — it is rejected either way, just as `InvalidArgument`
+        // rather than `PermissionDenied`. (A same-charset case difference
+        // can't be constructed here: DNS-1123 forbids uppercase entirely,
+        // which is exactly why the allowlist comparison being case-sensitive
+        // no longer matters for this input.)
+        let err = namespace_for(&c, "TENANT-A").expect_err("must be denied");
+        assert!(matches!(err, DriverError::InvalidArgument(_)));
+    }
+
+    /// The exact hole `namespace_for`'s charset gate closes for `Operator`:
+    /// a traversal- or otherwise invalid-shaped workspace must never reach
+    /// the allowlist comparison, let alone be returned as a namespace name.
+    #[test]
+    fn operator_rejects_invalid_charset_workspace_before_the_allowlist_check() {
+        let mut c = cfg_with(WorkspaceMode::Operator);
+        c.operator_namespace_allowlist = vec!["tenant-a".into()];
+        let err = namespace_for(&c, "a/../../../../api/v1/namespaces/kube-system")
+            .expect_err("traversal-shaped workspace must be rejected");
+        assert!(matches!(err, DriverError::InvalidArgument(_)));
+    }
+
+    /// Same property, but for `Managed`: an invalid-charset workspace must
+    /// never reach `managed_namespace` and become part of a namespace name.
+    #[test]
+    fn managed_rejects_invalid_charset_workspace() {
+        let mut c = cfg_with(WorkspaceMode::Managed);
+        c.gateway_id = "gw1".into();
+        let err = namespace_for(&c, "acme.dev").expect_err("dot is not DNS-1123");
+        assert!(matches!(err, DriverError::InvalidArgument(_)));
+    }
+
+    /// The regression this whole fix undoes: `Shared` must accept every
+    /// workspace it accepted before this branch, including one containing a
+    /// dot (a valid Sandbox CR name character, just not a valid DNS-1123
+    /// label) — `namespace_for` ignores `workspace` entirely under `Shared`,
+    /// so no charset gate ever runs for it.
+    #[test]
+    fn shared_accepts_a_workspace_containing_a_dot() {
+        let c = cfg_with(WorkspaceMode::Shared);
+        assert_eq!(namespace_for(&c, "acme.dev").unwrap(), c.namespace);
     }
 
     /// The separator is two dashes so a single-dash workspace or sandbox name
@@ -324,45 +424,73 @@ mod tests {
     }
 
     #[test]
-    fn validate_workspace_name_accepts_realistic_values() {
-        for ws in ["default", "ws-a", "team-a", "tenant-a", "a", "a-1-b"] {
-            assert!(
-                validate_workspace_name(ws).is_ok(),
-                "expected {ws:?} to be accepted"
-            );
+    fn validate_workspace_name_managed_operator_accepts_realistic_values() {
+        for mode in [WorkspaceMode::Managed, WorkspaceMode::Operator] {
+            for ws in ["default", "ws-a", "team-a", "tenant-a", "a", "a-1-b"] {
+                assert!(
+                    validate_workspace_name(mode, ws).is_ok(),
+                    "expected {ws:?} to be accepted under {mode:?}"
+                );
+            }
         }
     }
 
-    /// The exact hole this closes: a traversal-shaped workspace string that
-    /// would otherwise be spliced raw into a `kube::Api` request path.
+    /// The exact hole this closes for `Managed`/`Operator`: a traversal-
+    /// shaped workspace string that would otherwise be spliced raw into a
+    /// `kube::Api` request path.
     #[test]
-    fn validate_workspace_name_rejects_path_traversal() {
-        let err = validate_workspace_name("a/../../../../api/v1/namespaces/kube-system")
-            .expect_err("traversal-shaped workspace must be rejected");
-        assert!(matches!(err, DriverError::InvalidArgument(_)));
+    fn validate_workspace_name_managed_operator_rejects_path_traversal() {
+        for mode in [WorkspaceMode::Managed, WorkspaceMode::Operator] {
+            let err = validate_workspace_name(mode, "a/../../../../api/v1/namespaces/kube-system")
+                .expect_err("traversal-shaped workspace must be rejected");
+            assert!(matches!(err, DriverError::InvalidArgument(_)));
+        }
     }
 
-    /// Replaces the old bare `ws.is_empty()` check in `driver.rs` — prove
-    /// the empty case is still rejected now that `is_dns1123_label` is the
-    /// sole gate.
+    /// Every mode rejects an empty workspace — `Managed`/`Operator` via the
+    /// DNS-1123 gate, `Shared` via its own explicit emptiness check.
     #[test]
-    fn validate_workspace_name_rejects_empty() {
-        assert!(validate_workspace_name("").is_err());
-    }
-
-    #[test]
-    fn validate_workspace_name_rejects_invalid_characters_and_shape() {
-        for ws in [
-            "Default",       // uppercase
-            "team_a",        // underscore
-            "-team-a",       // leading hyphen
-            "team-a-",       // trailing hyphen
-            &"a".repeat(64), // over 63 characters
+    fn validate_workspace_name_rejects_empty_in_every_mode() {
+        for mode in [
+            WorkspaceMode::Shared,
+            WorkspaceMode::Managed,
+            WorkspaceMode::Operator,
         ] {
             assert!(
-                validate_workspace_name(ws).is_err(),
-                "expected {ws:?} to be rejected"
+                validate_workspace_name(mode, "").is_err(),
+                "expected empty workspace to be rejected under {mode:?}"
             );
         }
+    }
+
+    #[test]
+    fn validate_workspace_name_managed_operator_rejects_invalid_characters_and_shape() {
+        for mode in [WorkspaceMode::Managed, WorkspaceMode::Operator] {
+            for ws in [
+                "Default",       // uppercase
+                "team_a",        // underscore
+                "-team-a",       // leading hyphen
+                "team-a-",       // trailing hyphen
+                "acme.dev",      // dot — a valid Sandbox CR name char, not DNS-1123
+                &"a".repeat(64), // over 63 characters
+            ] {
+                assert!(
+                    validate_workspace_name(mode, ws).is_err(),
+                    "expected {ws:?} to be rejected under {mode:?}"
+                );
+            }
+        }
+    }
+
+    /// The regression this fix undoes, at the gRPC-boundary check
+    /// (`EnsureWorkspace`/`DeleteWorkspace`) rather than at `namespace_for`:
+    /// before this branch, those RPCs returned `Unimplemented` under every
+    /// mode (swallowed by the gateway), so `Shared` accepted any non-empty
+    /// workspace string — a dot included, e.g. a Sandbox CR named for the
+    /// workspace `acme.dev`. A mode-blind strict DNS-1123 check would reject
+    /// that today; `Shared` must still accept it.
+    #[test]
+    fn validate_workspace_name_shared_mode_accepts_a_workspace_containing_a_dot() {
+        assert!(validate_workspace_name(WorkspaceMode::Shared, "acme.dev").is_ok());
     }
 }

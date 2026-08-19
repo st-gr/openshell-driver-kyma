@@ -342,13 +342,14 @@ impl ComputeDriver for Driver {
     /// EnsureWorkspace before every sandbox create, so an error here would
     /// fail every create in a mode that has no workspace bootstrap to do.
     /// `Managed`/`Operator` modes gate on the provisioner's real bootstrap
-    /// logic (or its "not implemented yet" error, until later phases land).
+    /// logic — both are fully implemented (see `workspace.rs`, `provisioner.rs`).
     async fn ensure_workspace(
         &self,
         req: Request<EnsureWorkspaceRequest>,
     ) -> Result<Response<EnsureWorkspaceResponse>, Status> {
         let ws = req.into_inner().workspace;
-        crate::workspace::validate_workspace_name(&ws).map_err(Status::from)?;
+        crate::workspace::validate_workspace_name(self.cfg.workspace_mode, &ws)
+            .map_err(Status::from)?;
         self.provisioner
             .ensure_workspace(&ws)
             .await
@@ -363,7 +364,8 @@ impl ComputeDriver for Driver {
         req: Request<DeleteWorkspaceRequest>,
     ) -> Result<Response<DeleteWorkspaceResponse>, Status> {
         let ws = req.into_inner().workspace;
-        crate::workspace::validate_workspace_name(&ws).map_err(Status::from)?;
+        crate::workspace::validate_workspace_name(self.cfg.workspace_mode, &ws)
+            .map_err(Status::from)?;
         self.provisioner
             .delete_workspace(&ws)
             .await

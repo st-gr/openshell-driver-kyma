@@ -8,6 +8,38 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Implemented the `StopSandbox` and `StartSandbox` RPCs — this branch's
+  headline fix.** `StopSandbox` patches the Sandbox CR to a stopped
+  operating state, then polls until its pod has actually gone, bounded by
+  the new `--stop-timeout-secs` (`driver.stopTimeoutSecs`, default `120`);
+  returning as soon as the patch is accepted would let the gateway believe
+  a sandbox is stopped while its pod keeps running. `StartSandbox` (added
+  in `[0.3.3]` below as an `Unimplemented` placeholder pending this) now
+  performs the matching resume patch. **This supersedes the `[0.3.3]` note
+  that this driver's `StopSandbox`/`StartSandbox` are themselves
+  `Unimplemented` — that statement no longer holds.**
+- **Added `driver.stopTimeoutSecs`** (default `120`), passed as
+  `--stop-timeout-secs`.
+- **Added `driver.gatewayId`** (default `""`, falling back to
+  `gateway.sandboxJwt.gatewayId` when unset — itself defaulting to the
+  chart's fullname), passed as `--gateway-id`. Required, and must be a
+  DNS-1123 label, when `driver.workspaceMode` is `managed` — it becomes
+  part of every managed namespace's name
+  (`openshell-{gatewayId}-{workspace}`).
+- **Added `driver.operatorNamespaceAllowlist`** (default `[]`), passed as
+  `--operator-namespace-allowlist`. Required and non-empty when
+  `driver.workspaceMode` is `operator`; an empty allowlist denies every
+  workspace.
+- **The driver refuses to start with `--workspace-mode managed
+  --enable-network-policy=true`.** Managed-namespace `NetworkPolicy`
+  support is not implemented (`bootstrap_managed_namespace` deliberately
+  does not create one — porting the chart's Helm-templated
+  `NetworkPolicy` into Rust would mean maintaining the same security
+  policy in two languages that must never drift). Continuing anyway would
+  silently give sandboxes in managed namespaces weaker network isolation
+  than the shared namespace's, so `main.rs` refuses to start with that
+  combination rather than let it happen quietly. Use `--workspace-mode
+  shared` (the default) if network policy enforcement is required.
 - **Implemented the `EnsureWorkspace` and `DeleteWorkspace` RPCs**, backed by
   a new `src/workspace.rs` that centralizes every tenancy rule behind three
   modes: `Shared` (default), `Managed`, and `Operator`. All three are now
@@ -39,6 +71,13 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   under one mode become unreachable (not deleted — orphaned) once the mode
   changes. Delete every sandbox before switching `driver.workspaceMode`, and
   recreate them afterwards.
+
+### Changed
+
+- **Synced the `ComputeDriver` contract to upstream v0.0.107.** Diff against
+  the previous v0.0.106 pin: `EnsureWorkspace`/`DeleteWorkspace` were added
+  (implemented above); `scripts/check-proto-drift.sh` passes against the
+  new pin.
 
 ## [0.3.3] — 2026-08-17
 

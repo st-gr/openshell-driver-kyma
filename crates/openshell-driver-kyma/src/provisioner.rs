@@ -213,6 +213,19 @@ impl KymaProvisioner {
     }
 
     /// Poll until the sandbox's pod is gone, bounded by `stop_timeout_secs`.
+    ///
+    /// Assumes the agent-sandbox controller names the pod identically to the
+    /// Sandbox CR (`kube_name` below is the CR's own name). If the
+    /// controller ever named pods differently, `pod_api.get(&kube_name)`
+    /// would 404 immediately, this function would return `Ok(())`, and
+    /// `StopSandbox` would report success while the pod kept running —
+    /// silently, and exactly the failure this poll exists to prevent.
+    ///
+    /// Verified empirically against a live cluster (not by test): pod
+    /// `default--hello4`'s `ownerReferences` name the Sandbox CR
+    /// `default--hello4` — same name. No automated test covers this
+    /// assumption, because neither `scripts/interop-smoke.sh` nor the
+    /// managed-mode smoke runs the agent-sandbox controller.
     async fn await_pod_gone(&self, sandbox_id: &str) -> Result<(), DriverError> {
         let deadline =
             std::time::Instant::now() + std::time::Duration::from_secs(self.cfg.stop_timeout_secs);
@@ -331,7 +344,13 @@ impl KymaProvisioner {
     /// is combined with `--enable-network-policy=true`, so this gap is
     /// loud, not silent.
     async fn bootstrap_managed_namespace(&self, workspace: &str) -> Result<(), DriverError> {
-        let ns = crate::workspace::managed_namespace(&self.cfg.gateway_id, workspace);
+        // Routed through `namespace_for_workspace` rather than calling
+        // `managed_namespace` directly (same value under `Managed`) so this
+        // gets `namespace_for`'s DNS-1123 charset check on `workspace`
+        // before it becomes part of a namespace name — see that function's
+        // doc comment for why every workspace-to-namespace path must go
+        // through it.
+        let ns = self.namespace_for_workspace(workspace)?;
 
         // 1 + 2: namespace, carrying both the ownership labels
         // `namespace_owned_by` (and a future DeleteWorkspace teardown)
@@ -489,8 +508,11 @@ impl KymaProvisioner {
     ///    recreated between the `get` and the `delete` is not destroyed by a
     ///    decision taken about the object it replaced.
     async fn delete_managed_namespace(&self, workspace: &str) -> Result<(), DriverError> {
-        // Guardrail 1.
-        let ns = crate::workspace::managed_namespace(&self.cfg.gateway_id, workspace);
+        // Guardrail 1. Routed through `namespace_for_workspace` (same value
+        // as a direct `managed_namespace` call under `Managed`) so this also
+        // gets `namespace_for`'s DNS-1123 charset check — see that
+        // function's doc comment.
+        let ns = self.namespace_for_workspace(workspace)?;
         let api: Api<Namespace> = Api::all(self.client.clone());
 
         // Guardrail 2.
@@ -1270,6 +1292,12 @@ impl SandboxProvisioner for KymaProvisioner {
             &sb.workspace,
             &sb.name,
         )?;
+        // Also run this workspace through `namespace_for`'s own gate (charset
+        // under Managed/Operator, allowlist membership under Operator) so a
+        // request that would fail at the real `create()` call fails here
+        // too, before the gateway commits to it. The resolved namespace
+        // itself is unused; only the validation matters here.
+        crate::workspace::namespace_for(&self.cfg, &sb.workspace)?;
 
         if let Some(spec) = sb.spec.as_ref() {
             // `count: 0` is an invalid request and surfaces as InvalidArgument.
@@ -1783,6 +1811,42 @@ mod tests {
             .await
             .expect_err("name should exceed DNS-1123 limit");
         assert!(matches!(err, DriverError::InvalidArgument(_)), "{err:?}");
+    }
+
+    /// The create-path half of the charset fix: under `Managed`, `workspace`
+    /// becomes a namespace name reached via `namespace_for`, so
+    /// `validate_create` (the `ValidateSandboxCreate` RPC) must reject a
+    /// charset-invalid workspace before the gateway ever commits to
+    /// `create()` — and must do so before any API call.
+    #[tokio::test]
+    async fn validate_create_rejects_charset_invalid_workspace_under_managed() {
+        let (client, recorder) = recording_client(vec![]);
+        let p = managed_provisioner(client);
+        let mut sb = make_sandbox("sb-1", "x", "img");
+        sb.workspace = "acme.dev".into();
+        let err = p
+            .validate_create(&sb)
+            .await
+            .expect_err("dot is not a valid DNS-1123 label");
+        assert!(matches!(err, DriverError::InvalidArgument(_)), "{err:?}");
+        assert!(
+            recorder.lock().unwrap().is_empty(),
+            "the charset check must short-circuit before any API call"
+        );
+    }
+
+    /// The regression `validate_create` must not introduce: `Shared` never
+    /// turns `workspace` into a namespace name, so a workspace containing a
+    /// dot — accepted by this driver before this branch — must still pass
+    /// `validate_create`.
+    #[tokio::test]
+    async fn validate_create_accepts_a_dotted_workspace_under_shared() {
+        let p = make_provisioner();
+        let mut sb = make_sandbox("sb-1", "x", "img");
+        sb.workspace = "acme.dev".into();
+        p.validate_create(&sb)
+            .await
+            .expect("Shared must accept a dotted workspace");
     }
 
     /// The CR must carry every label `object_to_driver_sandbox` reads back,
@@ -2354,6 +2418,26 @@ mod tests {
                 .starts_with("/api/v1/namespaces/openshell-gw1-team-a"),
             "expected the derived namespace, got {}",
             seen[0].uri
+        );
+    }
+
+    /// `delete_managed_namespace` (and, by the same construction,
+    /// `bootstrap_managed_namespace`) is now routed through
+    /// `namespace_for_workspace` rather than calling `managed_namespace`
+    /// directly, so it inherits `namespace_for`'s DNS-1123 charset gate.
+    /// This must reject before any API call — an invalid-charset workspace
+    /// must never become part of a namespace name reached over the wire.
+    #[tokio::test]
+    async fn delete_workspace_managed_mode_rejects_charset_invalid_workspace_before_any_api_call() {
+        let (client, recorder) = recording_client(vec![]);
+        let err = managed_provisioner(client)
+            .delete_workspace("acme.dev")
+            .await
+            .expect_err("dot is not a valid DNS-1123 label");
+        assert!(matches!(err, DriverError::InvalidArgument(_)), "{err:?}");
+        assert!(
+            recorder.lock().unwrap().is_empty(),
+            "the charset check must short-circuit before any API call"
         );
     }
 
