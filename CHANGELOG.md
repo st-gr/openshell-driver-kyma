@@ -6,6 +6,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-08-19
+
 ### Added
 
 - **Implemented the `StopSandbox` and `StartSandbox` RPCs — this branch's
