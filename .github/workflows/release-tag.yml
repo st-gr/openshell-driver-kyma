@@ -15,6 +15,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      # Advisory only -- check-image-pins.sh always exits 0, so a stale pin
+      # never blocks a release. The point is that "are we still current?"
+      # gets asked at the one moment someone is guaranteed to be looking:
+      # the release itself. Its findings go to the run summary rather than
+      # the log, so they survive being scrolled past.
+      - name: Report image pin status
+        run: |
+          ./scripts/check-image-pins.sh | tee /tmp/pin-status.txt
+          {
+            echo "## Image pin status"
+            echo
+            echo '```'
+            grep -vE '^[A-Z_]+: ' /tmp/pin-status.txt
+            echo '```'
+            if grep -q '^PINS_STALE: true' /tmp/pin-status.txt; then
+              echo
+              echo ':warning: At least one pin is behind upstream. This did not block the release.'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 

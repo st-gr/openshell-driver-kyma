@@ -33,6 +33,9 @@
 #                               the pin should be reverted to latest
 #   VENDOR_TARGET_TAG          the newer tag, alongside PIN_REASON_EVAPORATED
 #   PIN_STILL_JUSTIFIED: true  a newer tag exists but its images do not yet
+#   LATEST_UPSTREAM_TAG        the newest upstream tag, emitted whether or not
+#                               a pin is in place -- so "what would we move to?"
+#                               is answerable from the summary without a pin
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/proto-lib.sh
@@ -55,6 +58,14 @@ PIN_REVIEW_AFTER=$(sed -n 's/^PIN_REVIEW_AFTER=//p' "$KNOB" | tail -1 | tr -d '[
 if [[ -z $GATEWAY_REF || $GATEWAY_REF == latest ]]; then
 	printf 'Not pinned: GATEWAY_REF=latest. Nothing to review.\n'
 	printf 'PIN_STATUS: unpinned\n'
+	# Still report what upstream's newest tag is. Without it the summary can
+	# say a pin is absent but not what version is actually being tracked,
+	# which is the other half of the question a reader is asking.
+	unpinned_latest=$(latest_upstream_tag 2>/dev/null || true)
+	if [[ -n $unpinned_latest ]]; then
+		printf 'Newest upstream tag: %s\n' "$unpinned_latest"
+		printf 'LATEST_UPSTREAM_TAG: %s\n' "$unpinned_latest"
+	fi
 	exit 0
 fi
 
@@ -91,6 +102,8 @@ if [[ -z $latest ]]; then
 	printf 'PIN_CHECK: network-unreachable\n'
 	exit 0
 fi
+
+printf 'LATEST_UPSTREAM_TAG: %s\n' "$latest"
 
 if [[ $latest == "$GATEWAY_REF" ]]; then
 	printf 'Pin already matches the latest known upstream tag; nothing further to check.\n'
