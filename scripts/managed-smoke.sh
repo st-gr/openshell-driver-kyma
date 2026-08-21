@@ -52,43 +52,51 @@ dump_diagnostics() {
 	kubectl get ns "$NS_DEFAULT" "$NS_DECOY" "$NS_OWNED" -o wide 2>&1 >&2 || true
 }
 
-# Wait for the gateway's own store to stop listing $name in $workspace.
+# Delete a workspace, tolerating a gateway store that lags Kubernetes.
 #
-# `workspace delete`'s emptiness precondition reads the gateway's store, not
-# Kubernetes, so polling that store -- rather than kubectl -- is what makes
-# the gate consult the same source the precondition does. But the store is
-# filled by a reconciliation sweep that can lag arbitrarily, and a slow
-# sweep is not the same failure as a sandbox that genuinely did not delete.
-# Treating them as one failure is what made this assertion flaky.
+# `workspace delete`'s emptiness precondition reads the gateway's own store,
+# which is filled by a reconciliation sweep against Kubernetes. That sweep
+# can lag badly: observed still listing a deleted sandbox 300s after its CR
+# was gone from Kubernetes.
 #
-# So: poll the store for up to STORE_SETTLE_SECS. If it still lists the
-# sandbox, cross-check Kubernetes -- the source of truth the sweep reads
-# from. Fail only when BOTH still report it, which is a real delete failure.
-# When Kubernetes says the CR is gone and only the store disagrees, the
-# sweep is merely behind: warn loudly and continue, letting the workspace
-# delete downstream be the real assertion rather than inventing a failure
-# here. The warning is deliberately noisy -- a sweep that never catches up
-# is worth seeing even on a green run.
-wait_for_gateway_to_forget() {
-	local workspace=$1 name=$2 namespace=$3
-	local waited=0
+# The obvious shape -- poll `sandbox list` until the store agrees, then
+# delete once -- does not work, and a longer poll does not fix it. It only
+# moves the failure downstream: the poll times out, the delete runs anyway,
+# and the precondition refuses it. That was measured, not assumed.
+#
+# So retry the operation itself rather than polling a proxy for it. The
+# delete succeeding IS the condition being waited on, and retrying it is
+# safe: a refused delete changes nothing. Only the emptiness precondition is
+# retried -- any other error is a real failure and fails immediately rather
+# than being masked by ${STORE_SETTLE_SECS}s of pointless retries.
+#
+# On timeout, Kubernetes is the tiebreaker, so the diagnosis names the
+# actual fault: a CR that is genuinely still there is a delete failure,
+# while a CR that is gone means the store never converged.
+workspace_delete_when_ready() {
+	local workspace=$1 sandbox=$2 namespace=$3
+	local waited=0 out=""
 
 	while (( waited < STORE_SETTLE_SECS )); do
-		if ! osh sandbox list --workspace "$workspace" --names 2>/dev/null | grep -qx "$name"; then
+		if out=$(osh workspace delete "$workspace" 2>&1); then
+			(( waited > 0 )) && printf 'note: workspace delete %s succeeded after %ss of store lag\n' "$workspace" "$waited" >&2
 			return 0
 		fi
-		sleep 3
-		waited=$(( waited + 3 ))
+
+		if ! grep -qiE "not in a state required|still contains resources" <<<"$out"; then
+			printf '%s\n' "$out" >&2
+			fail "workspace delete ${workspace} failed for a reason other than the emptiness precondition"
+		fi
+
+		sleep 5
+		waited=$(( waited + 5 ))
 	done
 
-	if kubectl -n "$namespace" get sandbox "$name" >/dev/null 2>&1; then
-		fail "sandbox ${name} is still listed by BOTH the gateway store and Kubernetes (${namespace}) after ${STORE_SETTLE_SECS}s -- this is a real delete failure, not the reconciliation lag"
+	printf '%s\n' "$out" >&2
+	if kubectl -n "$namespace" get sandbox "$sandbox" >/dev/null 2>&1; then
+		fail "workspace delete ${workspace} was refused for ${STORE_SETTLE_SECS}s and sandbox ${sandbox} really is still present in ${namespace} -- a genuine delete failure"
 	fi
-
-	printf '\nWARNING: gateway store still lists %s in workspace %s after %ss,\n' \
-		"$name" "$workspace" "$STORE_SETTLE_SECS" >&2
-	printf 'WARNING: but its CR is already gone from %s -- the reconciliation sweep\n' "$namespace" >&2
-	printf 'WARNING: is lagging. Continuing; the workspace delete below is the real gate.\n' >&2
+	fail "workspace delete ${workspace} was refused for ${STORE_SETTLE_SECS}s because the gateway store still lists ${sandbox}, even though its CR is gone from ${namespace} -- the store never converged"
 }
 
 for v in GATEWAY_IMAGE SUPERVISOR_IMAGE CLI_VERSION DRIVER_IMAGE; do
@@ -250,12 +258,14 @@ kubectl -n "$NS_DEFAULT" get sa openshell-sandbox >/dev/null 2>&1 \
 # from Kubernetes (the third trap above) proves the driver's half is done,
 # but not that the gateway's store has caught up -- a `workspace delete`
 # issued right after the CR vanishes from Kubernetes can still be refused
-# with FAILED_PRECONDITION if it lands mid-sweep. The fix is to also poll
-# the gateway's own view (`sandbox list --workspace`) until it agrees the
-# workspace is empty, and gate the delete on that -- the same source the
-# precondition consults -- not on the kubectl poll alone. Because this is a
-# race and not a deterministic ordering bug, a single green run does not
-# prove it is fixed; it only means this run did not hit the window.
+# with FAILED_PRECONDITION if it lands mid-sweep. Polling the gateway's own
+# view (`sandbox list --workspace`) until it agrees looks like the fix, and
+# is not: the sweep has been observed still listing a deleted sandbox 300s
+# on, so the poll times out and the delete is refused anyway. What works is
+# retrying the delete itself -- see workspace_delete_when_ready above, which
+# both call sites use. Because this is a race and not a deterministic
+# ordering bug, a single green run does not prove it is fixed; it only means
+# this run did not hit the window.
 #
 # Instead: `workspace create` registers "decoy" with the gateway (needed so
 # `--workspace decoy` below and `workspace delete decoy` further down are
@@ -312,14 +322,6 @@ for _ in $(seq 1 40); do
 done
 [[ $gone == 1 ]] || fail "sandbox m2 was not deleted from ${NS_DECOY}"
 
-# The kubectl poll above only proves the driver's half: the CR is gone from
-# Kubernetes. The gateway's own emptiness precondition on workspace delete
-# reads its own store, not Kubernetes, and that store can still lag behind
-# a moment after the CR disappears (see the fifth trap above). The helper
-# polls the gateway's own view -- the same source the precondition consults
-# -- and cross-checks Kubernetes before calling it a failure.
-wait_for_gateway_to_forget decoy m2 "$NS_DECOY"
-
 # A sandbox delete removes only the CR and its PVC -- it must never touch
 # the namespace. Confirm that before trusting the "workspace delete should
 # succeed" assertion below to mean what it claims.
@@ -333,8 +335,9 @@ kubectl label namespace "$NS_DECOY" \
 	openshell.ai/sandbox-workspace- \
 	|| fail "could not strip ownership labels from $NS_DECOY"
 
-# The driver declines idempotently and returns Ok -- this must succeed, not error.
-osh workspace delete decoy || fail "workspace delete decoy should succeed even though the driver declines to delete the namespace"
+# The driver declines idempotently and returns Ok -- this must succeed, not
+# error. Retried past the gateway's store lag (fifth trap above).
+workspace_delete_when_ready decoy m2 "$NS_DECOY"
 
 # Bounded wait rather than an instant check: this is the negative case, so
 # there is no "gone" event to wait for -- only silence to confirm. A
@@ -403,17 +406,13 @@ for _ in $(seq 1 40); do
 done
 [[ $gone == 1 ]] || fail "sandbox m3 was not deleted from ${NS_OWNED}"
 
-# Same fifth trap as ASSERT M2: the kubectl poll above proves the CR is
-# gone from Kubernetes, but the gateway's own emptiness precondition reads
-# its own store, which can still lag.
-wait_for_gateway_to_forget owned m3 "$NS_OWNED"
 kubectl get ns "$NS_OWNED" >/dev/null 2>&1 \
 	|| fail "deleting sandbox m3 unexpectedly removed the managed namespace $NS_OWNED"
 
 # Labels were never stripped -- this is an owned namespace. The RPC should
 # reach delete_managed_namespace's namespace_owned_by check, find a match,
 # and actually delete it.
-osh workspace delete owned || fail "workspace delete owned failed"
+workspace_delete_when_ready owned m3 "$NS_OWNED"
 gone=0
 for _ in $(seq 1 40); do
 	if ! kubectl get ns "$NS_OWNED" >/dev/null 2>&1; then
