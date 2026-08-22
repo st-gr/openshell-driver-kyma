@@ -12,7 +12,22 @@
 # the gateway sidecar, and dials the operator's real upstream — neither
 # this image nor the agent process ever sees the real URL or API key.
 
-FROM ghcr.io/st-gr/e2e-sandbox:latest
+# Base image, PINNED BY DIGEST. `:latest` here meant a rebuild of this
+# image could silently pick up a different base than the one last
+# reviewed -- the same failure mode that made the supervisor image a
+# digest pin in deploy/helm/.../values.yaml. Pinning also makes a build
+# of this Dockerfile reproducible: the same commit yields the same base.
+#
+# To re-resolve after a deliberate base bump:
+#   docker buildx imagetools inspect ghcr.io/st-gr/e2e-sandbox:latest \
+#     --format '{{json .Manifest.Digest}}'
+#
+# Note the trade-off this creates: build-sandbox-claude.yml still triggers
+# on changes under e2e/sandbox/**, but a rebuilt base no longer reaches
+# this image on its own -- the digest below has to be bumped in a commit.
+# That is the intended cost of not tracking a moving tag.
+# scripts/check-image-pins.sh reports when this digest has fallen behind.
+FROM ghcr.io/st-gr/e2e-sandbox@sha256:abbcc9a966fde6395916eaef25064c9d010a7cbdb912f7c97a04d726ca832b97
 
 USER root
 ENV DEBIAN_FRONTEND=noninteractive
@@ -20,11 +35,16 @@ ENV DEBIAN_FRONTEND=noninteractive
 # Node 22 LTS — Claude Code's package needs Node 20+ (string-width's /v
 # regex flag is one of several gates; 22 LTS is the conservative pick).
 ARG NODE_MAJOR=22
+# Claude Code version, PINNED. An unpinned `npm install -g` meant two
+# builds of the same commit could bake different agent versions, so a
+# sandbox's behaviour was not reproducible from its source. Bump this
+# deliberately; scripts/check-image-pins.sh reports when it is behind.
+ARG CLAUDE_CODE_VERSION=2.1.239
 RUN apt-get update \
     && apt-get install -y --no-install-recommends gnupg \
     && curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - \
     && apt-get install -y --no-install-recommends nodejs \
-    && npm install -g @anthropic-ai/claude-code \
+    && npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Pre-onboarded ~/.claude.json template + wrapper installed as `claude`.

@@ -69,6 +69,9 @@ jobs:
       pin_status: ${{ steps.pin.outputs.status }}
       pinned_ref: ${{ steps.pin.outputs.pinned_ref }}
       pin_evaporated: ${{ steps.pin.outputs.evaporated }}
+      # Emitted whether or not a pin is in place, so the PR body can say what
+      # version is being tracked -- not just that nothing is pinned.
+      latest_upstream_tag: ${{ steps.pin.outputs.latest_upstream_tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -162,6 +165,8 @@ jobs:
           echo "status=${status:-unknown}" >> "$GITHUB_OUTPUT"
           echo "pinned_ref=${pinned_ref}" >> "$GITHUB_OUTPUT"
           echo "evaporated=${evaporated:-false}" >> "$GITHUB_OUTPUT"
+          latest_upstream_tag=$(sed -n 's/^LATEST_UPSTREAM_TAG: //p' /tmp/pin-status.txt | tail -1)
+          echo "latest_upstream_tag=${latest_upstream_tag}" >> "$GITHUB_OUTPUT"
 
       - name: Verdict
         id: verdict
@@ -402,6 +407,7 @@ jobs:
           GATE_OUTCOME: ${{ steps.gate.outcome }}
           CLAUDE_OUTCOME: ${{ steps.claude.outcome }}
           PIN_STATUS: ${{ needs.detect.outputs.pin_status }}
+          LATEST_UPSTREAM_TAG: ${{ needs.detect.outputs.latest_upstream_tag }}
           PINNED_REF: ${{ needs.detect.outputs.pinned_ref }}
           PIN_EVAPORATED: ${{ needs.detect.outputs.pin_evaporated }}
         run: |
@@ -446,9 +452,17 @@ jobs:
           # scripts/check-pin-status.sh's finding, worded for a reviewer.
           # Advisory only -- shown for awareness, never blocks the PR and
           # never changes whether this job runs.
-          pin_line="not pinned (tracking latest)"
+          # State the pin plainly: whether one is active, what it is set to,
+          # and what the newest available version is. A summary that says
+          # only "not pinned" leaves the reader still asking what is being
+          # tracked.
+          newest_suffix=""
+          if [[ -n "$LATEST_UPSTREAM_TAG" ]]; then
+            newest_suffix=" -- newest upstream is \`${LATEST_UPSTREAM_TAG}\`"
+          fi
+          pin_line="not pinned (tracking latest)${newest_suffix}"
           if [[ "$PIN_STATUS" == "pinned" ]]; then
-            pin_line="pinned to \`${PINNED_REF}\`"
+            pin_line="pinned to \`${PINNED_REF}\`${newest_suffix}"
             if [[ "$PIN_EVAPORATED" == "true" ]]; then
               pin_line="${pin_line} -- images for a newer tag now exist; consider reverting to \`latest\` (see the job summary for detail)"
             fi
