@@ -22,7 +22,7 @@ use crate::helpers::{
 use crate::interfaces::{SandboxProvisioner, WatchEvent};
 use async_trait::async_trait;
 use computev1::pb::{DriverPlatformEvent, DriverSandbox};
-use futures::{StreamExt, TryStreamExt};
+use futures::StreamExt;
 use k8s_openapi::api::core::v1::{Event as CoreEvent, Namespace, Node, ServiceAccount};
 use kube::{
     api::{
@@ -1339,6 +1339,84 @@ fn driver_config_volume_mount_to_json(mount: &crate::driver_config::VolumeMountC
     v
 }
 
+/// Forward Sandbox-CR watch events onto `tx` until the stream ends.
+///
+/// Extracted from `watch` so the error path can be tested: `kube`'s
+/// `watcher()` surfaces *recoverable* failures as `Err` items on the stream
+/// and resumes internally on the next poll -- its own docs say "if the watch
+/// connection is interrupted, then `watcher` will attempt to restart the
+/// watch ... the stream is simply resumed from where it left off".
+///
+/// So an `Err` here means "that connection hiccuped", not "the watch is
+/// over". The previous `while let Ok(Some(ev)) = stream.try_next()` treated
+/// the two as the same thing and silently ended the task on the first
+/// transient error -- a 403 blip, an apiserver restart, a dropped
+/// connection -- after which no sandbox state ever reached the gateway again
+/// until the driver pod restarted. That defeated kube's entire reconnect
+/// mechanism, which only works if the consumer keeps polling.
+///
+/// The one condition that does end the loop is the receiver going away:
+/// nothing is listening, so there is nothing to resume for.
+async fn forward_sandbox_watch<S>(
+    mut stream: S,
+    tx: mpsc::Sender<WatchEvent>,
+    cache: Arc<RwLock<HashMap<String, String>>>,
+) where
+    S: futures::Stream<Item = Result<watcher::Event<DynamicObject>, watcher::Error>> + Unpin,
+{
+    while let Some(next) = stream.next().await {
+        use kube::runtime::watcher::Event;
+        let ev = match next {
+            Ok(ev) => ev,
+            Err(e) => {
+                tracing::warn!(error = %e, "sandbox watch error; kube resumes on next poll");
+                continue;
+            }
+        };
+        let event = match ev {
+            Event::Apply(obj) | Event::InitApply(obj) => {
+                let name = obj.metadata.name.clone().unwrap_or_default();
+                let id = obj
+                    .metadata
+                    .labels
+                    .as_ref()
+                    .and_then(|l| l.get(LABEL_SANDBOX_ID).cloned())
+                    .unwrap_or_default();
+                if !name.is_empty() && !id.is_empty() {
+                    cache.write().await.insert(name, id);
+                }
+                // Skip, don't abort: a single CR missing the id/name/
+                // workspace labels must not tear down the watch for
+                // every other sandbox.
+                match object_to_driver_sandbox(&obj) {
+                    Ok(sb) => WatchEvent::Updated(Box::new(sb)),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "skipping unconvertible sandbox CR in watch");
+                        continue;
+                    }
+                }
+            }
+            Event::Delete(obj) => {
+                let name = obj.metadata.name.clone().unwrap_or_default();
+                let id = obj
+                    .metadata
+                    .labels
+                    .as_ref()
+                    .and_then(|l| l.get(LABEL_SANDBOX_ID).cloned())
+                    .unwrap_or_default();
+                if !name.is_empty() {
+                    cache.write().await.remove(&name);
+                }
+                WatchEvent::Deleted(id)
+            }
+            Event::Init | Event::InitDone => continue,
+        };
+        if tx.send(event).await.is_err() {
+            break;
+        }
+    }
+}
+
 #[async_trait]
 impl SandboxProvisioner for KymaProvisioner {
     async fn create(&self, sb: &DriverSandbox) -> Result<(), DriverError> {
@@ -1506,51 +1584,7 @@ impl SandboxProvisioner for KymaProvisioner {
         let cr_tx = tx.clone();
         let cr_cache = Arc::clone(&name_to_id);
         tokio::spawn(async move {
-            let mut stream = watcher(api, cfg).boxed();
-            while let Ok(Some(ev)) = stream.try_next().await {
-                use kube::runtime::watcher::Event;
-                let event = match ev {
-                    Event::Apply(obj) | Event::InitApply(obj) => {
-                        let name = obj.metadata.name.clone().unwrap_or_default();
-                        let id = obj
-                            .metadata
-                            .labels
-                            .as_ref()
-                            .and_then(|l| l.get(LABEL_SANDBOX_ID).cloned())
-                            .unwrap_or_default();
-                        if !name.is_empty() && !id.is_empty() {
-                            cr_cache.write().await.insert(name, id);
-                        }
-                        // Skip, don't abort: a single CR missing the id/name/
-                        // workspace labels must not tear down the watch for
-                        // every other sandbox.
-                        match object_to_driver_sandbox(&obj) {
-                            Ok(sb) => WatchEvent::Updated(Box::new(sb)),
-                            Err(e) => {
-                                tracing::warn!(error = %e, "skipping unconvertible sandbox CR in watch");
-                                continue;
-                            }
-                        }
-                    }
-                    Event::Delete(obj) => {
-                        let name = obj.metadata.name.clone().unwrap_or_default();
-                        let id = obj
-                            .metadata
-                            .labels
-                            .as_ref()
-                            .and_then(|l| l.get(LABEL_SANDBOX_ID).cloned())
-                            .unwrap_or_default();
-                        if !name.is_empty() {
-                            cr_cache.write().await.remove(&name);
-                        }
-                        WatchEvent::Deleted(id)
-                    }
-                    Event::Init | Event::InitDone => continue,
-                };
-                if cr_tx.send(event).await.is_err() {
-                    break;
-                }
-            }
+            forward_sandbox_watch(watcher(api, cfg).boxed(), cr_tx, cr_cache).await;
         });
 
         // Kubernetes Event watcher — surfaces pod-scheduling failures,
@@ -1573,8 +1607,19 @@ impl SandboxProvisioner for KymaProvisioner {
             // is supported on the Event resource.
             let cfg = watcher::Config::default().fields("type=Warning");
             let mut stream = watcher(events_api, cfg).boxed();
-            while let Ok(Some(ev)) = stream.try_next().await {
+            while let Some(next) = stream.next().await {
                 use kube::runtime::watcher::Event;
+                // Same contract as the Sandbox-CR watch above: an Err is a
+                // recoverable hiccup that kube resumes from on the next
+                // poll, not the end of the stream. Ending the loop here
+                // would silently stop surfacing scheduling failures.
+                let ev = match next {
+                    Ok(ev) => ev,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "event watch error; kube resumes on next poll");
+                        continue;
+                    }
+                };
                 let core_ev = match ev {
                     Event::Apply(e) | Event::InitApply(e) => e,
                     Event::Delete(_) | Event::Init | Event::InitDone => continue,
@@ -3939,5 +3984,63 @@ mod tests {
              else, saw {seen:?}"
         );
         assert_eq!(seen[0].method, "POST");
+    }
+
+    /// A transient watch error must not end the watch.
+    ///
+    /// kube's `watcher()` surfaces *recoverable* failures as `Err` items and
+    /// resumes internally on the next poll. The previous
+    /// `while let Ok(Some(ev)) = stream.try_next()` ended the task on the
+    /// first one, so a single 403 blip, apiserver restart or dropped
+    /// connection silently stopped every sandbox state update reaching the
+    /// gateway until the driver pod was restarted -- with no error logged,
+    /// because ending a stream is not an error.
+    ///
+    /// Feeds an `Err` followed by a real event and asserts the event still
+    /// arrives. Under the old code this test hangs on `recv()` and fails.
+    #[tokio::test]
+    async fn watch_survives_a_transient_stream_error() {
+        let p = make_provisioner();
+        let sb = make_sandbox("sb-1", "hello", "img:latest");
+        let obj = p.build_dynamic_object(&sb, "test-ns");
+
+        let stream = futures::stream::iter(vec![
+            Err(watcher::Error::NoResourceVersion),
+            Ok(watcher::Event::Apply(obj)),
+        ]);
+
+        let (tx, mut rx) = mpsc::channel::<WatchEvent>(8);
+        let cache = Arc::new(RwLock::new(HashMap::new()));
+        forward_sandbox_watch(Box::pin(stream), tx, cache).await;
+
+        match rx.recv().await {
+            Some(WatchEvent::Updated(_)) => {}
+            other => panic!("event after a transient error must still be forwarded, got {other:?}"),
+        }
+    }
+
+    /// Several consecutive errors must not end it either -- a rolling
+    /// apiserver restart produces a burst, not a single blip.
+    #[tokio::test]
+    async fn watch_survives_consecutive_stream_errors() {
+        let p = make_provisioner();
+        let sb = make_sandbox("sb-2", "hello2", "img:latest");
+        let obj = p.build_dynamic_object(&sb, "test-ns");
+
+        let stream = futures::stream::iter(vec![
+            Err(watcher::Error::NoResourceVersion),
+            Err(watcher::Error::NoResourceVersion),
+            Err(watcher::Error::NoResourceVersion),
+            Ok(watcher::Event::Apply(obj)),
+        ]);
+
+        let (tx, mut rx) = mpsc::channel::<WatchEvent>(8);
+        let cache = Arc::new(RwLock::new(HashMap::new()));
+        forward_sandbox_watch(Box::pin(stream), tx, cache).await;
+
+        assert!(
+            matches!(rx.recv().await, Some(WatchEvent::Updated(_))),
+            "watch must survive a burst of errors"
+        );
     }
 }
