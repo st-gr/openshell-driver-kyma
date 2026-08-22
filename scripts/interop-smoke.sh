@@ -255,6 +255,60 @@ grep -q "$SB" <<<"$list_out" || fail "gateway did not list ${SB} by its bare nam
 # crash-restart with no previous logs): grep would just see empty input,
 # return 1, and the branch would be skipped — reporting "no ERRORs" without
 # ever having read a log line. "Could not check" must fail, not pass.
+# --- Assertion 3b: the driver's watch stream really delivered events -------
+#
+# WatchSandboxes was the one RPC with no real-apiserver coverage anywhere in
+# CI. Every other path here goes gateway -> driver -> kube-apiserver, but
+# watch was exercised only by unit tests against a mocked API server, so a
+# behavioural change in kube-runtime's watcher() -- event variants, reconnect
+# handling, bookmark semantics -- would have compiled, passed every test, and
+# broken only in production. That is not hypothetical: the live cluster's
+# driver reports openshell_driver_watch_events_total{event_type="updated"}
+# in the twenties, so this path carries real traffic.
+#
+# Asserting on the counter rather than on a gRPC call keeps this cheap: no
+# grpcurl, no proto, no second client. The counter is incremented only when
+# an event has actually been mapped and forwarded to the gateway
+# (driver.rs::watch_sandboxes), so a non-zero value proves the whole chain
+# ran -- apiserver -> kube-runtime watcher -> provisioner -> gRPC stream.
+#
+# Absence of the metric line is itself the failure signal: the Prometheus
+# client only emits a labelled counter once it has been incremented, so a
+# missing line means no watch event was ever forwarded.
+log "ASSERT 3b: the driver's watch stream delivered events to the gateway"
+kubectl -n "$NS" port-forward "deploy/${RELEASE}-openshell-driver-kyma" 9090:9090 >/tmp/pf-metrics.log 2>&1 &
+PF_METRICS_PID=$!
+trap 'kill "$PF_PID" "$PF_METRICS_PID" 2>/dev/null || true' EXIT
+for i in $(seq 1 20); do
+	if (echo > /dev/tcp/127.0.0.1/9090) >/dev/null 2>&1; then
+		break
+	fi
+	sleep 0.5
+	[[ $i == 20 ]] && fail "metrics port-forward never became ready (see /tmp/pf-metrics.log)"
+done
+
+# The sandbox created above triggers the events, but the watcher is async --
+# poll rather than assuming they have landed by now.
+watch_updated=""
+for _ in $(seq 1 20); do
+	watch_updated=$(curl -fsS --max-time 5 http://127.0.0.1:9090/metrics 2>/dev/null |
+		awk -F' ' '/^openshell_driver_watch_events_total\{event_type="updated"\}/ { print $2; exit }')
+	watch_updated=${watch_updated%%.*}
+	if [[ -n $watch_updated ]] && (( watch_updated >= 1 )); then
+		break
+	fi
+	sleep 3
+done
+
+[[ -n $watch_updated ]] \
+	|| fail "driver exposed no openshell_driver_watch_events_total{event_type=\"updated\"} at all -- the watch path never delivered an event"
+(( watch_updated >= 1 )) \
+	|| fail "driver forwarded ${watch_updated} watch events, expected at least 1"
+log "watch stream delivered ${watch_updated} updated event(s)"
+
+kill "$PF_METRICS_PID" 2>/dev/null || true
+trap 'kill "$PF_PID" 2>/dev/null || true' EXIT
+
 log "ASSERT 4: no ERROR in driver or gateway logs"
 for c in driver gateway; do
 	c_logs=$(kubectl -n "$NS" logs "deploy/${RELEASE}-openshell-driver-kyma" -c "$c" --tail=500 2>&1) \
