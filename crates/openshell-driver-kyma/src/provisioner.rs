@@ -30,7 +30,7 @@ use kube::{
         Preconditions,
     },
     core::GroupVersionKind,
-    runtime::watcher,
+    runtime::{watcher, WatchStreamExt},
     Client,
 };
 use serde_json::{json, Map, Value};
@@ -1339,16 +1339,6 @@ fn driver_config_volume_mount_to_json(mount: &crate::driver_config::VolumeMountC
     v
 }
 
-/// Backoff bounds for a failing watch stream.
-///
-/// `watcher()` surfaces recoverable errors and expects the consumer to keep
-/// polling, but "keep polling" must not mean "poll as fast as the CPU
-/// allows". With the watch verb revoked on a live cluster the undelayed
-/// loop sustained 330-410 errors/second. Start small so a genuine one-off
-/// blip is invisible, and cap so a long outage settles into a slow retry.
-const WATCH_ERROR_BACKOFF_MIN: std::time::Duration = std::time::Duration::from_millis(100);
-const WATCH_ERROR_BACKOFF_MAX: std::time::Duration = std::time::Duration::from_secs(30);
-
 /// Forward Sandbox-CR watch events onto `tx` until the stream ends.
 ///
 /// Extracted from `watch` so the error path can be tested: `kube`'s
@@ -1368,35 +1358,30 @@ const WATCH_ERROR_BACKOFF_MAX: std::time::Duration = std::time::Duration::from_s
 /// The one condition that does end the loop is the receiver going away:
 /// nothing is listening, so there is nothing to resume for.
 async fn forward_sandbox_watch<S>(
-    mut stream: S,
+    stream: S,
     tx: mpsc::Sender<WatchEvent>,
     cache: Arc<RwLock<HashMap<String, String>>>,
 ) where
-    S: futures::Stream<Item = Result<watcher::Event<DynamicObject>, watcher::Error>> + Unpin,
+    S: futures::Stream<Item = Result<watcher::Event<DynamicObject>, watcher::Error>>
+        + Send
+        + 'static,
 {
-    let mut backoff = WATCH_ERROR_BACKOFF_MIN;
+    // kube's own backoff policy, applied here rather than hand-rolled:
+    // DefaultBackoff is 800ms doubling to a 30s cap WITH JITTER, which a
+    // hand-written sleep would have missed -- and jitter is what stops
+    // multiple replicas reconnecting in lockstep after a shared outage.
+    // Upstream documents it as "recommended for controllers that want to
+    // play nicely with the apiserver", which is exactly the requirement.
+    //
+    // It delays the next poll after an error but still passes the Err
+    // through to us, so the arm below is still doing real work.
+    let mut stream = stream.default_backoff().boxed();
     while let Some(next) = stream.next().await {
         use kube::runtime::watcher::Event;
         let ev = match next {
-            Ok(ev) => {
-                backoff = WATCH_ERROR_BACKOFF_MIN;
-                ev
-            }
+            Ok(ev) => ev,
             Err(e) => {
-                // Back off before polling again. Continuing immediately is
-                // correct for a one-off blip but catastrophic for a
-                // persistent failure: measured against a live cluster with
-                // the watch verb revoked, the un-delayed version spun at
-                // 330-410 errors/second against the apiserver, which is
-                // both a log flood and enough traffic to trip API
-                // priority-and-fairness throttling.
-                tracing::warn!(
-                    error = %e,
-                    backoff_ms = u64::try_from(backoff.as_millis()).unwrap_or(u64::MAX),
-                    "sandbox watch error; backing off then resuming"
-                );
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(WATCH_ERROR_BACKOFF_MAX);
+                tracing::warn!(error = %e, "sandbox watch error; backing off then resuming");
                 continue;
             }
         };
@@ -1633,8 +1618,8 @@ impl SandboxProvisioner for KymaProvisioner {
             // Field selector only takes simple comparisons; type=Warning
             // is supported on the Event resource.
             let cfg = watcher::Config::default().fields("type=Warning");
-            let mut stream = watcher(events_api, cfg).boxed();
-            let mut backoff = WATCH_ERROR_BACKOFF_MIN;
+            let stream = watcher(events_api, cfg).boxed();
+            let mut stream = stream.default_backoff().boxed();
             while let Some(next) = stream.next().await {
                 use kube::runtime::watcher::Event;
                 // Same contract as the Sandbox-CR watch above: an Err is a
@@ -1643,18 +1628,9 @@ impl SandboxProvisioner for KymaProvisioner {
                 // would silently stop surfacing scheduling failures --
                 // and continuing without a delay busy-loops the apiserver.
                 let ev = match next {
-                    Ok(ev) => {
-                        backoff = WATCH_ERROR_BACKOFF_MIN;
-                        ev
-                    }
+                    Ok(ev) => ev,
                     Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            backoff_ms = u64::try_from(backoff.as_millis()).unwrap_or(u64::MAX),
-                            "event watch error; backing off then resuming"
-                        );
-                        tokio::time::sleep(backoff).await;
-                        backoff = (backoff * 2).min(WATCH_ERROR_BACKOFF_MAX);
+                        tracing::warn!(error = %e, "event watch error; backing off then resuming");
                         continue;
                     }
                 };
@@ -4036,7 +4012,7 @@ mod tests {
     ///
     /// Feeds an `Err` followed by a real event and asserts the event still
     /// arrives. Under the old code this test hangs on `recv()` and fails.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn watch_survives_a_transient_stream_error() {
         let p = make_provisioner();
         let sb = make_sandbox("sb-1", "hello", "img:latest");
@@ -4059,7 +4035,7 @@ mod tests {
 
     /// Several consecutive errors must not end it either -- a rolling
     /// apiserver restart produces a burst, not a single blip.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn watch_survives_consecutive_stream_errors() {
         let p = make_provisioner();
         let sb = make_sandbox("sb-2", "hello2", "img:latest");
@@ -4090,10 +4066,12 @@ mod tests {
     /// version sustained 330-410 errors/second against the apiserver --
     /// enough to flood logs and risk API priority-and-fairness throttling.
     ///
-    /// Uses tokio's virtual clock: with time paused, `sleep` advances the
-    /// clock instead of wall time, so the assertion is on elapsed *virtual*
-    /// time and the test still runs instantly. 5 errors should cost at
-    /// least 100+200+400+800+1600ms.
+    /// Backoff itself is kube's DefaultBackoff (800ms doubling to 30s with
+    /// jitter), not ours -- this asserts that we actually WIRE it in, which
+    /// is the part that can regress. Uses tokio's virtual clock, so the
+    /// assertion is on elapsed *virtual* time and the test runs instantly.
+    /// The bound is deliberately loose: jitter makes the exact total
+    /// non-deterministic, and any non-trivial delay disproves a busy loop.
     #[tokio::test(start_paused = true)]
     async fn watch_backs_off_instead_of_busy_looping() {
         let started = tokio::time::Instant::now();
@@ -4107,33 +4085,6 @@ mod tests {
         assert!(
             elapsed >= std::time::Duration::from_millis(3100),
             "5 consecutive errors must back off (expected >=3.1s of virtual time, got {elapsed:?})"
-        );
-    }
-
-    /// A success between errors resets the backoff, so an intermittent
-    /// blip never escalates into a 30s retry interval.
-    #[tokio::test(start_paused = true)]
-    async fn watch_backoff_resets_after_a_success() {
-        let p = make_provisioner();
-        let sb = make_sandbox("sb-3", "hello3", "img:latest");
-        let obj = p.build_dynamic_object(&sb, "test-ns");
-
-        let started = tokio::time::Instant::now();
-        let items = vec![
-            Err(watcher::Error::NoResourceVersion),
-            Ok(watcher::Event::Apply(obj)),
-            Err(watcher::Error::NoResourceVersion),
-        ];
-        let (tx, _rx) = mpsc::channel::<WatchEvent>(8);
-        let cache = Arc::new(RwLock::new(HashMap::new()));
-        forward_sandbox_watch(Box::pin(futures::stream::iter(items)), tx, cache).await;
-
-        // Without the reset the second error would wait 200ms, giving 300ms
-        // total; with it, both waits are the 100ms minimum.
-        let elapsed = started.elapsed();
-        assert!(
-            elapsed < std::time::Duration::from_millis(250),
-            "a success must reset the backoff (got {elapsed:?})"
         );
     }
 }
