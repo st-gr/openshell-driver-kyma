@@ -958,6 +958,20 @@ impl KymaProvisioner {
         let mut gw_env: HashMap<String, String> = HashMap::new();
         gw_env.insert("OPENSHELL_SANDBOX_ID".into(), sb.id.clone());
         gw_env.insert("OPENSHELL_SANDBOX".into(), sb.name.clone());
+        // TODO(v0.0.111 proto sync): upstream added `DriverSandboxSpec.command`
+        // (repeated string — "exact canonical command forwarded to the
+        // supervisor without shell parsing") and `.tty` (retained pseudo-
+        // terminal for that process), but `OPENSHELL_SANDBOX_COMMAND` here is
+        // a single shell-parsed string, and there is no analogous env var for
+        // tty allocation. Deliberately not wired up: the exact wire contract
+        // the supervisor expects for an argv-style command (a different env
+        // var? JSON-encoded? indexed vars?) and for tty (an env var, or the
+        // Pod container's own `tty`/`stdin` fields) isn't derivable from this
+        // repo alone — there's no vendored upstream Kubernetes driver source
+        // to confirm against, and no network access to fetch one. `spec.command`
+        // and `spec.tty` are read from incoming requests today but not yet
+        // forwarded; sandboxes continue to fall back to "sleep infinity"
+        // regardless of what the gateway sends here.
         gw_env.insert("OPENSHELL_SANDBOX_COMMAND".into(), "sleep infinity".into());
         // Path to the projected ServiceAccount token written by kubelet.
         // Pairs with the SA_TOKEN_VOLUME we mount in build_sandbox_spec.
@@ -2861,6 +2875,30 @@ mod tests {
         assert!(names.contains(&"OPENSHELL_SANDBOX"));
         assert!(names.contains(&"ANTHROPIC_BASE_URL"));
         assert!(names.contains(&"OPENAI_BASE_URL"));
+    }
+
+    /// `DriverSandboxSpec.command`/`.tty` are new in v0.0.111 (see the TODO
+    /// in `build_full_env_list`) and are deliberately not forwarded yet —
+    /// the wire contract the supervisor expects isn't derivable from this
+    /// repo alone. Pins the current fallback behavior so wiring them up
+    /// later is a deliberate, visible test change rather than a silent
+    /// diff underneath an unrelated PR.
+    #[tokio::test]
+    async fn driver_injected_env_ignores_request_command_and_tty_for_now() {
+        let p = make_provisioner();
+        let mut sb = make_sandbox("sb-1", "command-test", "img");
+        let spec = sb.spec.as_mut().unwrap();
+        spec.command = vec!["echo".into(), "hello world".into()];
+        spec.tty = true;
+        let built = p.build_sandbox_spec(&sb);
+        let env = built["podTemplate"]["spec"]["containers"][0]["env"]
+            .as_array()
+            .unwrap();
+        let command = env
+            .iter()
+            .find(|e| e["name"] == "OPENSHELL_SANDBOX_COMMAND")
+            .expect("OPENSHELL_SANDBOX_COMMAND always set");
+        assert_eq!(command["value"], "sleep infinity");
     }
 
     #[tokio::test]

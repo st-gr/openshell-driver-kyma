@@ -6,6 +6,46 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-08-24
+
+### Added
+
+- **Synced the `ComputeDriver` contract to upstream v0.0.111.** Diff against
+  the previous v0.0.109 pin: `GetCapabilitiesResponse` gained
+  `gateway_manages_lifecycle` (field 6) and `DriverSandboxSpec` gained
+  `command` (field 12, repeated string) and `tty` (field 13, bool). No RPC
+  was added or removed; both changes are purely additive fields, so this is
+  wire-compatible in both directions and required no gRPC handler changes —
+  only new fields on two existing messages.
+  - `gateway_manages_lifecycle` lets a driver ask the gateway to stop
+    sandbox compute during its own graceful shutdown and restart the
+    retained running intent on startup — bracketing meant for drivers whose
+    compute is tied to the gateway process's lifetime. This driver always
+    returns `false`: a Kyma sandbox is a Pod/Sandbox CR living in the
+    cluster independently of the driver or gateway process, and
+    `WatchSandboxes` already reflects its true state continuously
+    regardless of either restarting, so there is nothing here for the
+    gateway to bracket. See `driver.rs::get_capabilities`.
+  - `command`/`tty` let a caller specify the sandbox's canonical process
+    (argv, unparsed by a shell) and whether it gets a retained pseudo-
+    terminal. **Deliberately left unimplemented.** This driver already
+    injects a fixed `OPENSHELL_SANDBOX_COMMAND=sleep infinity` env var for
+    the supervisor, but that mechanism is a single shell-parsed string with
+    no tty equivalent, and nothing in this repo or its vendored sources
+    establishes what wire format the supervisor now expects for an
+    argv-style command (a new env var? JSON-encoded? indexed vars?) or for
+    tty allocation (an env var, or the Pod container's own `tty`/`stdin`
+    fields). There is no vendored upstream Kubernetes driver source in this
+    repo to confirm against. A `TODO` at the call site
+    (`provisioner.rs::build_full_env_list`) and a pinned regression test
+    (`driver_injected_env_ignores_request_command_and_tty_for_now`) record
+    this gap explicitly rather than guessing at a wire contract that could
+    silently break sandbox startup.
+- **Re-pinned `gateway.image.tag` and `driver.supervisorImage` by digest** to
+  the v0.0.111 builds:
+  - gateway: `sha256:004ca59466ca388884af843a437d55674d7638a96132fb8fad8bcbb2db634bdd`
+  - supervisor: `sha256:cdad6b34973c06ea330cbba93e8264b50195de040c1c02f4981a97773603bcfc`
+
 ## [0.4.0] — 2026-08-19
 
 ### Added

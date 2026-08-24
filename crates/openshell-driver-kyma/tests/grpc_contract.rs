@@ -205,6 +205,9 @@ async fn grpc_get_capabilities_returns_kyma() {
     // instead — see `validate_create_rejects_gpu_without_capacity`.
     assert!(!r.driver_version.is_empty());
     assert!(!r.default_image.is_empty());
+    // Added upstream in v0.0.111 — see the matching unit test in driver.rs
+    // for why this driver always returns `false`.
+    assert!(!r.gateway_manages_lifecycle);
 
     drop(shutdown);
     let _ = handle.await;

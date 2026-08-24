@@ -6,15 +6,15 @@
 # copy with our provenance header stripped. The check script strips it the
 # same way before hashing, so local edits to the body still fail the check.
 repo = "https://github.com/NVIDIA/OpenShell"
-ref = "v0.0.109"
-commit = "8d67250a5d17348eb96c4fa46226b06d8041f2ba"
-vendored_at = "2026-08-19"
+ref = "v0.0.111"
+commit = "20d2e867e0e25b24d383a78dd362ba5647ef12c8"
+vendored_at = "2026-08-24"
 header_lines = 7
 
 [[files]]
 upstream_path = "proto/compute_driver.proto"
 local_path = "proto/compute_driver.proto"
-sha256 = "3247bfd904fc5c6f00dcbfaf5d4d66b95502d869b81fb480bd6fc43d7715e9ee"
+sha256 = "c9c009e9cd2353cf4ba412b1034f40442589457f69597e47407b9f454e8e8bf9"
 
 [[files]]
 upstream_path = "proto/options.proto"
