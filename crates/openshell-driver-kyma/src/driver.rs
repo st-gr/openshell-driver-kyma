@@ -73,6 +73,16 @@ impl ComputeDriver for Driver {
             driver_name: DRIVER_NAME.to_string(),
             driver_version: env!("CARGO_PKG_VERSION").to_string(),
             default_image: DEFAULT_SANDBOX_IMAGE.to_string(),
+            // Added upstream in v0.0.111: lets a driver ask the gateway to
+            // stop sandbox compute on graceful shutdown and restart the
+            // retained running intent on startup. That bracketing exists
+            // for drivers whose compute is tied to the gateway process's
+            // own lifetime. A Kyma sandbox is a Pod/Sandbox CR living in
+            // the cluster independently of this driver or the gateway —
+            // `WatchSandboxes` already reflects its true state continuously
+            // regardless of either process restarting — so there is
+            // nothing for the gateway to bracket here.
+            gateway_manages_lifecycle: false,
         }))
     }
 
@@ -438,6 +448,26 @@ mod tests {
             r.default_image,
             "ghcr.io/nvidia/openshell-community/sandboxes/base:latest"
         );
+    }
+
+    /// Added upstream in v0.0.111. A Kyma sandbox's compute lives in the
+    /// cluster independently of the driver or gateway process, so this
+    /// driver never needs the gateway to bracket its own restarts with an
+    /// explicit stop/start of sandbox compute. Pinning `false` here keeps a
+    /// future change from silently opting the gateway into that bracketing.
+    #[tokio::test]
+    async fn get_capabilities_reports_gateway_does_not_manage_lifecycle() {
+        let d = make_driver_with_mocks(
+            Config::default(),
+            MockSandboxProvisioner::new(),
+            MockDriverMetrics::new(),
+        );
+        let r = d
+            .get_capabilities(Request::new(GetCapabilitiesRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!r.gateway_manages_lifecycle);
     }
 
     /// A Kyma sandbox is a Pod on cluster networking, so the driver must

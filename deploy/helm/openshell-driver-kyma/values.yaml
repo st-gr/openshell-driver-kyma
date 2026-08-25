@@ -56,11 +56,11 @@ driver:
   # starting with `sha256:` and the helper emits `<repo>@sha256:<digest>`
   # automatically.
   #
-  # This digest is supervisor v0.0.109, version-matched to gateway.image
+  # This digest is supervisor v0.0.111, version-matched to gateway.image
   # below. It tracked `:latest` until chart 0.3.0 — that tag moved twice
   # in one week, so sandboxes were silently picking up new privileged
   # binaries. Re-pin both together when bumping upstream.
-  supervisorImage: ghcr.io/nvidia/openshell/supervisor@sha256:7cae8e3f477d3281e3a27bd921745e68895d0a80b16d10a107867bdfb386ae5b
+  supervisorImage: ghcr.io/nvidia/openshell/supervisor@sha256:cdad6b34973c06ea330cbba93e8264b50195de040c1c02f4981a97773603bcfc
   supervisorBinaryPath: /openshell-sandbox
   supervisorMountPath: /opt/openshell/bin
   gatewayEndpoint: ""
@@ -213,16 +213,20 @@ podLabels: {}
 gateway:
   enabled: false
   image:
-    # Pinned to upstream `0.0.109` (commit 8d67250a). The ComputeDriver
-    # proto contract is byte-identical to `0.0.107` (see proto/UPSTREAM.lock
-    # and scripts/check-proto-drift.sh) — upstream tagged v0.0.107/v0.0.108
-    # but published no container images for either, so this pin skips
-    # straight to v0.0.109, the first tag since `0.0.106` with published
-    # images. `StartSandbox` (added vs. `0.0.102`) and `StopSandbox` are
-    # both implemented by this driver: `StopSandbox` patches the Sandbox CR
-    # to a stopped state and waits for its pod to actually terminate,
-    # `StartSandbox` performs the matching resume patch; see
-    # driver.rs::stop_sandbox / start_sandbox. Still carries forward
+    # Pinned to upstream `0.0.111` (commit 20d2e867). The ComputeDriver proto
+    # contract moved from `0.0.109` to `0.0.111` (see proto/UPSTREAM.lock and
+    # scripts/check-proto-drift.sh): `GetCapabilitiesResponse` gained
+    # `gateway_manages_lifecycle` (this driver always returns `false` — a
+    # Kyma sandbox's compute lives in the cluster independently of the
+    # driver/gateway process; see driver.rs::get_capabilities) and
+    # `DriverSandboxSpec` gained `command`/`tty` (not yet forwarded to the
+    # supervisor; see the TODO in provisioner.rs::build_full_env_list).
+    # Neither is wire-breaking — both are purely additive fields the driver
+    # is free to ignore or zero-value. `StartSandbox` (added vs. `0.0.102`)
+    # and `StopSandbox` are both implemented by this driver: `StopSandbox`
+    # patches the Sandbox CR to a stopped state and waits for its pod to
+    # actually terminate, `StartSandbox` performs the matching resume patch;
+    # see driver.rs::stop_sandbox / start_sandbox. Still carries forward
     # the external-compute-driver work (NVIDIA/OpenShell#1703), the AWS
     # Bedrock provider plumbing (NVIDIA/OpenShell#1704), and the TUI
     # provider config-key form (NVIDIA/OpenShell#2224 / #1798) introduced in
@@ -233,7 +237,7 @@ gateway:
     # Bump via
     # https://github.com/NVIDIA/OpenShell/pkgs/container/openshell%2Fgateway
     repository: ghcr.io/nvidia/openshell/gateway
-    tag: "sha256:deb2065ed7319e4a481f7b1d01774dc04fabd6457b11f196fb5bd0baf60592ca"
+    tag: "sha256:004ca59466ca388884af843a437d55674d7638a96132fb8fad8bcbb2db634bdd"
     pullPolicy: IfNotPresent
   grpcPort: 8080
   metricsPort: 9091
