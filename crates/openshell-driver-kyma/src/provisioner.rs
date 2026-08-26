@@ -20,6 +20,7 @@ use crate::helpers::{
     build_env_list, build_resources, effective_gpu_count, merge_maps, object_to_driver_sandbox,
 };
 use crate::interfaces::{SandboxProvisioner, WatchEvent};
+use crate::main_process::{MainProcessConfig, MAIN_PROCESS_SPEC};
 use async_trait::async_trait;
 use computev1::pb::{DriverPlatformEvent, DriverSandbox};
 use futures::StreamExt;
@@ -958,21 +959,26 @@ impl KymaProvisioner {
         let mut gw_env: HashMap<String, String> = HashMap::new();
         gw_env.insert("OPENSHELL_SANDBOX_ID".into(), sb.id.clone());
         gw_env.insert("OPENSHELL_SANDBOX".into(), sb.name.clone());
-        // TODO(v0.0.111 proto sync): upstream added `DriverSandboxSpec.command`
-        // (repeated string — "exact canonical command forwarded to the
-        // supervisor without shell parsing") and `.tty` (retained pseudo-
-        // terminal for that process), but `OPENSHELL_SANDBOX_COMMAND` here is
-        // a single shell-parsed string, and there is no analogous env var for
-        // tty allocation. Deliberately not wired up: the exact wire contract
-        // the supervisor expects for an argv-style command (a different env
-        // var? JSON-encoded? indexed vars?) and for tty (an env var, or the
-        // Pod container's own `tty`/`stdin` fields) isn't derivable from this
-        // repo alone — there's no vendored upstream Kubernetes driver source
-        // to confirm against, and no network access to fetch one. `spec.command`
-        // and `spec.tty` are read from incoming requests today but not yet
-        // forwarded; sandboxes continue to fall back to "sleep infinity"
-        // regardless of what the gateway sends here.
-        gw_env.insert("OPENSHELL_SANDBOX_COMMAND".into(), "sleep infinity".into());
+        // The sandbox's canonical main process, as versioned JSON.
+        //
+        // Upstream replaced `OPENSHELL_SANDBOX_COMMAND` (a single
+        // shell-parsed string, carried through v0.0.109) with
+        // `OPENSHELL_MAIN_PROCESS_SPEC` by v0.0.111: an argv vector plus a
+        // tty flag, so argument boundaries are never reconstructed by shell
+        // parsing. Every upstream driver sets it -- kubernetes, docker and
+        // podman as plain JSON, vm as base64url.
+        //
+        // This is not optional now that the chart pins the v0.0.111
+        // supervisor: that supervisor does not read the old variable at
+        // all, so without this every sandbox would silently fall through to
+        // upstream's scratch default (`/bin/bash -l`) no matter what the
+        // gateway asked for.
+        //
+        // `.expect` mirrors upstream's own comment: serializing a struct of
+        // a u32, a Vec<String> and a bool cannot fail.
+        let main_process = MainProcessConfig::encode_driver_spec(spec)
+            .expect("main process config serialization cannot fail");
+        gw_env.insert(MAIN_PROCESS_SPEC.into(), main_process);
         // Path to the projected ServiceAccount token written by kubelet.
         // Pairs with the SA_TOKEN_VOLUME we mount in build_sandbox_spec.
         gw_env.insert(
@@ -2877,14 +2883,12 @@ mod tests {
         assert!(names.contains(&"OPENAI_BASE_URL"));
     }
 
-    /// `DriverSandboxSpec.command`/`.tty` are new in v0.0.111 (see the TODO
-    /// in `build_full_env_list`) and are deliberately not forwarded yet —
-    /// the wire contract the supervisor expects isn't derivable from this
-    /// repo alone. Pins the current fallback behavior so wiring them up
-    /// later is a deliberate, visible test change rather than a silent
-    /// diff underneath an unrelated PR.
+    /// `DriverSandboxSpec.command`/`.tty` reach the supervisor as the
+    /// versioned JSON transport upstream defines, with argument boundaries
+    /// preserved -- "hello world" must survive as ONE argv element, which is
+    /// the entire reason upstream moved off a shell-parsed string.
     #[tokio::test]
-    async fn driver_injected_env_ignores_request_command_and_tty_for_now() {
+    async fn driver_injected_env_forwards_request_command_and_tty() {
         let p = make_provisioner();
         let mut sb = make_sandbox("sb-1", "command-test", "img");
         let spec = sb.spec.as_mut().unwrap();
@@ -2894,11 +2898,47 @@ mod tests {
         let env = built["podTemplate"]["spec"]["containers"][0]["env"]
             .as_array()
             .unwrap();
-        let command = env
+
+        // The variable upstream removed must be gone: the v0.0.111
+        // supervisor ignores it, so still emitting it would be misleading.
+        assert!(
+            !env.iter().any(|e| e["name"] == "OPENSHELL_SANDBOX_COMMAND"),
+            "OPENSHELL_SANDBOX_COMMAND was removed upstream by v0.0.111"
+        );
+
+        let spec_env = env
             .iter()
-            .find(|e| e["name"] == "OPENSHELL_SANDBOX_COMMAND")
-            .expect("OPENSHELL_SANDBOX_COMMAND always set");
-        assert_eq!(command["value"], "sleep infinity");
+            .find(|e| e["name"] == "OPENSHELL_MAIN_PROCESS_SPEC")
+            .expect("OPENSHELL_MAIN_PROCESS_SPEC always set");
+        let decoded: serde_json::Value =
+            serde_json::from_str(spec_env["value"].as_str().unwrap()).unwrap();
+        assert_eq!(decoded["version"], 1);
+        assert_eq!(decoded["command"][0], "echo");
+        assert_eq!(decoded["command"][1], "hello world");
+        assert_eq!(decoded["tty"], true);
+    }
+
+    /// With no command requested, the transport still carries upstream's
+    /// scratch default rather than being omitted -- the supervisor would
+    /// apply the same default, but sending it keeps what the driver asked
+    /// for explicit and inspectable on the Pod.
+    #[tokio::test]
+    async fn driver_injected_env_falls_back_to_scratch_command() {
+        let p = make_provisioner();
+        let sb = make_sandbox("sb-2", "no-command", "img");
+        let built = p.build_sandbox_spec(&sb);
+        let env = built["podTemplate"]["spec"]["containers"][0]["env"]
+            .as_array()
+            .unwrap();
+        let spec_env = env
+            .iter()
+            .find(|e| e["name"] == "OPENSHELL_MAIN_PROCESS_SPEC")
+            .expect("OPENSHELL_MAIN_PROCESS_SPEC always set");
+        let decoded: serde_json::Value =
+            serde_json::from_str(spec_env["value"].as_str().unwrap()).unwrap();
+        assert_eq!(decoded["command"][0], "/bin/bash");
+        assert_eq!(decoded["command"][1], "-l");
+        assert_eq!(decoded["tty"], true);
     }
 
     #[tokio::test]
