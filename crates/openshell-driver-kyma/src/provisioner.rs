@@ -1053,6 +1053,24 @@ impl KymaProvisioner {
             );
         }
 
+        // Telemetry stance, propagated so the supervisor inherits it.
+        //
+        // Not a no-op even though this driver emits no telemetry itself: a
+        // supervisor built WITH the telemetry feature treats an ABSENT
+        // variable as enabled (`value.unwrap_or("true")` in
+        // openshell-core's telemetry_enabled_from). Sending the value
+        // explicitly is what makes the deployment's stance hold regardless
+        // of how the supervisor image was compiled -- omitting it would
+        // silently opt such an image in.
+        gw_env.insert(
+            "OPENSHELL_TELEMETRY_ENABLED".into(),
+            if self.cfg.telemetry_enabled {
+                "true".into()
+            } else {
+                "false".into()
+            },
+        );
+
         // Numeric sandbox identity, when the operator configured one.
         //
         // Supplying BOTH numerics (and blanking OCI_IMAGE_USER) is what puts
@@ -3001,6 +3019,49 @@ mod tests {
         assert_eq!(decoded["command"][0], "echo");
         assert_eq!(decoded["command"][1], "hello world");
         assert_eq!(decoded["tty"], true);
+    }
+
+    /// Sent as an explicit "false" by default rather than omitted. A
+    /// supervisor built WITH the telemetry feature treats an ABSENT variable
+    /// as ENABLED, so omitting it would silently opt such an image in.
+    #[tokio::test]
+    async fn telemetry_disabled_is_sent_explicitly() {
+        let p = make_provisioner();
+        let sb = make_sandbox("sb-1", "tel-off", "img");
+        let built = p.build_sandbox_spec(&sb);
+        let env = built["podTemplate"]["spec"]["containers"][0]["env"]
+            .as_array()
+            .unwrap();
+        let v = env
+            .iter()
+            .find(|e| e["name"] == "OPENSHELL_TELEMETRY_ENABLED")
+            .expect("must be sent explicitly, never omitted");
+        assert_eq!(v["value"], "false");
+    }
+
+    /// An operator who wants it on gets exactly the string upstream's
+    /// predicate accepts as truthy.
+    #[tokio::test]
+    async fn telemetry_enabled_propagates_true() {
+        let cfg = Config {
+            namespace: "test-ns".into(),
+            telemetry_enabled: true,
+            ..Config::default()
+        };
+        let svc = tower::service_fn(|_req: http::Request<kube::client::Body>| async move {
+            Ok::<_, std::convert::Infallible>(http::Response::new(kube::client::Body::empty()))
+        });
+        let p = KymaProvisioner::new(Client::new(svc, "test-ns"), cfg);
+        let sb = make_sandbox("sb-2", "tel-on", "img");
+        let built = p.build_sandbox_spec(&sb);
+        let env = built["podTemplate"]["spec"]["containers"][0]["env"]
+            .as_array()
+            .unwrap();
+        let v = env
+            .iter()
+            .find(|e| e["name"] == "OPENSHELL_TELEMETRY_ENABLED")
+            .unwrap();
+        assert_eq!(v["value"], "true");
     }
 
     /// With a configured identity the driver supplies BOTH numerics and

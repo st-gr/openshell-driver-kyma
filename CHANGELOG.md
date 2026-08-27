@@ -8,6 +8,16 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **`driver.telemetryEnabled` (default `false`), propagated to every sandbox
+  supervisor as `OPENSHELL_TELEMETRY_ENABLED`.** This driver emits no
+  telemetry of its own, and upstream's Kubernetes driver compiles telemetry
+  out and effectively sends `"false"` as well, so `false` is both the
+  faithful default and the safe one.
+  - **It is sent explicitly rather than omitted, and that distinction is the
+    point:** a supervisor image built with the `telemetry` feature treats an
+    *absent* variable as **enabled** (`value.unwrap_or("true")` in
+    openshell-core). Omitting it would silently opt such an image in.
+
 - **Optional numeric sandbox identity (`driver.sandboxUid` /
   `driver.sandboxGid`).** Without it the driver supplies no identity
   metadata, which upstream classifies as `DriverIdentity::None` — the same
