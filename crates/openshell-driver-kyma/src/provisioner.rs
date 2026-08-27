@@ -54,6 +54,15 @@ const LABEL_ISTIO_INJECT: &str = "sidecar.istio.io/inject";
 // Note the differing TLD vs LABEL_SANDBOX_ID: that's intentional, the
 // upstream gateway uses `.io/` for annotations and `.ai/` for labels.
 const ANNOTATION_SANDBOX_ID: &str = "openshell.io/sandbox-id";
+/// Driver-injected variables the AGENT needs, as opposed to supervisor
+/// plumbing. Only these ride along in OPENSHELL_USER_ENVIRONMENT; see the
+/// divergence note at the call site.
+const AGENT_FACING_INJECTED_ENV: &[&str] = &[
+    "ANTHROPIC_BASE_URL",
+    "OPENAI_BASE_URL",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+];
+
 // pub(crate): read directly by driver_config.rs so its reserved-volume-name
 // list can never silently drift from the volume this driver actually
 // creates (see driver_config.rs's RESERVED_VOLUME_NAMES).
@@ -1042,6 +1051,41 @@ impl KymaProvisioner {
                 "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".into(),
                 "1".into(),
             );
+        }
+
+        // The user's environment, JSON-encoded for the supervisor.
+        //
+        // Container env only reaches the sandbox's MAIN process. The
+        // supervisor runs SSH/exec children under env_clear() for isolation,
+        // so without this variable `openshell sandbox exec` lands in a
+        // stripped environment -- which is exactly the long-standing
+        // "pod-spec env does not propagate to exec sessions" friction, not a
+        // CLI quirk. Upstream solves it with OPENSHELL_USER_ENVIRONMENT and
+        // the supervisor re-injects these into each child.
+        //
+        // DELIBERATE DIVERGENCE FROM UPSTREAM: upstream sends only the
+        // caller's own `SandboxSpec.environment`. We additionally include the
+        // driver-injected variables the AGENT needs to function -- the
+        // inference-router base URLs and the telemetry toggle -- because
+        // otherwise every exec session still has to re-export them by hand
+        // and strict parity would fix the mechanism while leaving the actual
+        // symptom in place. Supervisor plumbing (OPENSHELL_*) is deliberately
+        // NOT included: those configure the supervisor itself, and leaking
+        // them into child processes invites nested tooling to misread them.
+        let mut user_env: std::collections::BTreeMap<&str, &str> = tmpl_env
+            .iter()
+            .chain(spec_env.iter())
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        for key in AGENT_FACING_INJECTED_ENV {
+            if let Some(value) = gw_env.get(*key) {
+                user_env.insert(key, value.as_str());
+            }
+        }
+        if !user_env.is_empty() {
+            if let Ok(json) = serde_json::to_string(&user_env) {
+                envs.push(json!({ "name": "OPENSHELL_USER_ENVIRONMENT", "value": json }));
+            }
         }
 
         for (k, v) in gw_env {
@@ -2936,6 +2980,85 @@ mod tests {
         assert_eq!(decoded["command"][0], "echo");
         assert_eq!(decoded["command"][1], "hello world");
         assert_eq!(decoded["tty"], true);
+    }
+
+    /// The user's environment reaches exec/SSH children via
+    /// OPENSHELL_USER_ENVIRONMENT. Container env alone only reaches the MAIN
+    /// process -- the supervisor runs children under env_clear(), which is
+    /// why `sandbox exec` historically saw a stripped environment.
+    #[tokio::test]
+    async fn user_environment_is_encoded_for_exec_sessions() {
+        let p = make_provisioner();
+        let mut sb = make_sandbox("sb-1", "env-test", "img");
+        sb.spec
+            .as_mut()
+            .unwrap()
+            .environment
+            .insert("MY_TOKEN".into(), "abc123".into());
+        let built = p.build_sandbox_spec(&sb);
+        let env = built["podTemplate"]["spec"]["containers"][0]["env"]
+            .as_array()
+            .unwrap();
+        let raw = env
+            .iter()
+            .find(|e| e["name"] == "OPENSHELL_USER_ENVIRONMENT")
+            .expect("OPENSHELL_USER_ENVIRONMENT must be set");
+        let decoded: serde_json::Value =
+            serde_json::from_str(raw["value"].as_str().unwrap()).unwrap();
+        assert_eq!(decoded["MY_TOKEN"], "abc123");
+    }
+
+    /// DELIBERATE DIVERGENCE: upstream ships only the caller's own
+    /// environment. We also carry the agent-facing injected variables, so an
+    /// exec session does not have to re-export them by hand -- strict parity
+    /// would fix the mechanism and leave the symptom.
+    #[tokio::test]
+    async fn user_environment_carries_agent_facing_injected_vars() {
+        let p = make_provisioner();
+        let sb = make_sandbox("sb-2", "inject-test", "img");
+        let built = p.build_sandbox_spec(&sb);
+        let env = built["podTemplate"]["spec"]["containers"][0]["env"]
+            .as_array()
+            .unwrap();
+        let raw = env
+            .iter()
+            .find(|e| e["name"] == "OPENSHELL_USER_ENVIRONMENT")
+            .expect("set");
+        let decoded: serde_json::Value =
+            serde_json::from_str(raw["value"].as_str().unwrap()).unwrap();
+        assert_eq!(decoded["ANTHROPIC_BASE_URL"], "https://inference.local");
+        assert_eq!(decoded["OPENAI_BASE_URL"], "https://inference.local");
+    }
+
+    /// Supervisor plumbing must NOT ride along: those configure the
+    /// supervisor itself, and leaking them into child processes invites
+    /// nested tooling to misread them.
+    #[tokio::test]
+    async fn user_environment_excludes_supervisor_plumbing() {
+        let p = make_provisioner();
+        let sb = make_sandbox("sb-3", "plumbing-test", "img");
+        let built = p.build_sandbox_spec(&sb);
+        let env = built["podTemplate"]["spec"]["containers"][0]["env"]
+            .as_array()
+            .unwrap();
+        let raw = env
+            .iter()
+            .find(|e| e["name"] == "OPENSHELL_USER_ENVIRONMENT")
+            .expect("set");
+        let decoded: serde_json::Value =
+            serde_json::from_str(raw["value"].as_str().unwrap()).unwrap();
+        for leaked in [
+            "OPENSHELL_SANDBOX_ID",
+            "OPENSHELL_ENDPOINT",
+            "OPENSHELL_MAIN_PROCESS_SPEC",
+            "OPENSHELL_K8S_SA_TOKEN_FILE",
+            "OPENSHELL_SSH_SOCKET_PATH",
+        ] {
+            assert!(
+                decoded.get(leaked).is_none(),
+                "{leaked} is supervisor plumbing and must not reach exec children"
+            );
+        }
     }
 
     /// `spec.log_level` reaches the supervisor as OPENSHELL_LOG_LEVEL.
