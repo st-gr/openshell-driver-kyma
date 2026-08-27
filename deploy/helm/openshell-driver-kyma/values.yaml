@@ -94,6 +94,26 @@ driver:
   # and that your CRI (containerd >= 1.7, cri-o >= 1.30) has user-ns
   # support enabled.
   enableUserNamespaces: false
+  # Numeric identity the supervisor drops the agent process to.
+  #
+  # Leave BOTH empty (the default) to keep the behaviour this chart has
+  # always had: the driver supplies no identity metadata, and the
+  # supervisor resolves the *name* `sandbox` from the image's
+  # /etc/passwd. That is fine for images built to carry that user --
+  # including this repo's own e2e images.
+  #
+  # Set sandboxUid to run images that have NO `sandbox` passwd entry.
+  # Supplying it puts the supervisor on upstream's resolved-identity
+  # path, where it setuid()s to the number directly. sandboxGid defaults
+  # to sandboxUid when omitted.
+  #
+  # Must be in [1, 4294967294]; 0 (root) is rejected, and the driver
+  # refuses to start on an out-of-range value rather than failing later
+  # per sandbox. Setting sandboxGid alone is also refused -- the
+  # supervisor only uses a resolved identity when both are present, so
+  # a lone gid would be silently ignored.
+  sandboxUid: ""
+  sandboxGid: ""
   # Per-sandbox workspace PVC mounted at `/sandbox`. Empty string (default)
   # disables persistent workspaces — sandbox /sandbox is pod-local and
   # erased on pod restart. Any non-empty value enables PVC creation; the

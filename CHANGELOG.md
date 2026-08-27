@@ -8,6 +8,25 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Optional numeric sandbox identity (`driver.sandboxUid` /
+  `driver.sandboxGid`).** Without it the driver supplies no identity
+  metadata, which upstream classifies as `DriverIdentity::None` — the same
+  bucket as VM/offline drivers — and the supervisor falls back to resolving
+  the *name* `sandbox` from the image's `/etc/passwd`. That works only for
+  images carrying such a user. Upstream's own Kubernetes driver sits in the
+  `Resolved { uid, gid }` bucket instead, which is what lets it run images
+  that have no `sandbox` entry. Setting `sandboxUid` opts into that path.
+  - **Default is unchanged and emits nothing** — existing sandboxes keep
+    resolving by name.
+  - `sandboxGid` defaults to `sandboxUid`, mirroring upstream's
+    `sandbox_gid.or(sandbox_uid)`.
+  - Only the config half of upstream's resolution is mirrored; its other
+    source is OpenShift SCC namespace annotations, which Kyma does not have
+    — the same reason `bootstrap_managed_namespace` does not copy them.
+  - The driver refuses to start on an out-of-range value, or on a
+    `sandboxGid` with no `sandboxUid` (which the supervisor would silently
+    ignore, since it needs both).
+
 - **`spec.environment` now reaches `openshell sandbox exec` and SSH
   sessions.** The supervisor runs those children under `env_clear()` for
   isolation, so pod env alone only ever reached the sandbox's main process.

@@ -78,6 +78,12 @@ spec:
             - --enable-network-policy={{ .Values.driver.enableNetworkPolicy }}
             - --disable-claude-telemetry={{ .Values.driver.disableClaudeTelemetry }}
             - --enable-user-namespaces={{ .Values.driver.enableUserNamespaces }}
+            {{- with .Values.driver.sandboxUid }}
+            - --sandbox-uid={{ . }}
+            {{- end }}
+            {{- with .Values.driver.sandboxGid }}
+            - --sandbox-gid={{ . }}
+            {{- end }}
             {{- with .Values.driver.sandboxStorageSize }}
             - --sandbox-storage-size
             - {{ . | quote }}

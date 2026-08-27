@@ -92,6 +92,35 @@ pub struct Config {
     #[arg(long, default_value_t = false, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
     pub enable_user_namespaces: bool,
 
+    /// Numeric UID the supervisor drops the agent process to, replacing its
+    /// default of resolving the *name* `sandbox` from the image's
+    /// `/etc/passwd`.
+    ///
+    /// Without this the driver supplies no identity metadata, which upstream
+    /// classifies as `DriverIdentity::None` -- the same bucket as VM/offline
+    /// drivers -- and the supervisor falls back to the name. That works only
+    /// for images that actually carry a `sandbox` passwd entry. Upstream's
+    /// own Kubernetes driver is in the `Resolved { uid, gid }` bucket
+    /// instead, which is what lets it run images that have no such entry.
+    ///
+    /// Upstream fills this from config OR from OpenShift SCC namespace
+    /// annotations (`openshift.io/sa.scc.uid-range`). Only the config half is
+    /// mirrored here: Kyma has no SCC annotations to autodetect from, which
+    /// is the same reason `bootstrap_managed_namespace` does not copy them.
+    ///
+    /// Must be in `[1, u32::MAX - 1]` -- the supervisor rejects anything
+    /// outside `MIN_SANDBOX_UID..=MAX_SANDBOX_UID`, notably 0.
+    #[arg(long)]
+    pub sandbox_uid: Option<u32>,
+
+    /// Numeric GID paired with `sandbox_uid`. Defaults to `sandbox_uid` when
+    /// unset, mirroring upstream's
+    /// `sandbox_gid.or(sandbox_uid).unwrap_or(resolved_uid)`. Ignored unless
+    /// `sandbox_uid` is set, because the supervisor only takes the resolved
+    /// path when BOTH numerics are present.
+    #[arg(long)]
+    pub sandbox_gid: Option<u32>,
+
     /// Per-sandbox PVC size for the `/sandbox` workspace mount. Empty
     /// string disables persistent workspaces (default — workspace is
     /// pod-local emptyDir managed by the supervisor). Any non-empty value
@@ -161,6 +190,8 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            sandbox_uid: None,
+            sandbox_gid: None,
             socket: "/var/run/openshell-driver.sock".to_string(),
             namespace: "openshell-system".to_string(),
             supervisor_image: "ghcr.io/nvidia/openshell/supervisor:latest".to_string(),
@@ -194,6 +225,49 @@ impl Config {
     pub fn from_env_and_args() -> Self {
         Self::parse()
     }
+}
+
+/// Lowest UID the supervisor accepts (`openshell_policy::MIN_SANDBOX_UID`).
+pub const MIN_SANDBOX_UID: u32 = 1;
+/// Highest UID the supervisor accepts (`openshell_policy::MAX_SANDBOX_UID`).
+pub const MAX_SANDBOX_UID: u32 = u32::MAX - 1;
+
+impl Config {
+    /// Resolved GID for the sandbox process, mirroring upstream's
+    /// `resolve_sandbox_gid`: an explicit gid wins, else the uid is reused.
+    #[must_use]
+    pub fn resolved_sandbox_gid(&self) -> Option<u32> {
+        self.sandbox_uid.map(|uid| self.sandbox_gid.unwrap_or(uid))
+    }
+}
+
+/// Reject an out-of-range identity at startup rather than letting the
+/// supervisor fail per-sandbox, where the error surfaces far from its cause.
+#[must_use]
+pub fn sandbox_identity_gap(cfg: &Config) -> Option<String> {
+    for (name, value) in [
+        ("--sandbox-uid", cfg.sandbox_uid),
+        ("--sandbox-gid", cfg.sandbox_gid),
+    ] {
+        if let Some(v) = value {
+            if !(MIN_SANDBOX_UID..=MAX_SANDBOX_UID).contains(&v) {
+                return Some(format!(
+                    "{name}={v} is outside the range the supervisor accepts \
+                     [{MIN_SANDBOX_UID}, {MAX_SANDBOX_UID}]; 0 (root) is \
+                     rejected in particular"
+                ));
+            }
+        }
+    }
+    if cfg.sandbox_uid.is_none() && cfg.sandbox_gid.is_some() {
+        return Some(
+            "--sandbox-gid was set without --sandbox-uid; the supervisor only \
+             uses a resolved identity when BOTH are present, so the gid would \
+             be silently ignored"
+                .to_string(),
+        );
+    }
+    None
 }
 
 #[cfg(test)]
@@ -305,5 +379,49 @@ mod tests {
             cli.driver_config_allow_volumes,
             dflt.driver_config_allow_volumes
         );
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_root_uid() {
+        let cfg = Config {
+            sandbox_uid: Some(0),
+            ..Config::default()
+        };
+        let msg = sandbox_identity_gap(&cfg).expect("uid 0 must be rejected");
+        assert!(msg.contains("--sandbox-uid=0"), "{msg}");
+    }
+
+    /// A gid without a uid would be silently dropped by the supervisor,
+    /// which only takes the resolved path when both are present. Failing
+    /// closed beats honouring half a configuration.
+    #[test]
+    fn rejects_gid_without_uid() {
+        let cfg = Config {
+            sandbox_gid: Some(2000),
+            ..Config::default()
+        };
+        let msg = sandbox_identity_gap(&cfg).expect("gid alone must be rejected");
+        assert!(msg.contains("--sandbox-gid was set without"), "{msg}");
+    }
+
+    #[test]
+    fn accepts_a_valid_pair_and_defaults_gid() {
+        let cfg = Config {
+            sandbox_uid: Some(1000),
+            ..Config::default()
+        };
+        assert!(sandbox_identity_gap(&cfg).is_none());
+        assert_eq!(cfg.resolved_sandbox_gid(), Some(1000));
+    }
+
+    #[test]
+    fn unconfigured_is_valid() {
+        assert!(sandbox_identity_gap(&Config::default()).is_none());
+        assert_eq!(Config::default().resolved_sandbox_gid(), None);
     }
 }
