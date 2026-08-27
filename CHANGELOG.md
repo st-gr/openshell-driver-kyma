@@ -6,6 +6,24 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **`spec.environment` now reaches `openshell sandbox exec` and SSH
+  sessions.** The supervisor runs those children under `env_clear()` for
+  isolation, so pod env alone only ever reached the sandbox's main process.
+  The driver now also sends `OPENSHELL_USER_ENVIRONMENT` (upstream's
+  mechanism, JSON-encoded), which the supervisor re-injects per child. This
+  is the root cause of the long-standing "pod-spec env does not propagate to
+  exec sessions" behaviour — it was never CLI filtering.
+  - **Deliberate divergence:** upstream sends only the caller's own
+    `spec.environment`; this driver also includes the agent-facing injected
+    variables (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`,
+    `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`), since strict parity would
+    fix the mechanism and leave the symptom. Supervisor plumbing
+    (`OPENSHELL_*`) is excluded on purpose.
+- **`spec.log_level` is honoured**, propagating to the supervisor as
+  `OPENSHELL_LOG_LEVEL` (contract field 1, previously unread).
+
 ## [0.5.0] — 2026-08-24
 
 ### Added

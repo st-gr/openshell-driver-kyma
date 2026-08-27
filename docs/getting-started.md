@@ -196,29 +196,37 @@ sudo apt-get install -y rsync openssh-client
 apk add --no-cache rsync openssh-client
 ```
 
-**`claude-code` works end-to-end with a few env knobs.**
-Out of the box the chart injects `ANTHROPIC_BASE_URL=https://inference.local`
-into every sandbox pod, but `openshell sandbox exec` does NOT propagate
-pod-spec env into exec sessions (the supervisor session manager strips
-them). To run `claude` via `openshell sandbox exec`, set the env
-explicitly inline; with the default chart values that's:
+**`claude-code` works end-to-end with a couple of env knobs.**
+The supervisor runs exec/SSH children under `env_clear()` for isolation, so
+a sandbox's pod env does not reach them by itself. The driver therefore
+also sends `OPENSHELL_USER_ENVIRONMENT` — a JSON copy of your
+`spec.environment` plus the agent-facing variables the chart injects
+(`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`,
+`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`) — which the supervisor
+re-injects into each child. Those no longer need exporting by hand:
 
 ```bash
 openshell sandbox exec --name <sandbox> -- sh -c '
   export HOME=/sandbox \
-         ANTHROPIC_BASE_URL=https://inference.local \
-         ANTHROPIC_API_KEY=sk-ant-placeholder000000000000000000000000000000000000000000000000 \
-         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+         ANTHROPIC_API_KEY=sk-ant-placeholder000000000000000000000000000000000000000000000000
   claude -p --bare --allow-dangerously-skip-permissions \
          --model <your-configured-model> "say hi"'
 ```
 
 `HOME=/sandbox` because `/home/sandbox` is Landlock-restricted in the
-exec session. `ANTHROPIC_API_KEY` must look like an Anthropic key
-(`sk-ant-` prefix); the supervisor's L7 router strips it and injects
-the real one from the gateway bundle. `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`
-silences statsig/sentry calls (also injectable chart-side via
-`driver.disableClaudeTelemetry: true` for the agent's main process).
+exec session — that one is not an environment-propagation problem and still
+has to be set. `ANTHROPIC_API_KEY` must look like an Anthropic key
+(`sk-ant-` prefix); the supervisor's L7 router strips it and injects the
+real one from the gateway bundle, so it is a placeholder rather than a
+secret and is deliberately not sent for you.
+
+> **Divergence from upstream.** Upstream's drivers put only the caller's own
+> `spec.environment` in `OPENSHELL_USER_ENVIRONMENT`. This driver also
+> includes the three agent-facing injected variables above, because with
+> strict parity every exec session would still have to re-export them by
+> hand. Supervisor plumbing (`OPENSHELL_*`) is deliberately excluded — those
+> configure the supervisor itself, and leaking them into child processes
+> invites nested tooling to misread them.
 `--model` must match the model configured on the gateway via
 `inferenceProvider.modelId` — the supervisor refuses model swaps
 because that's a credential boundary.
