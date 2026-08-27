@@ -62,6 +62,12 @@ async fn main() -> Result<()> {
         anyhow::bail!(msg);
     }
 
+    // Same fail-closed reasoning: a bad numeric identity is far cheaper to
+    // catch here than per-sandbox inside the supervisor.
+    if let Some(msg) = openshell_driver_kyma::config::sandbox_identity_gap(&cfg) {
+        anyhow::bail!(msg);
+    }
+
     tracing::info!(
         socket = %cfg.socket,
         namespace = %cfg.namespace,

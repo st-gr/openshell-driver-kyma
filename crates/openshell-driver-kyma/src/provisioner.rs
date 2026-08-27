@@ -1053,6 +1053,27 @@ impl KymaProvisioner {
             );
         }
 
+        // Numeric sandbox identity, when the operator configured one.
+        //
+        // Supplying BOTH numerics (and blanking OCI_IMAGE_USER) is what puts
+        // the supervisor on upstream's `DriverIdentity::Resolved` path, where
+        // it setuid()s to the number directly. Supplying nothing leaves it on
+        // `DriverIdentity::None`, which falls back to resolving the NAME
+        // "sandbox" from the image's /etc/passwd -- fine for images that
+        // carry that user, a hard failure for images that do not.
+        //
+        // OCI_IMAGE_USER is explicitly set to "" rather than omitted:
+        // upstream's `from_values` only ignores an empty declaration when a
+        // numeric pair is also present, and that pairing is how a
+        // resolved-identity driver stops an image-baked USER from selecting
+        // the OCI path instead.
+        if let Some(uid) = self.cfg.sandbox_uid {
+            let gid = self.cfg.resolved_sandbox_gid().unwrap_or(uid);
+            gw_env.insert("OPENSHELL_OCI_IMAGE_USER".into(), String::new());
+            gw_env.insert("OPENSHELL_SANDBOX_UID".into(), uid.to_string());
+            gw_env.insert("OPENSHELL_SANDBOX_GID".into(), gid.to_string());
+        }
+
         // The user's environment, JSON-encoded for the supervisor.
         //
         // Container env only reaches the sandbox's MAIN process. The
@@ -2980,6 +3001,89 @@ mod tests {
         assert_eq!(decoded["command"][0], "echo");
         assert_eq!(decoded["command"][1], "hello world");
         assert_eq!(decoded["tty"], true);
+    }
+
+    /// With a configured identity the driver supplies BOTH numerics and
+    /// blanks OCI_IMAGE_USER, which is what puts the supervisor on upstream's
+    /// `DriverIdentity::Resolved` path -- setuid() to the number, no
+    /// /etc/passwd entry required in the image.
+    #[tokio::test]
+    async fn configured_identity_emits_resolved_triple() {
+        let cfg = Config {
+            namespace: "test-ns".into(),
+            sandbox_uid: Some(5000),
+            sandbox_gid: Some(6000),
+            ..Config::default()
+        };
+        let svc = tower::service_fn(|_req: http::Request<kube::client::Body>| async move {
+            Ok::<_, std::convert::Infallible>(http::Response::new(kube::client::Body::empty()))
+        });
+        let p = KymaProvisioner::new(Client::new(svc, "test-ns"), cfg);
+        let sb = make_sandbox("sb-1", "id-test", "img");
+        let built = p.build_sandbox_spec(&sb);
+        let env = built["podTemplate"]["spec"]["containers"][0]["env"]
+            .as_array()
+            .unwrap();
+        let get = |n: &str| {
+            env.iter()
+                .find(|e| e["name"] == n)
+                .map(|e| e["value"].clone())
+        };
+        assert_eq!(get("OPENSHELL_SANDBOX_UID").unwrap(), "5000");
+        assert_eq!(get("OPENSHELL_SANDBOX_GID").unwrap(), "6000");
+        // Empty, not absent: upstream only ignores an empty OCI declaration
+        // when a numeric pair is present, and that pairing is what stops an
+        // image-baked USER selecting the OCI path instead.
+        assert_eq!(get("OPENSHELL_OCI_IMAGE_USER").unwrap(), "");
+    }
+
+    /// GID falls back to UID, mirroring upstream's
+    /// `sandbox_gid.or(sandbox_uid).unwrap_or(resolved_uid)`.
+    #[tokio::test]
+    async fn identity_gid_defaults_to_uid() {
+        let cfg = Config {
+            namespace: "test-ns".into(),
+            sandbox_uid: Some(4242),
+            ..Config::default()
+        };
+        let svc = tower::service_fn(|_req: http::Request<kube::client::Body>| async move {
+            Ok::<_, std::convert::Infallible>(http::Response::new(kube::client::Body::empty()))
+        });
+        let p = KymaProvisioner::new(Client::new(svc, "test-ns"), cfg);
+        let sb = make_sandbox("sb-2", "gid-default", "img");
+        let built = p.build_sandbox_spec(&sb);
+        let env = built["podTemplate"]["spec"]["containers"][0]["env"]
+            .as_array()
+            .unwrap();
+        let gid = env
+            .iter()
+            .find(|e| e["name"] == "OPENSHELL_SANDBOX_GID")
+            .unwrap();
+        assert_eq!(gid["value"], "4242");
+    }
+
+    /// Unconfigured is the DEFAULT and must stay silent: emitting a partial
+    /// or invented identity would change how every existing sandbox resolves
+    /// its user. No identity means upstream's `DriverIdentity::None`, i.e.
+    /// the name-based fallback this driver has always relied on.
+    #[tokio::test]
+    async fn unconfigured_identity_emits_nothing() {
+        let p = make_provisioner();
+        let sb = make_sandbox("sb-3", "no-id", "img");
+        let built = p.build_sandbox_spec(&sb);
+        let env = built["podTemplate"]["spec"]["containers"][0]["env"]
+            .as_array()
+            .unwrap();
+        for n in [
+            "OPENSHELL_SANDBOX_UID",
+            "OPENSHELL_SANDBOX_GID",
+            "OPENSHELL_OCI_IMAGE_USER",
+        ] {
+            assert!(
+                !env.iter().any(|e| e["name"] == n),
+                "{n} must not be emitted without an explicit configuration"
+            );
+        }
     }
 
     /// The user's environment reaches exec/SSH children via
