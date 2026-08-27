@@ -950,8 +950,28 @@ impl KymaProvisioner {
     fn build_full_env_list(&self, sb: &DriverSandbox) -> Vec<Value> {
         let spec = sb.spec.as_ref();
         let template = spec.and_then(|s| s.template.as_ref());
-        let spec_env = spec.map(|s| s.environment.clone()).unwrap_or_default();
+        let mut spec_env = spec.map(|s| s.environment.clone()).unwrap_or_default();
         let tmpl_env = template.map(|t| t.environment.clone()).unwrap_or_default();
+
+        // `DriverSandboxSpec.log_level` (field 1) reaches the supervisor as
+        // OPENSHELL_LOG_LEVEL, mirroring upstream's `spec_pod_env`
+        // (openshell-driver-kubernetes/src/driver.rs at v0.0.111):
+        //
+        //   let mut env = spec.environment.clone();
+        //   if !s.log_level.is_empty() { env.insert(LOG_LEVEL, s.log_level) }
+        //
+        // Inserting into the SPEC map (not the merged output) is what gives
+        // it upstream's precedence: the field overrides an OPENSHELL_LOG_LEVEL
+        // the caller also set in `spec.environment`, and spec already beats
+        // template in build_env_list. The empty-string guard matters --
+        // without it an unset field would blank out a level the caller had
+        // deliberately passed through the environment map instead.
+        if let Some(level) = spec
+            .map(|s| s.log_level.as_str())
+            .filter(|level| !level.is_empty())
+        {
+            spec_env.insert("OPENSHELL_LOG_LEVEL".to_string(), level.to_string());
+        }
 
         let mut envs = build_env_list(&spec_env, &tmpl_env);
 
@@ -2916,6 +2936,73 @@ mod tests {
         assert_eq!(decoded["command"][0], "echo");
         assert_eq!(decoded["command"][1], "hello world");
         assert_eq!(decoded["tty"], true);
+    }
+
+    /// `spec.log_level` reaches the supervisor as OPENSHELL_LOG_LEVEL.
+    /// Upstream pins the same behaviour in
+    /// `log_level_propagates_as_env_var_to_sandbox_pod`, including that the
+    /// value goes to the env and NOT into the CR spec as a `logLevel` field.
+    #[tokio::test]
+    async fn log_level_propagates_as_env_var() {
+        let p = make_provisioner();
+        let mut sb = make_sandbox("sb-1", "log-test", "img");
+        sb.spec.as_mut().unwrap().log_level = "debug".into();
+        let built = p.build_sandbox_spec(&sb);
+        let env = built["podTemplate"]["spec"]["containers"][0]["env"]
+            .as_array()
+            .unwrap();
+        assert!(
+            env.iter()
+                .any(|e| e["name"] == "OPENSHELL_LOG_LEVEL" && e["value"] == "debug"),
+            "log_level must reach the supervisor as OPENSHELL_LOG_LEVEL"
+        );
+        assert!(
+            built.get("logLevel").is_none(),
+            "log_level is env-only, never a CR spec field"
+        );
+    }
+
+    /// The field wins over an OPENSHELL_LOG_LEVEL the caller also set in
+    /// `spec.environment`, because upstream inserts into the spec map rather
+    /// than merging around it.
+    #[tokio::test]
+    async fn log_level_field_overrides_the_environment_map() {
+        let p = make_provisioner();
+        let mut sb = make_sandbox("sb-2", "log-override", "img");
+        let spec = sb.spec.as_mut().unwrap();
+        spec.environment
+            .insert("OPENSHELL_LOG_LEVEL".into(), "warn".into());
+        spec.log_level = "trace".into();
+        let built = p.build_sandbox_spec(&sb);
+        let env = built["podTemplate"]["spec"]["containers"][0]["env"]
+            .as_array()
+            .unwrap();
+        let v = env
+            .iter()
+            .find(|e| e["name"] == "OPENSHELL_LOG_LEVEL")
+            .expect("set");
+        assert_eq!(v["value"], "trace");
+    }
+
+    /// An empty field must NOT blank out a level the caller passed through
+    /// the environment map -- upstream guards on `!log_level.is_empty()`.
+    #[tokio::test]
+    async fn empty_log_level_leaves_the_environment_map_alone() {
+        let p = make_provisioner();
+        let mut sb = make_sandbox("sb-3", "log-empty", "img");
+        let spec = sb.spec.as_mut().unwrap();
+        spec.environment
+            .insert("OPENSHELL_LOG_LEVEL".into(), "warn".into());
+        spec.log_level = String::new();
+        let built = p.build_sandbox_spec(&sb);
+        let env = built["podTemplate"]["spec"]["containers"][0]["env"]
+            .as_array()
+            .unwrap();
+        let v = env
+            .iter()
+            .find(|e| e["name"] == "OPENSHELL_LOG_LEVEL")
+            .expect("caller value must survive");
+        assert_eq!(v["value"], "warn");
     }
 
     /// With no command requested, the transport still carries upstream's
