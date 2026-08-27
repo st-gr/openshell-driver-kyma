@@ -1053,6 +1053,49 @@ impl KymaProvisioner {
             );
         }
 
+        // Runtime networking capabilities: declared empty, on purpose.
+        //
+        // This is a DEFENSIVE OVERWRITE, not a declaration. Empty and absent
+        // are behaviourally identical to the supervisor --
+        // `has_network_runtime_capability` splits the value on commas and
+        // matches exactly, so neither advertises anything. What sending it
+        // achieves is overriding a value the SANDBOXED USER supplied via
+        // `spec.environment`.
+        //
+        // Without it, a user could set
+        // NETWORK_RUNTIME_CAPABILITIES=policy-dns-transparent-tcp and the
+        // supervisor would believe this runtime provides a policy-DNS and
+        // transparent-TCP substrate that Kyma does not. That is the
+        // sandboxed party influencing its own enforcement substrate, which
+        // it should never be able to do. Upstream overwrites it
+        // unconditionally in `apply_required_env` for the same reason, with
+        // the note "Kubernetes topologies do not yet provide the complete
+        // policy DNS and transparent TCP substrate".
+        //
+        // With it, a policy that genuinely needs transparent TCP fails
+        // loudly at supervisor startup instead of silently proceeding on a
+        // runtime that cannot enforce it.
+        gw_env.insert(
+            "OPENSHELL_NETWORK_RUNTIME_CAPABILITIES".into(),
+            String::new(),
+        );
+
+        // Deliberately NOT set, and each for its own reason -- recorded here
+        // so a future parity sweep does not "fix" them:
+        //
+        //   OPENSHELL_SUPERVISOR_TOPOLOGY      upstream sets "sidecar" only in
+        //     sidecar mode and documents that the combined supervisor path
+        //     OMITS it. This driver runs the combined path, so omitting is
+        //     the correct value, not a gap.
+        //   OPENSHELL_NETWORK_ENFORCEMENT_MODE ("sidecar-nftables") and
+        //   OPENSHELL_NETWORK_BINARY_IDENTITY  ("relaxed") are set only
+        //     inside upstream's supervisor_sidecar_env /
+        //     apply_supervisor_sidecar_topology -- sidecar-topology
+        //     exclusive. NETWORK_BINARY_IDENTITY additionally defaults to
+        //     "required" when absent, the STRICTER value, so omitting it
+        //     fails safe rather than open.
+        //   OPENSHELL_SIDECAR_CONTROL_SOCKET   sidecar-only by name and use.
+
         // Telemetry stance, propagated so the supervisor inherits it.
         //
         // Not a no-op even though this driver emits no telemetry itself: a
@@ -3019,6 +3062,36 @@ mod tests {
         assert_eq!(decoded["command"][0], "echo");
         assert_eq!(decoded["command"][1], "hello world");
         assert_eq!(decoded["tty"], true);
+    }
+
+    /// The sandboxed user must not be able to advertise a networking
+    /// capability the runtime does not have. A user-supplied
+    /// NETWORK_RUNTIME_CAPABILITIES claiming transparent-TCP support has to
+    /// lose to the driver's empty declaration -- otherwise the supervisor
+    /// would proceed on a substrate Kyma cannot provide.
+    #[tokio::test]
+    async fn user_cannot_advertise_network_runtime_capabilities() {
+        let p = make_provisioner();
+        let mut sb = make_sandbox("sb-1", "cap-spoof", "img");
+        sb.spec.as_mut().unwrap().environment.insert(
+            "OPENSHELL_NETWORK_RUNTIME_CAPABILITIES".into(),
+            "policy-dns-transparent-tcp".into(),
+        );
+        let built = p.build_sandbox_spec(&sb);
+        let env = built["podTemplate"]["spec"]["containers"][0]["env"]
+            .as_array()
+            .unwrap();
+        // Kubernetes applies duplicate env names in order, so the effective
+        // value is the LAST entry. Assert on that rather than on the first
+        // match, which is what a naive lookup would find.
+        let effective = env
+            .iter()
+            .rfind(|e| e["name"] == "OPENSHELL_NETWORK_RUNTIME_CAPABILITIES")
+            .expect("must be present");
+        assert_eq!(
+            effective["value"], "",
+            "the driver's empty declaration must win over a user-supplied one"
+        );
     }
 
     /// Sent as an explicit "false" by default rather than omitted. A

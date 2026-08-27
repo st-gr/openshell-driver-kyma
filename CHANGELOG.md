@@ -6,6 +6,18 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Security
+
+- **The sandboxed user can no longer advertise networking capabilities to
+  its own supervisor.** `OPENSHELL_NETWORK_RUNTIME_CAPABILITIES` is now set
+  (empty) by the driver, overriding any value supplied through
+  `spec.environment`. Empty and absent are behaviourally identical to the
+  supervisor, so this is a defensive overwrite rather than a declaration —
+  without it a sandbox could claim `policy-dns-transparent-tcp` and the
+  supervisor would proceed on a substrate Kyma does not provide, instead of
+  failing loudly. Upstream overwrites it unconditionally for the same
+  reason.
+
 ### Added
 
 - **`driver.telemetryEnabled` (default `false`), propagated to every sandbox
