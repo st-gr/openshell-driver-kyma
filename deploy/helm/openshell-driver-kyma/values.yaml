@@ -93,6 +93,17 @@ driver:
   # `kubectl get nodes -o jsonpath='{.items[*].status.nodeInfo.kubeletVersion}'`
   # and that your CRI (containerd >= 1.7, cri-o >= 1.30) has user-ns
   # support enabled.
+  # Telemetry stance propagated to every sandbox supervisor as
+  # OPENSHELL_TELEMETRY_ENABLED.
+  #
+  # This driver emits no telemetry of its own, and upstream's Kubernetes
+  # driver compiles telemetry out and effectively sends "false" too, so
+  # false is both the faithful default and the safe one.
+  #
+  # It is sent EXPLICITLY rather than omitted, which matters: a supervisor
+  # image built with the telemetry feature treats an ABSENT variable as
+  # ENABLED. Omitting it would silently opt such an image in.
+  telemetryEnabled: false
   enableUserNamespaces: false
   # Numeric identity the supervisor drops the agent process to.
   #

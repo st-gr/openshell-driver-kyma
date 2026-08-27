@@ -92,6 +92,27 @@ pub struct Config {
     #[arg(long, default_value_t = false, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
     pub enable_user_namespaces: bool,
 
+    /// Telemetry stance propagated to the sandbox supervisor as
+    /// `OPENSHELL_TELEMETRY_ENABLED`.
+    ///
+    /// DELIBERATE DIVERGENCE IN THE DEFAULT. Upstream's value comes from
+    /// `openshell_core::telemetry::enabled_env_value()`, which reports
+    /// whatever the DRIVER's own build and environment say and defaults to
+    /// enabled when the `telemetry` feature is compiled in. In practice
+    /// upstream's Kubernetes driver takes `openshell-core` with
+    /// `default-features = false`, so it emits a hard `"false"`.
+    ///
+    /// This driver has no telemetry code at all -- no dependency, nothing to
+    /// emit -- so `false` is both the faithful analogue of what upstream's
+    /// Kubernetes driver actually sends and the safe default. It is exposed
+    /// rather than hardcoded because the value is not a no-op: a supervisor
+    /// built WITH the telemetry feature defaults to ENABLED when the
+    /// variable is absent, so sending `false` explicitly is what makes the
+    /// deployment's stance hold regardless of how the supervisor image was
+    /// compiled.
+    #[arg(long, default_value_t = false, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
+    pub telemetry_enabled: bool,
+
     /// Numeric UID the supervisor drops the agent process to, replacing its
     /// default of resolving the *name* `sandbox` from the image's
     /// `/etc/passwd`.
@@ -190,6 +211,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            telemetry_enabled: false,
             sandbox_uid: None,
             sandbox_gid: None,
             socket: "/var/run/openshell-driver.sock".to_string(),
