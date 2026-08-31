@@ -20,7 +20,19 @@ set -euo pipefail
 NS=openshell-system
 RELEASE=ods
 SB=smoke-$$
-CRD_URL="https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/main/k8s/crds/agents.x-k8s.io_sandboxes.yaml"
+# Pinned to a COMMIT, not a branch. This file lives in someone else's
+# repository, and tracking its `main` meant an unrelated upstream merge
+# could break this repo's CI with no commit of our own -- which is exactly
+# what happened on 2026-08-31: kubernetes-sigs/agent-sandbox#1470
+# ("Merge feature/drop-v1alpha1 with main", 2026-08-28) removed the
+# v1alpha1 version this driver requests, and every sandbox create started
+# failing with "404 page not found" on the initial object list.
+#
+#  (2026-07-17) is deliberately chosen: it serves BOTH
+# v1alpha1 and v1beta1, so it keeps CI green today AND lets the
+# v1beta1 migration land as a pure code change without moving this pin.
+# Bump it forward once this driver no longer asks for v1alpha1.
+CRD_URL="https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/6827cdb60bdfc0efdbaad5579b39786d7fa667c6/k8s/crds/agents.x-k8s.io_sandboxes.yaml"
 
 log()  { printf '\n=== %s\n' "$*"; }
 fail() { printf '\nFAIL: %s\n' "$*" >&2; dump_diagnostics; exit 1; }
