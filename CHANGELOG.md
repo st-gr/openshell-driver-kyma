@@ -4,7 +4,28 @@ All notable changes to openshell-driver-kyma are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.6.0] — 2026-08-31
+
+### Added
+
+- **Re-vendored the `ComputeDriver` proto contract to upstream `v0.0.116`**
+  (`proto/UPSTREAM.lock`, via `make proto-vendor TAG=v0.0.116`). This is a
+  no-op at the wire level: `proto/compute_driver.proto` and
+  `proto/options.proto` are byte-identical (same sha256) between `v0.0.111`
+  and `v0.0.116` — only the tag and commit upstream cut releases against
+  changed. `cargo build --workspace --all-targets` needed no code changes,
+  and no test changes were required, because there is no new or altered
+  RPC/message surface to implement or exercise.
+  - The pinned gateway/supervisor container image digests
+    (`gateway.image.tag`, `driver.supervisorImage` in
+    `deploy/helm/openshell-driver-kyma/values.yaml`) are intentionally
+    **unchanged** and remain the `v0.0.111` images: upstream has tagged
+    `v0.0.112` through `v0.0.116` without publishing matching
+    gateway/supervisor container images, so `.github/upstream-compat.env`
+    keeps `GATEWAY_REF=v0.0.111` pinned (see that file's `PIN_REASON`,
+    `PIN_REVIEW_AFTER=2026-09-07`). The proto contract pin and the image
+    pin are independent axes; see the comment above `gateway.image` in
+    `values.yaml`.
 
 ### Security
 

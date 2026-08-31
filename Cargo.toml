@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/computev1", "crates/openshell-driver-kyma", "crates/openshell-bedrock-bridge"]
 
 [workspace.package]
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/st-gr/openshell-driver-kyma"

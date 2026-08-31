@@ -244,16 +244,27 @@ podLabels: {}
 gateway:
   enabled: false
   image:
-    # Pinned to upstream `0.0.111` (commit 20d2e867). The ComputeDriver proto
-    # contract moved from `0.0.109` to `0.0.111` (see proto/UPSTREAM.lock and
-    # scripts/check-proto-drift.sh): `GetCapabilitiesResponse` gained
-    # `gateway_manages_lifecycle` (this driver always returns `false` — a
-    # Kyma sandbox's compute lives in the cluster independently of the
-    # driver/gateway process; see driver.rs::get_capabilities) and
-    # `DriverSandboxSpec` gained `command`/`tty` (not yet forwarded to the
-    # supervisor; see the TODO in provisioner.rs::build_full_env_list).
-    # Neither is wire-breaking — both are purely additive fields the driver
-    # is free to ignore or zero-value. `StartSandbox` (added vs. `0.0.102`)
+    # Image pinned to upstream `0.0.111` (commit 20d2e867) — this is the
+    # newest tag for which upstream has published gateway/supervisor
+    # container images. Upstream tagged 0.0.112 through 0.0.116 without
+    # publishing matching images, so `.github/upstream-compat.env` pins
+    # GATEWAY_REF to v0.0.111 there too (see PIN_REASON in that file;
+    # PIN_REVIEW_AFTER=2026-09-07). Do not "fix" this digest to chase the
+    # proto tag below — re-check that file first.
+    #
+    # The vendored ComputeDriver proto CONTRACT (proto/UPSTREAM.lock) is a
+    # separate pin and currently sits at `0.0.116`: it moved there from
+    # `0.0.111` byte-identically (see scripts/check-proto-drift.sh), i.e.
+    # the contract itself has not changed since 0.0.111. The prior contract
+    # move, `0.0.109` -> `0.0.111`, DID change the wire shape:
+    # `GetCapabilitiesResponse` gained `gateway_manages_lifecycle` (this
+    # driver always returns `false` — a Kyma sandbox's compute lives in the
+    # cluster independently of the driver/gateway process; see
+    # driver.rs::get_capabilities) and `DriverSandboxSpec` gained
+    # `command`/`tty`, both now forwarded to the supervisor as
+    # `OPENSHELL_MAIN_PROCESS_SPEC` (see provisioner.rs::build_full_env_list).
+    # Neither was wire-breaking — both were purely additive fields drivers
+    # are free to ignore or zero-value. `StartSandbox` (added vs. `0.0.102`)
     # and `StopSandbox` are both implemented by this driver: `StopSandbox`
     # patches the Sandbox CR to a stopped state and waits for its pod to
     # actually terminate, `StartSandbox` performs the matching resume patch;
