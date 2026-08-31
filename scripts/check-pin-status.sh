@@ -32,6 +32,9 @@
 #   PIN_REASON_EVAPORATED: true both images now exist for a newer tag --
 #                               the pin should be reverted to latest
 #   VENDOR_TARGET_TAG          the newer tag, alongside PIN_REASON_EVAPORATED
+#   CLI_ENTRYPOINT_MISSING: true the newer tag's PyPI wheel ships no CLI
+#                               binary, so the smokes cannot install one --
+#                               the pin stays regardless of images
 #   PIN_STILL_JUSTIFIED: true  a newer tag exists but its images do not yet
 #   LATEST_UPSTREAM_TAG        the newest upstream tag, emitted whether or not
 #                               a pin is in place -- so "what would we move to?"
@@ -133,6 +136,58 @@ fi
 supervisor_state=missing
 if ( resolve_image_digest ghcr.io/nvidia/openshell/supervisor "$image_tag" >/dev/null 2>&1 ); then
 	supervisor_state=published
+fi
+
+# Images are necessary but NOT sufficient. Both smokes also `uv tool install
+# openshell==<tag>`, and from 0.0.113 upstream's PyPI wheel stopped shipping
+# the CLI binary: it became a ~0.1 MB pure-Python library with no
+# `.data/scripts/openshell` entry, so the install fails with "No executables
+# are provided by package `openshell`". An images-only check reported the pin
+# as no longer needed and would have unpinned CI straight into that failure.
+#
+# The wheel is ~8 MB when it does contain the binary, so this only runs at the
+# one moment it decides something: after the images check has already passed
+# and the script is about to declare the pin's reason evaporated.
+cli_ships_entrypoint() {
+	local version=$1 url tmp
+	url=$(curl -fsSL --max-time 25 "https://pypi.org/pypi/openshell/${version}/json" 2>/dev/null |
+		sed -n 's/.*"url":"\([^"]*\.whl\)".*/\1/p' | head -1)
+	[[ -n $url ]] || return 2
+	tmp=$(mktemp)
+	curl -fsSL --max-time 90 "$url" -o "$tmp" 2>/dev/null || { rm -f "$tmp"; return 2; }
+	if unzip -l "$tmp" 2>/dev/null | grep -q "\.data/scripts/openshell"; then
+		rm -f "$tmp"
+		return 0
+	fi
+	rm -f "$tmp"
+	return 1
+}
+
+if [[ $gateway_state == published && $supervisor_state == published ]]; then
+	# `|| cli_rc=$?` rather than a bare call: proto-lib.sh sets `set -e`, so a
+	# bare invocation returning non-zero would abort this script -- which must
+	# never happen, since it is advisory and the weekly job relies on it always
+	# exiting 0.
+	cli_rc=0
+	cli_ships_entrypoint "$image_tag" || cli_rc=$?
+	case $cli_rc in
+	1)
+		printf 'Images exist for %s, but its PyPI wheel ships no CLI binary\n' "$latest"
+		printf '(no .data/scripts/openshell entry), so `uv tool install` would fail\n'
+		printf 'with "No executables are provided by package `openshell`" and both\n'
+		printf 'smokes would die at CLI install. The pin stays.\n'
+		printf 'CLI_ENTRYPOINT_MISSING: true\n'
+		printf 'PIN_STILL_JUSTIFIED: true\n'
+		exit 0
+		;;
+	2)
+		printf 'Could not check whether %s ships a CLI binary; not declaring the\n' "$latest"
+		printf 'pin evaporated on images alone.\n'
+		printf 'PIN_CHECK: network-unreachable\n'
+		exit 0
+		;;
+	*) ;;
+	esac
 fi
 
 if [[ $gateway_state == published && $supervisor_state == published ]]; then

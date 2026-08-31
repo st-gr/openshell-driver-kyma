@@ -60,7 +60,7 @@ driver:
   # below. It tracked `:latest` until chart 0.3.0 — that tag moved twice
   # in one week, so sandboxes were silently picking up new privileged
   # binaries. Re-pin both together when bumping upstream.
-  supervisorImage: ghcr.io/nvidia/openshell/supervisor@sha256:c8c42aef16c200063e32cbf72e553e4ead027085427b555efafd95063ecead42
+  supervisorImage: ghcr.io/nvidia/openshell/supervisor@sha256:cdad6b34973c06ea330cbba93e8264b50195de040c1c02f4981a97773603bcfc
   supervisorBinaryPath: /openshell-sandbox
   supervisorMountPath: /opt/openshell/bin
   gatewayEndpoint: ""
@@ -255,6 +255,11 @@ gateway:
     #   0.0.113  published        0.0.116  published
     #   0.0.114  no images
     #
+    # But images are NOT the binding constraint. From 0.0.113 the PyPI
+    # `openshell` wheel stopped shipping the CLI binary (8.18 MB -> 0.10 MB;
+    # no `.data/scripts/openshell` entry), so the smokes cannot install a
+    # CLI at all past 0.0.111 regardless of images.
+    #
     # So "tagged without images" is only true of 0.0.112 and 0.0.114. That
     # matters for how this pin is read: `scripts/check-pin-status.sh` only
     # resolves the NEWEST tag, so while 0.0.114 was newest it reported the
@@ -288,7 +293,7 @@ gateway:
     # Bump via
     # https://github.com/NVIDIA/OpenShell/pkgs/container/openshell%2Fgateway
     repository: ghcr.io/nvidia/openshell/gateway
-    tag: "sha256:05cf77bbb022a739aed6f22daa0e7e164415f4ab273b5f84319e46d91eb8f645"
+    tag: "sha256:004ca59466ca388884af843a437d55674d7638a96132fb8fad8bcbb2db634bdd"
     pullPolicy: IfNotPresent
   grpcPort: 8080
   metricsPort: 9091
