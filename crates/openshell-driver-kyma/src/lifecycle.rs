@@ -7,10 +7,13 @@
 
 use serde_json::{json, Value};
 
-/// API version served by the agent-sandbox CRD this cluster installs today.
+/// Legacy API version, dropped from the CRD by
+/// kubernetes-sigs/agent-sandbox#1470 (2026-08-28). Kept because the patch is
+/// keyed off whatever apiVersion the CR itself reports, so a cluster still
+/// serving an older CRD keeps working.
 pub const SANDBOX_V1ALPHA1: &str = "v1alpha1";
-/// Newer API version. Not served by the installed CRD yet; implemented so a
-/// future CRD upgrade does not silently patch a field the new version ignores.
+/// API version this driver requests. Uses `operatingMode` where v1alpha1 used
+/// `replicas`; that is the only spec difference between the two.
 pub const SANDBOX_V1BETA1: &str = "v1beta1";
 
 /// Build the merge patch that starts or stops a sandbox.

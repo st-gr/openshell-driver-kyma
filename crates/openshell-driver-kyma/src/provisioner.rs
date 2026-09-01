@@ -1,6 +1,6 @@
 //! `KymaProvisioner` — `SandboxProvisioner` impl backed by `kube-rs`.
 //!
-//! Manages `agents.x-k8s.io/v1alpha1/Sandbox` CRs in a single namespace via
+//! Manages `agents.x-k8s.io/v1beta1/Sandbox` CRs in a single namespace via
 //! `kube::Api<DynamicObject>` (the CRD is third-party so we don't generate
 //! a typed wrapper). The supervisor binary is delivered via init container
 //! plus `emptyDir`, mirroring the Go OpenShift driver's approach (see
@@ -108,9 +108,15 @@ impl KymaProvisioner {
     /// Build a provisioner around an existing `kube::Client` and `Config`.
     #[must_use]
     pub fn new(client: Client, cfg: Config) -> Self {
+        // v1beta1 since 2026-08-31. kubernetes-sigs/agent-sandbox#1470 dropped
+        // v1alpha1 from the CRD entirely, so requesting it now 404s. The two
+        // versions differ in exactly one spec field -- `replicas` became
+        // `operatingMode` -- and `lifecycle::operating_state_patch` already
+        // emits the right one per version, keyed off the CR's own apiVersion
+        // rather than this constant.
         let gvk = GroupVersionKind {
             group: "agents.x-k8s.io".into(),
-            version: "v1alpha1".into(),
+            version: "v1beta1".into(),
             kind: "Sandbox".into(),
         };
         let sandbox_ar = ApiResource::from_gvk_with_plural(&gvk, "sandboxes");
@@ -3299,6 +3305,25 @@ mod tests {
         }
     }
 
+    /// The CR is created at v1beta1. kubernetes-sigs/agent-sandbox#1470
+    /// dropped v1alpha1 from the CRD, so requesting the old version 404s on
+    /// every call -- which is how this surfaced: "failed to perform initial
+    /// object list: ApiError: 404 page not found".
+    #[tokio::test]
+    async fn sandbox_cr_is_created_at_v1beta1() {
+        let p = make_provisioner();
+        let sb = make_sandbox("sb-1", "ver-test", "img");
+        let built = p.build_sandbox_spec(&sb);
+        // build_sandbox_spec renders the spec body; the apiVersion comes from
+        // the provisioner's ApiResource, so assert on that directly.
+        assert_eq!(p.sandbox_ar.version, "v1beta1");
+        assert_eq!(p.sandbox_ar.api_version, "agents.x-k8s.io/v1beta1");
+        assert!(
+            built.get("replicas").is_none(),
+            "replicas is a v1alpha1 field and must not appear in the CR body"
+        );
+    }
+
     /// `spec.log_level` reaches the supervisor as OPENSHELL_LOG_LEVEL.
     /// Upstream pins the same behaviour in
     /// `log_level_propagates_as_env_var_to_sandbox_pod`, including that the
@@ -4396,7 +4421,7 @@ mod tests {
     /// A Sandbox CR as the apiserver would echo it back from a create.
     fn served_sandbox_cr(namespace: &str, name: &str) -> String {
         serde_json::json!({
-            "apiVersion": "agents.x-k8s.io/v1alpha1",
+            "apiVersion": "agents.x-k8s.io/v1beta1",
             "kind": "Sandbox",
             "metadata": { "name": name, "namespace": namespace },
         })
