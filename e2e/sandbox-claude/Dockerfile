@@ -39,7 +39,7 @@ ARG NODE_MAJOR=22
 # builds of the same commit could bake different agent versions, so a
 # sandbox's behaviour was not reproducible from its source. Bump this
 # deliberately; scripts/check-image-pins.sh reports when it is behind.
-ARG CLAUDE_CODE_VERSION=2.1.239
+ARG CLAUDE_CODE_VERSION=2.1.252
 RUN apt-get update \
     && apt-get install -y --no-install-recommends gnupg \
     && curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - \
