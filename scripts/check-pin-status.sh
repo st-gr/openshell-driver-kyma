@@ -150,17 +150,18 @@ fi
 # and the script is about to declare the pin's reason evaporated.
 cli_ships_entrypoint() {
 	local version=$1 url tmp
-	url=$(curl -fsSL --max-time 25 "https://pypi.org/pypi/openshell/${version}/json" 2>/dev/null |
-		sed -n 's/.*"url":"\([^"]*\.whl\)".*/\1/p' | head -1)
-	[[ -n $url ]] || return 2
-	tmp=$(mktemp)
-	curl -fsSL --max-time 90 "$url" -o "$tmp" 2>/dev/null || { rm -f "$tmp"; return 2; }
-	if unzip -l "$tmp" 2>/dev/null | grep -q "\.data/scripts/openshell"; then
-		rm -f "$tmp"
-		return 0
-	fi
-	rm -f "$tmp"
-	return 1
+	# Checks the RELEASE ASSET, not the PyPI wheel. The wheel will never carry
+	# the binary again: NVIDIA/OpenShell#2321 removed it deliberately and added
+	# a test asserting it cannot come back. Asking the wheel would hold a pin
+	# forever on a question whose answer is permanently "no".
+	local url="https://github.com/NVIDIA/OpenShell/releases/download/v${version}/openshell-x86_64-unknown-linux-musl.tar.gz"
+	local code
+	code=$(curl -fsSL -o /dev/null -w '%{http_code}' --max-time 30 -I "$url" 2>/dev/null) || return 2
+	case $code in
+	200) return 0 ;;
+	404) return 1 ;;
+	*) return 2 ;;
+	esac
 }
 
 if [[ $gateway_state == published && $supervisor_state == published ]]; then
@@ -172,9 +173,9 @@ if [[ $gateway_state == published && $supervisor_state == published ]]; then
 	cli_ships_entrypoint "$image_tag" || cli_rc=$?
 	case $cli_rc in
 	1)
-		printf 'Images exist for %s, but its PyPI wheel ships no CLI binary\n' "$latest"
-		printf '(no .data/scripts/openshell entry), so `uv tool install` would fail\n'
-		printf 'with "No executables are provided by package `openshell`" and both\n'
+		printf 'Images exist for %s, but it publishes no Linux CLI tarball\n' "$latest"
+		printf '(openshell-x86_64-unknown-linux-musl.tar.gz missing), so the smokes could not\n'
+		printf 'install a CLI at all and both\n'
 		printf 'smokes would die at CLI install. The pin stays.\n'
 		printf 'CLI_ENTRYPOINT_MISSING: true\n'
 		printf 'PIN_STILL_JUSTIFIED: true\n'
