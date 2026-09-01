@@ -56,6 +56,16 @@ jobs:
           # default image.tag (which falls through to Chart.AppVersion)
           # resolves cleanly without a --set image.tag override.
           echo "version=$(echo '${{ github.ref_name }}' | sed 's/^v//')" >> "$GITHUB_OUTPUT"
+          # A tag containing a hyphen is a pre-release, per SemVer: v0.5.0-beta.1
+          # has a pre-release identifier, v0.5.0 does not. Everything downstream
+          # keys off this one decision rather than re-parsing the tag.
+          if [[ '${{ github.ref_name }}' == *-* ]]; then
+            echo "prerelease=true"  >> "$GITHUB_OUTPUT"
+            echo "moving_tags=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "moving_tags=true"  >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Build and push tagged driver image
         uses: docker/build-push-action@v7
@@ -66,7 +76,7 @@ jobs:
           tags: |
             ghcr.io/${{ steps.repo.outputs.lower }}:${{ github.ref_name }}
             ghcr.io/${{ steps.repo.outputs.lower }}:${{ steps.repo.outputs.version }}
-            ghcr.io/${{ steps.repo.outputs.lower }}:latest
+            ${{ steps.repo.outputs.moving_tags == 'true' && format('ghcr.io/{0}:latest', steps.repo.outputs.lower) || '' }}
           # Separate cache scope from docker-build's so a stale cache in
           # one workflow can't serve a wrong binary into a release build.
           cache-from: type=gha,scope=release-v1
@@ -81,7 +91,7 @@ jobs:
           tags: |
             ghcr.io/${{ steps.repo.outputs.owner }}/openshell-bedrock-bridge:${{ github.ref_name }}
             ghcr.io/${{ steps.repo.outputs.owner }}/openshell-bedrock-bridge:${{ steps.repo.outputs.version }}
-            ghcr.io/${{ steps.repo.outputs.owner }}/openshell-bedrock-bridge:latest
+            ${{ steps.repo.outputs.moving_tags == 'true' && format('ghcr.io/{0}/openshell-bedrock-bridge:latest', steps.repo.outputs.owner) || '' }}
           # Separate cache scope so the bridge build doesn't share a cache
           # layer with either the driver build or the bridge's own
           # docker-build.yml run.
@@ -95,7 +105,15 @@ jobs:
 
       - name: Package Helm chart
         run: |
-          helm package deploy/helm/openshell-driver-kyma --destination dist
+          # --version/--app-version from the TAG, not Chart.yaml. `helm package`
+          # otherwise reads Chart.yaml and ignores the tag entirely, so a
+          # v0.5.0-beta.1 tag would publish a chart labelled 0.5.0 and collide
+          # with the eventual final. Deriving both from the tag also makes a
+          # Chart.yaml/tag mismatch impossible rather than merely unlikely.
+          helm package deploy/helm/openshell-driver-kyma \
+            --version "${{ steps.repo.outputs.version }}" \
+            --app-version "${{ steps.repo.outputs.version }}" \
+            --destination dist
           ls -la dist/
 
       # Push the chart to GHCR as an OCI artifact so operators can do
@@ -117,6 +135,9 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           name: ${{ github.ref_name }}
+          # Marks it "Pre-release" in the GitHub UI and keeps it out of
+          # "Latest release", so a beta cannot be mistaken for a final.
+          prerelease: ${{ steps.repo.outputs.prerelease }}
           generate_release_notes: true
           files: |
             dist/*.tgz
