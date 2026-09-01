@@ -269,14 +269,14 @@ mod tests {
             metadata.name.as_deref().unwrap_or(""),
             &kube::api::ApiResource {
                 group: "agents.x-k8s.io".into(),
-                version: "v1alpha1".into(),
-                api_version: "agents.x-k8s.io/v1alpha1".into(),
+                version: "v1beta1".into(),
+                api_version: "agents.x-k8s.io/v1beta1".into(),
                 kind: "Sandbox".into(),
                 plural: "sandboxes".into(),
             },
         );
         obj.types = Some(TypeMeta {
-            api_version: "agents.x-k8s.io/v1alpha1".into(),
+            api_version: "agents.x-k8s.io/v1beta1".into(),
             kind: "Sandbox".into(),
         });
         obj.metadata = metadata;
