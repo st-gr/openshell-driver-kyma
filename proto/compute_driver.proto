@@ -3,8 +3,8 @@
 
 // VENDORED from NVIDIA/OpenShell — do not edit by hand.
 //   repo:   https://github.com/NVIDIA/OpenShell
-//   ref:    v0.0.111
-//   commit: 20d2e867e0e25b24d383a78dd362ba5647ef12c8
+//   ref:    v0.0.116
+//   commit: d1155aa70042d3e2ee49dbfa15346b108b7c1d92
 // Re-vendor with `make proto-vendor TAG=<tag>`; provenance + checksums
 // are recorded in proto/UPSTREAM.lock and enforced by CI.
 

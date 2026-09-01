@@ -244,16 +244,41 @@ podLabels: {}
 gateway:
   enabled: false
   image:
-    # Pinned to upstream `0.0.111` (commit 20d2e867). The ComputeDriver proto
-    # contract moved from `0.0.109` to `0.0.111` (see proto/UPSTREAM.lock and
-    # scripts/check-proto-drift.sh): `GetCapabilitiesResponse` gained
-    # `gateway_manages_lifecycle` (this driver always returns `false` — a
-    # Kyma sandbox's compute lives in the cluster independently of the
-    # driver/gateway process; see driver.rs::get_capabilities) and
-    # `DriverSandboxSpec` gained `command`/`tty` (not yet forwarded to the
-    # supervisor; see the TODO in provisioner.rs::build_full_env_list).
-    # Neither is wire-breaking — both are purely additive fields the driver
-    # is free to ignore or zero-value. `StartSandbox` (added vs. `0.0.102`)
+    # Image pinned to upstream `0.0.111` (commit 20d2e867) — this is the
+    # newest tag for which upstream has published gateway/supervisor
+    # container images.
+    #
+    # Upstream's image publishing is INTERMITTENT, not absent — verified
+    # tag by tag on 2026-08-31:
+    #
+    #   0.0.112  no images        0.0.115  published
+    #   0.0.113  published        0.0.116  published
+    #   0.0.114  no images
+    #
+    # But images are NOT the binding constraint. From 0.0.113 the PyPI
+    # `openshell` wheel stopped shipping the CLI binary (8.18 MB -> 0.10 MB;
+    # no `.data/scripts/openshell` entry), so the smokes cannot install a
+    # CLI at all past 0.0.111 regardless of images.
+    #
+    # So "tagged without images" is only true of 0.0.112 and 0.0.114. That
+    # matters for how this pin is read: `scripts/check-pin-status.sh` only
+    # resolves the NEWEST tag, so while 0.0.114 was newest it reported the
+    # pin as still justified even though 0.0.113 had usable images. Do not
+    # infer "every tag since the pin lacks images" from that output.
+    #
+    # The vendored ComputeDriver proto CONTRACT (proto/UPSTREAM.lock) is a
+    # separate pin and currently sits at `0.0.116`: it moved there from
+    # `0.0.111` byte-identically (see scripts/check-proto-drift.sh), i.e.
+    # the contract itself has not changed since 0.0.111. The prior contract
+    # move, `0.0.109` -> `0.0.111`, DID change the wire shape:
+    # `GetCapabilitiesResponse` gained `gateway_manages_lifecycle` (this
+    # driver always returns `false` — a Kyma sandbox's compute lives in the
+    # cluster independently of the driver/gateway process; see
+    # driver.rs::get_capabilities) and `DriverSandboxSpec` gained
+    # `command`/`tty`, both now forwarded to the supervisor as
+    # `OPENSHELL_MAIN_PROCESS_SPEC` (see provisioner.rs::build_full_env_list).
+    # Neither was wire-breaking — both were purely additive fields drivers
+    # are free to ignore or zero-value. `StartSandbox` (added vs. `0.0.102`)
     # and `StopSandbox` are both implemented by this driver: `StopSandbox`
     # patches the Sandbox CR to a stopped state and waits for its pod to
     # actually terminate, `StartSandbox` performs the matching resume patch;
