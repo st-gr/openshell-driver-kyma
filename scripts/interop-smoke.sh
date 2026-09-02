@@ -107,9 +107,32 @@ log "waiting for the driver+gateway pod"
 kubectl -n "$NS" rollout status "deploy/${RELEASE}-openshell-driver-kyma" --timeout=3m \
 	|| fail "driver/gateway deployment never became available"
 
-log "installing the openshell CLI ${CLI_VERSION}"
-uv tool install "openshell==${CLI_VERSION}" --force
-export PATH="$HOME/.local/bin:$PATH"
+# The CLI comes from the release tarball, NOT from PyPI.
+#
+# `uv tool install openshell==<ver>` worked only incidentally: the wheel used
+# to carry the binary as a `.data/scripts/openshell` payload. NVIDIA/OpenShell#2321
+# ("fix(python): remove CLI from wheel", merged 2026-08-25) removed it
+# deliberately -- "the gateway and CLI now ship as standalone artifacts, so the
+# Python distribution should contain only the SDK" -- and added a test asserting
+# the wheel *cannot* contain an openshell entry point. From 0.0.113 the wheel is
+# a ~0.1 MB SDK (was 8.18 MB), so the old install fails with "No executables are
+# provided by package `openshell`".
+#
+# install.sh is not used either: on Linux it installs a .deb, and on macOS it
+# starts a brew-services local gateway. The static musl tarball is the smallest
+# thing that yields a CLI -- statically linked, no package manager, no root.
+log "installing the openshell CLI ${CLI_VERSION} from the release tarball"
+CLI_DIR="$(mktemp -d)"
+CLI_TARBALL="openshell-x86_64-unknown-linux-musl.tar.gz"
+curl -fsSL --retry 3 --retry-delay 2 \
+	"https://github.com/NVIDIA/OpenShell/releases/download/v${CLI_VERSION}/${CLI_TARBALL}" \
+	-o "${CLI_DIR}/cli.tar.gz" \
+	|| fail "could not download the openshell CLI ${CLI_VERSION} (${CLI_TARBALL})"
+tar xzf "${CLI_DIR}/cli.tar.gz" -C "$CLI_DIR" || fail "could not unpack the openshell CLI tarball"
+[[ -x "${CLI_DIR}/openshell" ]] || fail "the CLI tarball did not contain an executable 'openshell'"
+export PATH="${CLI_DIR}:$PATH"
+# Fail here rather than at the first ambiguous assertion if the binary cannot run.
+openshell --version >/dev/null 2>&1 || fail "the downloaded openshell CLI is not runnable"
 
 log "port-forwarding the gateway"
 kubectl -n "$NS" port-forward "svc/${RELEASE}-openshell-driver-kyma" 8080:8080 >/tmp/pf.log 2>&1 &

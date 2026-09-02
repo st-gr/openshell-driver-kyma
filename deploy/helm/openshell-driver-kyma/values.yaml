@@ -60,7 +60,7 @@ driver:
   # below. It tracked `:latest` until chart 0.3.0 — that tag moved twice
   # in one week, so sandboxes were silently picking up new privileged
   # binaries. Re-pin both together when bumping upstream.
-  supervisorImage: ghcr.io/nvidia/openshell/supervisor@sha256:cdad6b34973c06ea330cbba93e8264b50195de040c1c02f4981a97773603bcfc
+  supervisorImage: ghcr.io/nvidia/openshell/supervisor@sha256:c8c42aef16c200063e32cbf72e553e4ead027085427b555efafd95063ecead42
   supervisorBinaryPath: /openshell-sandbox
   supervisorMountPath: /opt/openshell/bin
   gatewayEndpoint: ""
@@ -255,16 +255,21 @@ gateway:
     #   0.0.113  published        0.0.116  published
     #   0.0.114  no images
     #
-    # But images are NOT the binding constraint. From 0.0.113 the PyPI
-    # `openshell` wheel stopped shipping the CLI binary (8.18 MB -> 0.10 MB;
-    # no `.data/scripts/openshell` entry), so the smokes cannot install a
-    # CLI at all past 0.0.111 regardless of images.
-    #
     # So "tagged without images" is only true of 0.0.112 and 0.0.114. That
-    # matters for how this pin is read: `scripts/check-pin-status.sh` only
-    # resolves the NEWEST tag, so while 0.0.114 was newest it reported the
-    # pin as still justified even though 0.0.113 had usable images. Do not
-    # infer "every tag since the pin lacks images" from that output.
+    # matters for how staleness is read: `scripts/check-pin-status.sh` only
+    # resolves the NEWEST tag, so while 0.0.114 was newest it reported a pin
+    # as still justified even though 0.0.113 had usable images. Do not infer
+    # "every tag since lacks images" from that output.
+    #
+    # A GATEWAY_REF pin was held at 0.0.111 through 2026-09-01 for a
+    # different reason, now resolved: the PyPI `openshell` wheel stopped
+    # carrying the CLI binary from 0.0.113 (8.18 MB -> 0.10 MB), so the
+    # smokes could not install a CLI. That was never a regression to wait
+    # out — NVIDIA/OpenShell#2321 removed it deliberately and added a test
+    # asserting it cannot return, because the CLI now ships as a standalone
+    # release artifact. The smokes fetch
+    # `openshell-x86_64-unknown-linux-musl.tar.gz` from the release instead,
+    # and the pin is lifted.
     #
     # The vendored ComputeDriver proto CONTRACT (proto/UPSTREAM.lock) is a
     # separate pin and currently sits at `0.0.116`: it moved there from
@@ -293,7 +298,7 @@ gateway:
     # Bump via
     # https://github.com/NVIDIA/OpenShell/pkgs/container/openshell%2Fgateway
     repository: ghcr.io/nvidia/openshell/gateway
-    tag: "sha256:004ca59466ca388884af843a437d55674d7638a96132fb8fad8bcbb2db634bdd"
+    tag: "sha256:05cf77bbb022a739aed6f22daa0e7e164415f4ab273b5f84319e46d91eb8f645"
     pullPolicy: IfNotPresent
   grpcPort: 8080
   metricsPort: 9091
