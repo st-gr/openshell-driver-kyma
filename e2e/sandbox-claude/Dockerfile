@@ -73,6 +73,28 @@ COPY claude-tui.sh /usr/local/bin/claude
 RUN chmod 755 /usr/local/bin/claude /etc/openshell/skel/claude.json \
  && ln -s claude /usr/local/bin/claude-tui
 
+# Remove the inherited login-shell dotfiles from /home/sandbox.
+#
+# The supervisor injects HOME=/home/sandbox (from the passwd entry) but
+# filesystem_policy makes that directory unreadable, so every `sandbox exec`
+# starts with:
+#
+#   /bin/bash: /home/sandbox/.profile: Permission denied
+#
+# bash is silent about a MISSING startup file and warns only about one it
+# cannot read, so deleting them removes the noise. .bashrc and .bash_logout
+# go too -- they are equally unreadable and would warn in interactive and
+# logout paths respectively. They are stock Debian skel files; nothing in
+# this image or the driver reads them.
+#
+# This silences the symptom. The cause is HOME pointing into a Landlock-
+# blocked directory, which is also why callers still need `export
+# HOME=/sandbox` and why claude-tui.sh sets HOME=/tmp. Repointing the
+# passwd home at /sandbox would address the cause, but whether the
+# supervisor derives HOME from passwd or injects it independently is not
+# verified here, so that is deliberately left alone.
+RUN rm -f /home/sandbox/.profile /home/sandbox/.bashrc /home/sandbox/.bash_logout
+
 # Drop back to the unprivileged sandbox user; the supervisor runs the
 # agent as this UID via policy.process.run_as_user.
 USER sandbox
