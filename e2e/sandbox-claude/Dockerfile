@@ -35,16 +35,26 @@ ENV DEBIAN_FRONTEND=noninteractive
 # Node 22 LTS — Claude Code's package needs Node 20+ (string-width's /v
 # regex flag is one of several gates; 22 LTS is the conservative pick).
 ARG NODE_MAJOR=22
-# Claude Code version, PINNED. An unpinned `npm install -g` meant two
-# builds of the same commit could bake different agent versions, so a
-# sandbox's behaviour was not reproducible from its source. Bump this
-# deliberately; scripts/check-image-pins.sh reports when it is behind.
-ARG CLAUDE_CODE_VERSION=2.1.263
+# Claude Code version, PINNED — but the pin lives in package.json, not here.
+#
+# It used to be an ARG in this file, which nothing could manage: dependabot's
+# docker ecosystem only tracks `FROM` tags, so every bump was a manual commit
+# prompted by scripts/check-image-pins.sh. That pin went stale within six days
+# twice running, which is exactly how an always-red check stops being read.
+#
+# package.json exists solely to give dependabot's npm ecosystem something it
+# understands (see .github/dependabot.yml). It is never installed as a package
+# and never published — the Dockerfile just reads the version out of it, so
+# there is one source of truth rather than two that can drift.
+COPY package.json /tmp/agent-package.json
 RUN apt-get update \
     && apt-get install -y --no-install-recommends gnupg \
     && curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - \
     && apt-get install -y --no-install-recommends nodejs \
+    && CLAUDE_CODE_VERSION="$(node -p "require('/tmp/agent-package.json').dependencies['@anthropic-ai/claude-code']")" \
+    && echo "installing claude-code ${CLAUDE_CODE_VERSION} (from package.json)" \
     && npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+    && rm -f /tmp/agent-package.json \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Pre-onboarded ~/.claude.json template + wrapper installed as `claude`.

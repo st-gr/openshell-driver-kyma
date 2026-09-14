@@ -37,3 +37,18 @@ updates:
       interval: weekly
     commit-message:
       prefix: "chore(docker)"
+
+  # The claude-code version baked into ghcr.io/st-gr/sandbox-claude.
+  #
+  # e2e/sandbox-claude/package.json exists only to give this ecosystem
+  # something it understands -- the Dockerfile reads the version out of it.
+  # Before this, the pin was a bare ARG that nothing could manage (the docker
+  # ecosystem only tracks `FROM` tags), so it went stale within days and had
+  # to be bumped by hand each time check-image-pins.sh flagged it.
+  - package-ecosystem: npm
+    directory: /e2e/sandbox-claude
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 2
+    commit-message:
+      prefix: "chore(deps)"

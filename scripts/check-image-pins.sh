@@ -69,9 +69,14 @@ else
 fi
 
 # --- claude-code version --------------------------------------------------
-pinned_cc=$(sed -n 's/^ARG CLAUDE_CODE_VERSION=//p' "$DOCKERFILE" | tail -1 | tr -d '[:space:]')
+# Read from package.json, which is the pin's source of truth now that
+# dependabot's npm ecosystem manages it (see .github/dependabot.yml). The
+# Dockerfile derives the version from the same file, so there is nothing to
+# drift between them.
+pinned_cc=$(sed -n 's/.*"@anthropic-ai\/claude-code"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+	e2e/sandbox-claude/package.json 2>/dev/null | head -1)
 if [[ -z $pinned_cc ]]; then
-	report "claude-code" CLAUDE_CODE_STATUS unknown "no ARG CLAUDE_CODE_VERSION in ${DOCKERFILE}"
+	report "claude-code" CLAUDE_CODE_STATUS unknown "no @anthropic-ai/claude-code pin in e2e/sandbox-claude/package.json"
 elif live_cc=$(curl -fsSL --max-time 20 https://registry.npmjs.org/@anthropic-ai/claude-code/latest 2>/dev/null |
 	sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1) && [[ -n $live_cc ]]; then
 	if [[ $pinned_cc == "$live_cc" ]]; then
