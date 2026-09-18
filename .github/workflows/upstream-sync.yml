@@ -72,6 +72,10 @@ jobs:
       # Emitted whether or not a pin is in place, so the PR body can say what
       # version is being tracked -- not just that nothing is pinned.
       latest_upstream_tag: ${{ steps.pin.outputs.latest_upstream_tag }}
+      # Set when upstream removes `inference.local` and the managed inference
+      # router. Feeds the verdict so a PR opens even though the proto contract
+      # and image digests look unchanged.
+      inference_local_removed: ${{ steps.inflocal.outputs.removed }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -168,11 +172,31 @@ jobs:
           latest_upstream_tag=$(sed -n 's/^LATEST_UPSTREAM_TAG: //p' /tmp/pin-status.txt | tail -1)
           echo "latest_upstream_tag=${latest_upstream_tag}" >> "$GITHUB_OUTPUT"
 
+      # An architectural change behind an UNCHANGED wire contract: neither
+      # check-proto-drift.sh nor the image digests would notice it.
+      - name: Check whether upstream still ships inference.local
+        id: inflocal
+        shell: bash
+        run: |
+          ./scripts/check-inference-local.sh | tee /tmp/inference-local.txt
+
+          {
+            echo "### Managed inference router"
+            echo
+            echo '```'
+            grep -vE '^[A-Z_]+: ' /tmp/inference-local.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          removed=$(sed -n 's/^INFERENCE_LOCAL_REMOVED: //p' /tmp/inference-local.txt | tail -1)
+          echo "removed=${removed:-false}" >> "$GITHUB_OUTPUT"
+
       - name: Verdict
         id: verdict
         env:
           DRIFT_BEHIND: ${{ steps.drift.outputs.behind }}
           IMAGES_STALE: ${{ steps.images.outputs.stale }}
+          INFERENCE_LOCAL_REMOVED: ${{ steps.inflocal.outputs.removed }}
         run: |
           changed=false
           summary=""
@@ -183,6 +207,10 @@ jobs:
           if [[ "$IMAGES_STALE" == "true" ]]; then
             changed=true
             summary="${summary}pinned image digests stale; "
+          fi
+          if [[ "$INFERENCE_LOCAL_REMOVED" == "true" ]]; then
+            changed=true
+            summary="${summary}upstream removed inference.local (architecture change; see the job summary); "
           fi
           [[ -z $summary ]] && summary="no upstream movement"
           echo "changed=$changed" >> "$GITHUB_OUTPUT"
