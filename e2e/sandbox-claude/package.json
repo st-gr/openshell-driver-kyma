@@ -4,6 +4,6 @@
   "private": true,
   "description": "Pins the claude-code version baked into ghcr.io/st-gr/sandbox-claude. Exists so dependabot's npm ecosystem can manage the pin; the Dockerfile reads the version from here. Not published, not installed as a package.",
   "dependencies": {
-    "@anthropic-ai/claude-code": "2.1.270"
+    "@anthropic-ai/claude-code": "2.1.278"
   }
 }
