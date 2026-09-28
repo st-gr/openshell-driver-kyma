@@ -273,7 +273,19 @@ spec:
             {{- end }}
             {{- if .Values.gateway.sandboxJwt.enabled }}
             - name: gateway-config
-              mountPath: /etc/openshell
+              # subPath, so the file lands as a REGULAR FILE. A plain ConfigMap
+              # directory mount materialises each key as a symlink into ..data/,
+              # and upstream v0.1.2 rejects that:
+              #
+              #   gateway config path '/etc/openshell/gateway.toml' is not a
+              #   regular file
+              #
+              # The trade-off is that subPath mounts do not receive ConfigMap
+              # updates in place. That costs nothing here: the pod template
+              # carries checksum/values, so any change to the rendered config
+              # rolls the pod anyway.
+              mountPath: /etc/openshell/gateway.toml
+              subPath: gateway.toml
               readOnly: true
             - name: sandbox-jwt
               mountPath: /etc/openshell-jwt
