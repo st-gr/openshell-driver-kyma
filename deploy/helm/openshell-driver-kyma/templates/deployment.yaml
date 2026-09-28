@@ -146,6 +146,12 @@ spec:
           imagePullPolicy: {{ .Values.gateway.image.pullPolicy }}
           # The gateway has no `run` subcommand; the default action is to
           # run the server. Listing flags directly under args is correct.
+          env:
+            # Selects which registered compute driver this gateway uses.
+            # Set as an env var, not a flag, because the flag name differs
+            # across the versions this chart supports (see the note in args).
+            - name: OPENSHELL_DRIVERS
+              value: kyma
           args:
             {{- if .Values.gateway.sandboxJwt.enabled }}
             # Load gateway TOML when sandbox-JWT is enabled. The TOML
@@ -171,8 +177,21 @@ spec:
             - {{ .Values.gateway.healthPort | quote }}
             - --metrics-port
             - {{ .Values.gateway.metricsPort | quote }}
-            - --drivers
-            - kyma
+            # The driver selector moved to the OPENSHELL_DRIVERS env var below
+            # rather than a flag. Upstream v0.1.2 removed `--drivers` — the
+            # gateway rejects it outright ("unexpected argument '--drivers'
+            # found") — replacing it with a singular `--compute-driver`.
+            # v0.0.116 has only `--drivers`.
+            #
+            # OPENSHELL_DRIVERS is the one selector BOTH accept: native at
+            # v0.0.116, and an explicit legacy shim at v0.1.2
+            # (resolve_legacy_driver_selector_env). Using it keeps ONE chart
+            # working across the gateway upgrade instead of forcing chart and
+            # gateway to move in lockstep.
+            #
+            # It is a deprecation shim, so it is a bridge and not a
+            # destination: switch to `--compute-driver kyma` once the
+            # supported gateway floor is v0.1.x.
             - --compute-driver-socket
             - {{ .Values.driver.socket | quote }}
             {{- if .Values.gateway.tls.enabled }}
