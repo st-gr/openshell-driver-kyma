@@ -1823,11 +1823,10 @@ impl SandboxProvisioner for KymaProvisioner {
                     None => continue,
                 };
                 let platform_event = DriverPlatformEvent {
-                    timestamp_ms: core_ev
+                    event_time: core_ev
                         .last_timestamp
                         .as_ref()
-                        .map(|t| t.0.as_millisecond())
-                        .unwrap_or(0),
+                        .map(|t| crate::helpers::jiff_to_prost_timestamp(t.0)),
                     source: "kubernetes".to_string(),
                     r#type: core_ev.type_.clone().unwrap_or_default(),
                     reason: core_ev.reason.clone().unwrap_or_default(),

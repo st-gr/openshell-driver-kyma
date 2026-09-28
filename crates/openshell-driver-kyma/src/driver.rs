@@ -7,15 +7,16 @@ use crate::config::Config;
 use crate::error::DriverError;
 use crate::interfaces::{DriverMetrics, PlatformEnricher, SandboxProvisioner, WatchEvent};
 use computev1::pb::{
-    compute_driver_server::ComputeDriver, CreateSandboxRequest, CreateSandboxResponse,
-    DeleteSandboxRequest, DeleteSandboxResponse, DeleteWorkspaceRequest, DeleteWorkspaceResponse,
-    EnsureWorkspaceRequest, EnsureWorkspaceResponse, GetCapabilitiesRequest,
-    GetCapabilitiesResponse, GetGatewayListenerRequirementsRequest,
-    GetGatewayListenerRequirementsResponse, GetSandboxRequest, GetSandboxResponse,
-    ListSandboxesRequest, ListSandboxesResponse, StartSandboxRequest, StartSandboxResponse,
-    StopSandboxRequest, StopSandboxResponse, ValidateSandboxCreateRequest,
-    ValidateSandboxCreateResponse, WatchSandboxesDeletedEvent, WatchSandboxesEvent,
-    WatchSandboxesPlatformEvent, WatchSandboxesRequest, WatchSandboxesSandboxEvent,
+    compute_driver_server::ComputeDriver, AuthenticateSandboxRequest, AuthenticateSandboxResponse,
+    CpuResourceCapabilities, CreateSandboxRequest, CreateSandboxResponse, DeleteSandboxRequest,
+    DeleteSandboxResponse, DeleteWorkspaceRequest, DeleteWorkspaceResponse, EnsureWorkspaceRequest,
+    EnsureWorkspaceResponse, GetCapabilitiesRequest, GetCapabilitiesResponse, GetSandboxRequest,
+    GetSandboxResponse, GpuResourceCapabilities, ListSandboxesRequest, ListSandboxesResponse,
+    MemoryResourceCapabilities, PeerMetadata, ProtocolVersion, ResourceCapabilities,
+    StartSandboxRequest, StartSandboxResponse, StopSandboxRequest, StopSandboxResponse,
+    ValidateSandboxCreateRequest, ValidateSandboxCreateResponse, WatchSandboxesDeletedEvent,
+    WatchSandboxesEvent, WatchSandboxesPlatformEvent, WatchSandboxesRequest,
+    WatchSandboxesSandboxEvent,
 };
 use futures::Stream;
 use std::pin::Pin;
@@ -62,8 +63,26 @@ impl Driver {
 impl ComputeDriver for Driver {
     async fn get_capabilities(
         &self,
-        _req: Request<GetCapabilitiesRequest>,
+        req: Request<GetCapabilitiesRequest>,
     ) -> Result<Response<GetCapabilitiesResponse>, Status> {
+        // Added upstream in v0.1.2: the gateway may declare protocol
+        // capabilities it requires the driver to support via
+        // `gateway.required_capabilities`. This driver advertises no
+        // optional extension capabilities of its own (see `extension` and
+        // `resource_admission_policy` below), so it cannot satisfy a
+        // nonempty requirement list. `GetCapabilitiesRequest.gateway`'s own
+        // field comment says drivers "must reject unmet requirements", so
+        // reject rather than silently proceed and let a real gap surface
+        // later as a confusing runtime failure.
+        if let Some(gateway) = req.into_inner().gateway {
+            if !gateway.required_capabilities.is_empty() {
+                return Err(Status::failed_precondition(format!(
+                    "kyma driver does not support required gateway capabilities: {:?}",
+                    gateway.required_capabilities
+                )));
+            }
+        }
+
         // `supports_gpu` (field 4) was reserved upstream in v0.0.91 — the
         // gateway no longer learns GPU capability from capabilities. A GPU
         // request is now rejected at ValidateSandboxCreate instead, which
@@ -83,29 +102,91 @@ impl ComputeDriver for Driver {
             // regardless of either process restarting — so there is
             // nothing for the gateway to bracket here.
             gateway_manages_lifecycle: false,
+            // Added upstream in v0.1.2 alongside `AuthenticateSandbox`. This
+            // driver never issues a driver-native bootstrap credential —
+            // sandboxes authenticate to the gateway via a projected
+            // Kubernetes ServiceAccount token instead (see
+            // `DriverSandboxSpec.sandbox_token`'s field comment upstream:
+            // "the Kubernetes driver ignores this field and relies on its
+            // projected ServiceAccount token bootstrap instead"). See
+            // `authenticate_sandbox` below.
+            supports_sandbox_authentication: false,
+            // The gateway already waits for the standard OpenShell
+            // supervisor session on top of this driver's own platform-ready
+            // observation (Sandbox CR conditions via `WatchSandboxes`); this
+            // driver does not additionally self-report runtime readiness.
+            driver_reports_runtime_readiness: false,
+            // Reflects behavior already implemented and tested in
+            // `helpers::build_resources` (turns `cpu_limit`/`memory_limit`
+            // into Kubernetes container resource limits) and
+            // `helpers::effective_gpu_count` (accepts a GPU request with or
+            // without an explicit count).
+            resource_capabilities: Some(ResourceCapabilities {
+                cpu: Some(CpuResourceCapabilities {
+                    limit_supported: true,
+                }),
+                memory: Some(MemoryResourceCapabilities {
+                    limit_supported: true,
+                }),
+                gpu: Some(GpuResourceCapabilities {
+                    default_selection_supported: true,
+                    count_selection_supported: true,
+                }),
+            }),
+            // This driver does not support provisioning a sandbox from a
+            // staged rootfs tar file; zero means "unsupported" per the
+            // field's own doc comment.
+            rootfs_tar_staging_dir: String::new(),
+            rootfs_tar_max_bytes: 0,
+            // TODO(upstream v0.1.2): `extension` is a new peer
+            // protocol-identity/version-negotiation scheme
+            // (openshell.extension.v1.PeerMetadata) with no precedent
+            // elsewhere in this driver and no upstream Kubernetes driver
+            // source vendored here to confirm conventions against. major/
+            // minor 1.0 and an empty capability list are a conservative
+            // self-identification (advertise nothing, require nothing), not
+            // a value verified against a real gateway — revisit if interop
+            // smoke against a v0.1.2+ gateway surfaces a mismatch.
+            extension: Some(PeerMetadata {
+                protocol_version: Some(ProtocolVersion { major: 1, minor: 0 }),
+                implementation_name: "openshell/kyma".to_string(),
+                implementation_version: env!("CARGO_PKG_VERSION").to_string(),
+                supported_capabilities: Vec::new(),
+                required_capabilities: Vec::new(),
+            }),
+            // TODO(upstream v0.1.2): this driver does not yet implement the
+            // new operator admission/policy negotiation system
+            // (`DriverSandboxSpec.policy`, `WorkloadIdentityRequest`,
+            // `DriverFenceEvidence`, `resolved_identity`, `fence_evidence`,
+            // etc. on compute_driver.proto). Empty is the documented
+            // "legacy driver" value for this field; gateways that enforce
+            // admission policy will need an explicit opt-out configured on
+            // the gateway side until this driver implements the new system.
+            resource_admission_policy: String::new(),
         }))
     }
 
-    /// Added upstream in v0.0.97 so a driver can ask the gateway to bind
-    /// extra listeners. We return none, which is what upstream's own
-    /// Kubernetes driver does.
+    /// Added upstream in v0.1.2, replacing `GetGatewayListenerRequirements`
+    /// (removed from the contract in the same release — see
+    /// `proto/UPSTREAM.lock`). Authenticates a driver-native bootstrap
+    /// credential and returns the sandbox identity it represents.
     ///
-    /// The feature exists for runtimes whose host forwarder terminates on a
-    /// gateway-local address — rootless pasta under the Docker/Podman/VM
-    /// drivers. A Kyma sandbox is a Pod reached over cluster networking, so
-    /// there is no host-side listener to request.
-    ///
-    /// Implementing it explicitly rather than leaving it unimplemented: the
-    /// gateway does tolerate `Unimplemented` here (it maps it to an empty
-    /// list), but relying on that makes "we have no requirements" and "this
-    /// driver predates the RPC" indistinguishable in the gateway's logs.
-    async fn get_gateway_listener_requirements(
+    /// This driver never mints a driver-native bootstrap credential in the
+    /// first place — sandboxes authenticate to the gateway via a projected
+    /// Kubernetes ServiceAccount token instead (see the `get_capabilities`
+    /// comment on `supports_sandbox_authentication`). Since capabilities
+    /// never advertise support, the gateway should never call this RPC
+    /// against this driver; returning `Unimplemented` documents that
+    /// explicitly rather than leaving a "there is no valid credential to
+    /// authenticate" case to look like a driver bug.
+    async fn authenticate_sandbox(
         &self,
-        _req: Request<GetGatewayListenerRequirementsRequest>,
-    ) -> Result<Response<GetGatewayListenerRequirementsResponse>, Status> {
-        Ok(Response::new(GetGatewayListenerRequirementsResponse {
-            requirements: Vec::new(),
-        }))
+        _req: Request<AuthenticateSandboxRequest>,
+    ) -> Result<Response<AuthenticateSandboxResponse>, Status> {
+        Err(Status::unimplemented(
+            "kyma driver does not support driver-native sandbox authentication; \
+             sandboxes bootstrap via a projected ServiceAccount token instead",
+        ))
     }
 
     async fn validate_sandbox_create(
@@ -210,7 +291,14 @@ impl ComputeDriver for Driver {
                     }
                 }
 
-                Ok(Response::new(CreateSandboxResponse {}))
+                // `runtime_identity` is "required when the driver advertises
+                // sandbox authentication support" (see `get_capabilities`);
+                // this driver never sets `supports_sandbox_authentication`,
+                // so an empty string is the correct value here, not a
+                // placeholder for missing behavior.
+                Ok(Response::new(CreateSandboxResponse {
+                    runtime_identity: String::new(),
+                }))
             }
             Err(e) => {
                 self.metrics.sandbox_failed(&name, "create_failed");
@@ -270,7 +358,12 @@ impl ComputeDriver for Driver {
             .start_sandbox(&id)
             .await
             .map_err(Status::from)?;
-        Ok(Response::new(StartSandboxResponse {}))
+        // Same rationale as `CreateSandboxResponse::runtime_identity` above:
+        // this driver never advertises sandbox authentication support, so
+        // it never has a runtime identity to report here.
+        Ok(Response::new(StartSandboxResponse {
+            runtime_identity: String::new(),
+        }))
     }
 
     async fn delete_sandbox(
@@ -278,7 +371,7 @@ impl ComputeDriver for Driver {
         req: Request<DeleteSandboxRequest>,
     ) -> Result<Response<DeleteSandboxResponse>, Status> {
         let inner = req.into_inner();
-        let name = inner.sandbox_name;
+        let name = inner.name;
         let id = inner.sandbox_id;
 
         match self.provisioner.delete(&id).await {
@@ -438,7 +531,7 @@ mod tests {
         let d =
             make_driver_with_mocks(cfg, MockSandboxProvisioner::new(), MockDriverMetrics::new());
         let r = d
-            .get_capabilities(Request::new(GetCapabilitiesRequest {}))
+            .get_capabilities(Request::new(GetCapabilitiesRequest::default()))
             .await
             .unwrap()
             .into_inner();
@@ -463,36 +556,68 @@ mod tests {
             MockDriverMetrics::new(),
         );
         let r = d
-            .get_capabilities(Request::new(GetCapabilitiesRequest {}))
+            .get_capabilities(Request::new(GetCapabilitiesRequest::default()))
             .await
             .unwrap()
             .into_inner();
         assert!(!r.gateway_manages_lifecycle);
     }
 
-    /// A Kyma sandbox is a Pod on cluster networking, so the driver must
-    /// never ask the gateway to open a host-side listener. Asserting empty
-    /// keeps a future change from silently widening the gateway's bind
-    /// surface — the gateway trusts this list enough to act on it.
+    /// This driver never advertises `supports_sandbox_authentication`, so it
+    /// must never claim to satisfy a gateway-required capability either —
+    /// asserting the rejection keeps a future change from silently claiming
+    /// support this driver does not implement.
     #[tokio::test]
-    async fn gateway_listener_requirements_is_empty() {
+    async fn get_capabilities_rejects_unmet_gateway_required_capabilities() {
         let d = make_driver_with_mocks(
             Config::default(),
             MockSandboxProvisioner::new(),
             MockDriverMetrics::new(),
         );
-        let r = d
-            .get_gateway_listener_requirements(Request::new(
-                GetGatewayListenerRequirementsRequest {},
-            ))
+        let s = d
+            .get_capabilities(Request::new(GetCapabilitiesRequest {
+                gateway: Some(PeerMetadata {
+                    required_capabilities: vec!["some.unsupported.capability".into()],
+                    ..Default::default()
+                }),
+            }))
             .await
-            .unwrap()
-            .into_inner();
-        assert!(
-            r.requirements.is_empty(),
-            "kyma driver must not request gateway listeners, got {:?}",
-            r.requirements
+            .unwrap_err();
+        assert_eq!(s.code(), tonic::Code::FailedPrecondition);
+    }
+
+    #[tokio::test]
+    async fn get_capabilities_accepts_gateway_with_no_required_capabilities() {
+        let d = make_driver_with_mocks(
+            Config::default(),
+            MockSandboxProvisioner::new(),
+            MockDriverMetrics::new(),
         );
+        d.get_capabilities(Request::new(GetCapabilitiesRequest {
+            gateway: Some(PeerMetadata::default()),
+        }))
+        .await
+        .unwrap();
+    }
+
+    /// This driver never mints a driver-native bootstrap credential, so
+    /// `AuthenticateSandbox` must never succeed — a future change that
+    /// silently starts accepting arbitrary credentials here would be a
+    /// serious authentication bypass.
+    #[tokio::test]
+    async fn authenticate_sandbox_is_unimplemented() {
+        let d = make_driver_with_mocks(
+            Config::default(),
+            MockSandboxProvisioner::new(),
+            MockDriverMetrics::new(),
+        );
+        let s = d
+            .authenticate_sandbox(Request::new(AuthenticateSandboxRequest {
+                credential: "whatever".into(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(s.code(), tonic::Code::Unimplemented);
     }
 
     /// v0.0.91 reserved `supports_gpu`, so capabilities no longer vary with
@@ -512,7 +637,7 @@ mod tests {
                 MockDriverMetrics::new(),
             );
             responses.push(
-                d.get_capabilities(Request::new(GetCapabilitiesRequest {}))
+                d.get_capabilities(Request::new(GetCapabilitiesRequest::default()))
                     .await
                     .unwrap()
                     .into_inner(),
@@ -632,7 +757,7 @@ mod tests {
         let s = d
             .get_sandbox(Request::new(GetSandboxRequest {
                 sandbox_id: String::new(),
-                sandbox_name: "missing".into(),
+                name: "missing".into(),
             }))
             .await
             .unwrap_err();
@@ -653,7 +778,7 @@ mod tests {
         let r = d
             .get_sandbox(Request::new(GetSandboxRequest {
                 sandbox_id: String::new(),
-                sandbox_name: "found".into(),
+                name: "found".into(),
             }))
             .await
             .unwrap()
@@ -697,7 +822,7 @@ mod tests {
         let r = d
             .delete_sandbox(Request::new(DeleteSandboxRequest {
                 sandbox_id: "id".into(),
-                sandbox_name: "name".into(),
+                name: "name".into(),
             }))
             .await
             .unwrap()
@@ -714,7 +839,7 @@ mod tests {
         let r = d
             .delete_sandbox(Request::new(DeleteSandboxRequest {
                 sandbox_id: "id".into(),
-                sandbox_name: "gone".into(),
+                name: "gone".into(),
             }))
             .await
             .unwrap()
@@ -733,7 +858,7 @@ mod tests {
         let s = d
             .delete_sandbox(Request::new(DeleteSandboxRequest {
                 sandbox_id: "id".into(),
-                sandbox_name: "name".into(),
+                name: "name".into(),
             }))
             .await
             .unwrap_err();
@@ -802,7 +927,10 @@ mod tests {
         tx.send(WatchEvent::Platform {
             sandbox_id: "id-X".into(),
             event: Box::new(computev1::pb::DriverPlatformEvent {
-                timestamp_ms: 1_700_000_000_000,
+                event_time: Some(prost_types::Timestamp {
+                    seconds: 1_700_000_000,
+                    nanos: 0,
+                }),
                 source: "kubernetes".into(),
                 r#type: "Warning".into(),
                 reason: "FailedScheduling".into(),

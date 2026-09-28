@@ -13,11 +13,11 @@
 use async_trait::async_trait;
 use computev1::pb::{
     compute_driver_client::ComputeDriverClient, compute_driver_server::ComputeDriverServer,
-    watch_sandboxes_event::Payload, CreateSandboxRequest, DeleteSandboxRequest,
-    DeleteWorkspaceRequest, DriverSandbox, DriverSandboxSpec, DriverSandboxTemplate,
-    EnsureWorkspaceRequest, GetCapabilitiesRequest, GetGatewayListenerRequirementsRequest,
-    GetSandboxRequest, ListSandboxesRequest, StartSandboxRequest, StopSandboxRequest,
-    ValidateSandboxCreateRequest, WatchSandboxesRequest,
+    watch_sandboxes_event::Payload, AuthenticateSandboxRequest, CreateSandboxRequest,
+    DeleteSandboxRequest, DeleteWorkspaceRequest, DriverSandbox, DriverSandboxSpec,
+    DriverSandboxTemplate, EnsureWorkspaceRequest, GetCapabilitiesRequest, GetSandboxRequest,
+    ListSandboxesRequest, StartSandboxRequest, StopSandboxRequest, ValidateSandboxCreateRequest,
+    WatchSandboxesRequest,
 };
 use mockall::mock;
 use openshell_driver_kyma::{
@@ -195,7 +195,7 @@ async fn grpc_get_capabilities_returns_kyma() {
     .await;
 
     let r = client
-        .get_capabilities(GetCapabilitiesRequest {})
+        .get_capabilities(GetCapabilitiesRequest::default())
         .await
         .unwrap()
         .into_inner();
@@ -213,10 +213,11 @@ async fn grpc_get_capabilities_returns_kyma() {
     let _ = handle.await;
 }
 
-/// Over the real wire, not just the trait: proves a v0.0.97 gateway calling
-/// this RPC gets a valid empty response rather than `Unimplemented`.
+/// Over the real wire, not just the trait: a v0.1.2 gateway calling
+/// `AuthenticateSandbox` against this driver must get a clean `Unimplemented`
+/// status, not a connection error or a silently-accepted forged credential.
 #[tokio::test]
-async fn grpc_gateway_listener_requirements_returns_empty() {
+async fn grpc_authenticate_sandbox_is_unimplemented() {
     let (_dir, socket) = temp_socket();
     let (mut client, shutdown, handle) = start_server(
         socket,
@@ -226,12 +227,13 @@ async fn grpc_gateway_listener_requirements_returns_empty() {
     )
     .await;
 
-    let r = client
-        .get_gateway_listener_requirements(GetGatewayListenerRequirementsRequest {})
+    let err = client
+        .authenticate_sandbox(AuthenticateSandboxRequest {
+            credential: "whatever".into(),
+        })
         .await
-        .expect("RPC must be implemented, not Unimplemented")
-        .into_inner();
-    assert!(r.requirements.is_empty());
+        .expect_err("kyma driver must not accept driver-native credentials");
+    assert_eq!(err.code(), tonic::Code::Unimplemented);
 
     drop(shutdown);
     let _ = handle.await;
@@ -264,7 +266,7 @@ async fn grpc_create_then_get_round_trips() {
     let got = client
         .get_sandbox(GetSandboxRequest {
             sandbox_id: "sb-id-1".into(),
-            sandbox_name: "sb-1".into(),
+            name: "sb-1".into(),
         })
         .await
         .unwrap()
@@ -310,7 +312,7 @@ async fn grpc_delete_idempotent_returns_false_on_not_found() {
     let r = client
         .delete_sandbox(DeleteSandboxRequest {
             sandbox_id: "id".into(),
-            sandbox_name: "gone".into(),
+            name: "gone".into(),
         })
         .await
         .unwrap()
@@ -356,14 +358,15 @@ async fn grpc_stop_and_start_are_implemented() {
     client
         .stop_sandbox(StopSandboxRequest {
             sandbox_id: "sb-1".into(),
-            sandbox_name: "n".into(),
+            name: "n".into(),
         })
         .await
         .expect("stop must be implemented");
     client
         .start_sandbox(StartSandboxRequest {
             sandbox_id: "sb-1".into(),
-            sandbox_name: "n".into(),
+            name: "n".into(),
+            ..Default::default()
         })
         .await
         .expect("start must be implemented");
@@ -394,7 +397,7 @@ async fn grpc_stop_rejects_empty_sandbox_id() {
     let err = client
         .stop_sandbox(StopSandboxRequest {
             sandbox_id: String::new(),
-            sandbox_name: "n".into(),
+            name: "n".into(),
         })
         .await
         .expect_err("empty sandbox_id must be rejected");
@@ -418,7 +421,8 @@ async fn grpc_start_rejects_empty_sandbox_id() {
     let err = client
         .start_sandbox(StartSandboxRequest {
             sandbox_id: String::new(),
-            sandbox_name: "n".into(),
+            name: "n".into(),
+            ..Default::default()
         })
         .await
         .expect_err("empty sandbox_id must be rejected");

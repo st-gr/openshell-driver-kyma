@@ -23,9 +23,18 @@ TAG=${1:-}
 [[ -n $TAG ]] || die "usage: $0 <upstream-tag>   (e.g. $0 v0.0.91)"
 
 # Files to vendor: upstream path -> local path.
+#
+# extension.proto, sandbox.proto, and datamodel.proto joined this list in the
+# v0.1.2 sync: compute_driver.proto started importing extension.proto
+# (PeerMetadata) and sandbox.proto (SandboxPolicy) directly, and sandbox.proto
+# in turn imports datamodel.proto. All three are transitive dependencies of
+# the ComputeDriver contract now, not just compute_driver.proto/options.proto.
 FILES=(
 	"proto/compute_driver.proto:proto/compute_driver.proto"
 	"proto/options.proto:proto/options.proto"
+	"proto/extension.proto:proto/extension.proto"
+	"proto/sandbox.proto:proto/sandbox.proto"
+	"proto/datamodel.proto:proto/datamodel.proto"
 )
 
 command -v python3 >/dev/null 2>&1 || die "python3 is required to parse the GitHub API response"
