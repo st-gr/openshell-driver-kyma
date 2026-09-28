@@ -36,6 +36,8 @@
 #                               binary, so the smokes cannot install one --
 #                               the pin stays regardless of images
 #   PIN_STILL_JUSTIFIED: true  a newer tag exists but its images do not yet
+#   PIN_BLOCKED_BY             set when the pin is held by work, not by missing
+#                               artifacts -- suppresses the evaporation verdict
 #   LATEST_UPSTREAM_TAG        the newest upstream tag, emitted whether or not
 #                               a pin is in place -- so "what would we move to?"
 #                               is answerable from the summary without a pin
@@ -57,6 +59,7 @@ fi
 GATEWAY_REF=$(sed -n 's/^GATEWAY_REF=//p' "$KNOB" | tail -1 | tr -d '[:space:]')
 PIN_REASON=$(sed -n 's/^PIN_REASON=//p' "$KNOB" | tail -1)
 PIN_REVIEW_AFTER=$(sed -n 's/^PIN_REVIEW_AFTER=//p' "$KNOB" | tail -1 | tr -d '[:space:]')
+PIN_BLOCKED_BY=$(sed -n 's/^PIN_BLOCKED_BY=//p' "$KNOB" | tail -1)
 
 if [[ -z $GATEWAY_REF || $GATEWAY_REF == latest ]]; then
 	printf 'Not pinned: GATEWAY_REF=latest. Nothing to review.\n'
@@ -119,6 +122,18 @@ if [[ $newest != "$latest" ]]; then
 	printf 'Pin (%s) is at or ahead of the latest upstream tag (%s); nothing further to check.\n' \
 		"$GATEWAY_REF" "$latest"
 	printf 'PIN_CHECK: up-to-date\n'
+	exit 0
+fi
+
+# A pin held by migration work is not waiting on artifacts, so the images and
+# CLI questions below cannot answer it. Report and stop rather than advising an
+# unpin straight back into the breakage.
+if [[ -n $PIN_BLOCKED_BY ]]; then
+	printf 'Upstream has moved to %s, but this pin is held by work, not by missing\n' "$latest"
+	printf 'artifacts: %s\n' "$PIN_BLOCKED_BY"
+	printf 'Not checking image or CLI availability -- they cannot answer this.\n'
+	printf 'PIN_BLOCKED_BY: %s\n' "$PIN_BLOCKED_BY"
+	printf 'PIN_STILL_JUSTIFIED: true\n'
 	exit 0
 fi
 
