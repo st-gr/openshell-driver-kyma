@@ -58,10 +58,12 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v7
         with:
-          # This is a Rust repo: there is no uv.lock or requirements*.txt
-          # for setup-uv to key a cache on, so the cache would never be
-          # invalidated. We install exactly one pinned package
-          # (openshell==<resolved version>), so caching buys nothing.
+          # Nothing is installed with uv any more: the openshell CLI comes
+          # from upstream's release tarball (scripts/interop-smoke.sh). The
+          # step remains because that script's header lists uv among its
+          # assumptions. This is a Rust repo: there is no uv.lock or
+          # requirements*.txt for setup-uv to key a cache on, so a cache
+          # would never be invalidated.
           enable-cache: false
 
       - name: Create kind cluster

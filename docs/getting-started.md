@@ -64,6 +64,13 @@ cp deploy/helm/openshell-driver-kyma/values.example.yaml my-values.yaml
 ${EDITOR:-vi} my-values.yaml      # plug in your upstream URL, secret name, OIDC issuer
 ```
 
+If you add an OIDC issuer (`gateway.oidc.issuer`) to the example file, also
+turn `inferenceProvider.enabled` off: the chart refuses to render the two
+together, because the provider hook calls the gateway without a token, which a
+gateway with OIDC refuses. Register the profile and provider yourself from an
+authenticated CLI session instead; the OIDC path, values overlay and step 3b
+are in [`production-deployment.md`](production-deployment.md).
+
 Then install:
 
 ```bash

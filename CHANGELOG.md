@@ -36,8 +36,8 @@ upgrade. To upgrade from 0.8.0 with only this section in front of you:
    `driver.managedSshIngress.enabled: false` if managed mode must not get the
    SSH ingress policy. With `gateway.enabled`, also set
    `gatewayService.enabled` and `gateway.sandboxJwt.enabled`, and leave
-   `inferenceProvider.enabled` off when `gateway.oidc.issuer` is set: the
-   chart now refuses those settings.
+   `inferenceProvider.enabled` off when `gateway.oidc.issuer` or
+   `gateway.tls.enabled` is set: the chart now refuses those settings.
 4. `helm upgrade <release> <chart> -f my-values.yaml`. Pass the values file
    again; do not use `--reuse-values`, which keeps the 0.8.0 chart's defaults
    and ignores the new ones. The chart refuses to render, naming the value,
@@ -96,7 +96,9 @@ upgrade. To upgrade from 0.8.0 with only this section in front of you:
   operator mode without exactly one of the namespace label and the ConfigMap),
   a sandbox UID or GID outside 1 to 4294967294, a non-boolean
   `driver.allowDriverConfig` or `driver.resourceAdmission.enabled`, a
-  `driver.resourceAdmission.requiredLabels` that is not a map, a malformed
+  `driver.resourceAdmission.requiredLabels` that is not a map or is empty while
+  `driver.resourceAdmission.enabled` is true (upstream refuses an empty label
+  set at startup, `openshell-core` `src/resource_admission.rs:136`), a malformed
   `driver.sandboxEnv` entry, an
   invalid `inferenceProvider` (a type other than `anthropic`; a `baseUrl` that
   is not an http(s) URL to a host name, that carries credentials or contains a
@@ -134,8 +136,9 @@ upgrade. To upgrade from 0.8.0 with only this section in front of you:
   bootstrap without the gateway's sandbox-JWT keys), and `inferenceProvider.enabled`
   without the gateway's Service or together with `gateway.oidc.issuer` (the
   provider hook calls the gateway without a token, which an OIDC gateway
-  refuses; register the provider from an authenticated CLI instead, see
-  `docs/production-deployment.md`).
+  refuses) or with `gateway.tls.enabled` (the hook always dials `http://` and
+  presents no client certificate); register the provider from an
+  authenticated CLI instead, see `docs/production-deployment.md`.
 - **APIRule host is `<workspace>--<name>.<clusterDomain>` in every workspace
   mode.** It was the Sandbox CR name, which collided across workspaces in
   managed mode. Exposure also works with agent-sandbox controllers that serve
@@ -289,6 +292,8 @@ upgrade. To upgrade from 0.8.0 with only this section in front of you:
 - The `make e2e-cli` target and `scripts/e2e-cli.sh`, which drove a v0.0.50 CLI
   against the old single-pod topology and ran nowhere; the kind smokes cover
   that path.
+- `scripts/render-static-kubeconfig.js`, a kubeconfig helper nothing in the
+  repository referenced.
 
 ### Known limitations
 
@@ -308,6 +313,14 @@ upgrade. To upgrade from 0.8.0 with only this section in front of you:
 - **`driver.sandboxEnv` values (and `inferenceProvider.baseUrl` and `modelId`)
   cannot contain a comma:** the driver splits the list on commas. Set such a
   variable per sandbox instead.
+- **Gateway TLS (`gateway.tls.enabled`) is not verified end to end.** The PKI
+  hook issues the gateway's server certificate with no SAN for the in-cluster
+  Service name: `gateway-jwt-pki-hook.yaml` passes no `--server-san`, where
+  upstream's certgen passes the Service's DNS names, `127.0.0.1` and any extras
+  (`deploy/helm/openshell/templates/certgen.yaml:109-121` at v0.1.2). Supervisors
+  dialling `https://<fullname>.<namespace>.svc.cluster.local` will likely fail
+  certificate verification. Leave `gateway.tls.enabled` off (the default)
+  unless you have verified it against your supervisors.
 
 ## [0.8.0] — 2026-09-28
 

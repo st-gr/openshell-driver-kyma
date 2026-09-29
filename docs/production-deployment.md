@@ -143,11 +143,13 @@ Who can see and do what:
 | **Supervisor pod** | resolves it, only for requests to the profile's endpoint | yes — upstream gives supervisor pods their own egress policy (allow-all) |
 | **Gateway sidecar** (driver+gateway pod) | yes (the provider record in its DB) | no — it holds the provider and forwards no request bytes |
 
-The key is bound to the endpoint's host and port (the path of
-`inferenceProvider.baseUrl` is not part of the binding). `binaries` in the
-profile (`inferenceProvider.binaries`) gates which processes may reach the
-endpoint; upstream v0.1.2 does not yet restrict the key by calling binary, so
-treat the endpoint as the scope.
+The key is bound to the endpoint's host and port (the path of the endpoint
+URL is not part of the binding: `inferenceProvider.baseUrl` when the chart's
+hook registers the provider, `ANTHROPIC_BASE_URL` on the OIDC path above).
+`binaries` in the profile gates which processes may reach the endpoint
+(`inferenceProvider.binaries` with the hook; the profile you import in step 3b
+on the OIDC path); upstream v0.1.2 does not yet restrict the key by calling
+binary, so treat the endpoint as the scope.
 
 The provider and its profile live in the gateway's DB. That is what
 `gateway.dbPersistence.enabled` provides: without it, every gateway pod
@@ -182,25 +184,12 @@ The pre-install hook will:
 - Refuse to render `gatewayApirule.yaml` if `gateway.oidc.issuer` is
   empty (the chart's `B1` security guard).
 
-## 4. Verify
-
-```bash
-# Pods Ready (driver + gateway sidecar)
-kubectl -n openshell-system get pods
-
-# The gateway accepted the driver
-kubectl -n openshell-system logs deploy/ods-openshell-driver-kyma -c gateway \
-  | grep "Compute driver connected"
-
-# APIRule reconciled
-kubectl -n openshell-system get apirule
-```
-
-Then register the gateway with the `openshell` CLI on a laptop
-(`openshell gateway add https://openshell.<cluster-domain>`);
-the CLI redirects to your OIDC issuer on first use.
-
 ### 3b. Register the inference provider
+
+Once the install has finished (step 4 shows how to check the gateway is up),
+register the gateway with the `openshell` CLI on a laptop
+(`openshell gateway add https://openshell.<cluster-domain>`); the CLI
+redirects to your OIDC issuer on first use.
 
 With OIDC on, the provider is registered from that authenticated CLI session
 (an admin role), with the profile the chart's hook would have imported. Write
@@ -242,6 +231,20 @@ ANTHROPIC_API_KEY='sk-ant-…' openshell provider create \
 ```
 
 Sandboxes are then created with `--provider ods-anthropic`.
+
+## 4. Verify
+
+```bash
+# Pods Ready (driver + gateway sidecar)
+kubectl -n openshell-system get pods
+
+# The gateway accepted the driver
+kubectl -n openshell-system logs deploy/ods-openshell-driver-kyma -c gateway \
+  | grep "Compute driver connected"
+
+# APIRule reconciled
+kubectl -n openshell-system get apirule
+```
 
 ## 5. Operational notes
 
@@ -330,7 +333,10 @@ OIDC, and is documented above.
   OTLP exporter without TLS, so an `https://` endpoint logs an error and exports
   nothing.
 - **`gateway.dbPersistence.enabled=false`**: a gateway restart loses the
-  provider and profile until the next `helm upgrade` re-runs the hook.
+  provider and profile. With the chart's hook (`inferenceProvider.enabled`,
+  no OIDC issuer) the next `helm upgrade` re-runs the hook and re-creates
+  them. The OIDC path has no hook, so nothing does: register them again from
+  an authenticated CLI session (step 3b).
 - **`driver.sandboxEnv` values cannot contain a comma** (the driver splits the
   list on commas), nor can `inferenceProvider.baseUrl` or `modelId`. Set such a
   variable per sandbox instead.
