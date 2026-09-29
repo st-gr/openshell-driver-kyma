@@ -125,8 +125,9 @@ jobs:
         # the first grep of any pipeline would be masked by the second.
         shell: bash
         run: |
-          # values.yaml pins these by digest; drift means upstream published
-          # a newer release than the chart references.
+          # values.yaml pins these by digest; drift means the images of the
+          # target release (VENDOR_TARGET_TAG's, resolved above) are not the
+          # ones the chart references: a newer release, or a re-pushed tag.
           #
           # Anchored to each field's own context rather than a bare
           # `sha256:[0-9a-f]{64} | head -1` — the supervisor digest appears
@@ -213,8 +214,9 @@ jobs:
   # Runs regardless of the detect verdict. It installs the image set main ships
   # (the chart's pins and the CLI of its upstream.version) against today's kind
   # and agent-sandbox controller, so a break no file comparison shows still
-  # surfaces. The pins a sync proposes are tested by its PR's own branch-checks
-  # smokes, which install that PR's values.yaml.
+  # surfaces. The pins a sync proposes are tested by the branch-checks run the
+  # sync job dispatches on its branch, whose smokes install that branch's
+  # values.yaml.
   smoke:
     name: interop vs upstream
     needs: detect
