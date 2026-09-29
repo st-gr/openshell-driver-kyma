@@ -102,15 +102,12 @@ impl ComputeDriver for Driver {
             // regardless of either process restarting — so there is
             // nothing for the gateway to bracket here.
             gateway_manages_lifecycle: false,
-            // Added upstream in v0.1.2 alongside `AuthenticateSandbox`. This
-            // driver never issues a driver-native bootstrap credential —
-            // sandboxes authenticate to the gateway via a projected
-            // Kubernetes ServiceAccount token instead (see
-            // `DriverSandboxSpec.sandbox_token`'s field comment upstream:
-            // "the Kubernetes driver ignores this field and relies on its
-            // projected ServiceAccount token bootstrap instead"). See
-            // `authenticate_sandbox` below.
-            supports_sandbox_authentication: false,
+            // This driver verifies the sandbox's projected ServiceAccount
+            // token itself (see `authenticate_sandbox`), so it takes over the
+            // bootstrap check the gateway performed before v0.1.2. Enabling
+            // this obliges create, start, and authenticate to return the same
+            // stable `runtime_identity`; see `sandbox_auth::runtime_identity`.
+            supports_sandbox_authentication: true,
             // The gateway already waits for the standard OpenShell
             // supervisor session on top of this driver's own platform-ready
             // observation (Sandbox CR conditions via `WatchSandboxes`); this
@@ -166,27 +163,27 @@ impl ComputeDriver for Driver {
         }))
     }
 
-    /// Added upstream in v0.1.2, replacing `GetGatewayListenerRequirements`
-    /// (removed from the contract in the same release — see
-    /// `proto/UPSTREAM.lock`). Authenticates a driver-native bootstrap
-    /// credential and returns the sandbox identity it represents.
-    ///
-    /// This driver never mints a driver-native bootstrap credential in the
-    /// first place — sandboxes authenticate to the gateway via a projected
-    /// Kubernetes ServiceAccount token instead (see the `get_capabilities`
-    /// comment on `supports_sandbox_authentication`). Since capabilities
-    /// never advertise support, the gateway should never call this RPC
-    /// against this driver; returning `Unimplemented` documents that
-    /// explicitly rather than leaving a "there is no valid credential to
-    /// authenticate" case to look like a driver bug.
+    /// Added upstream in v0.1.2. The gateway delegates sandbox bootstrap
+    /// authentication here: it hands over the `Bearer` credential a sandbox
+    /// presented on `IssueSandboxToken` and expects the sandbox's identity
+    /// back. This driver verifies the projected ServiceAccount token with a
+    /// Kubernetes TokenReview — the check the gateway itself performed before
+    /// v0.1.2 deleted its in-tree `auth/k8s_sa` authenticator.
     async fn authenticate_sandbox(
         &self,
-        _req: Request<AuthenticateSandboxRequest>,
+        req: Request<AuthenticateSandboxRequest>,
     ) -> Result<Response<AuthenticateSandboxResponse>, Status> {
-        Err(Status::unimplemented(
-            "kyma driver does not support driver-native sandbox authentication; \
-             sandboxes bootstrap via a projected ServiceAccount token instead",
-        ))
+        // The credential is secret-tagged in the proto; it is never logged.
+        let credential = req.into_inner().credential;
+        let (sandbox_id, runtime_identity) = self
+            .provisioner
+            .authenticate_sandbox(&credential)
+            .await
+            .map_err(Status::from)?;
+        Ok(Response::new(AuthenticateSandboxResponse {
+            sandbox_id,
+            runtime_identity,
+        }))
     }
 
     async fn validate_sandbox_create(
@@ -564,10 +561,9 @@ mod tests {
         assert!(!r.gateway_manages_lifecycle);
     }
 
-    /// This driver never advertises `supports_sandbox_authentication`, so it
-    /// must never claim to satisfy a gateway-required capability either —
-    /// asserting the rejection keeps a future change from silently claiming
-    /// support this driver does not implement.
+    /// Capability names the gateway requires are matched against what this
+    /// driver actually implements — asserting the rejection keeps a future
+    /// change from silently claiming support this driver does not implement.
     #[tokio::test]
     async fn get_capabilities_rejects_unmet_gateway_required_capabilities() {
         let d = make_driver_with_mocks(
@@ -601,24 +597,55 @@ mod tests {
         .unwrap();
     }
 
-    /// This driver never mints a driver-native bootstrap credential, so
-    /// `AuthenticateSandbox` must never succeed — a future change that
-    /// silently starts accepting arbitrary credentials here would be a
-    /// serious authentication bypass.
     #[tokio::test]
-    async fn authenticate_sandbox_is_unimplemented() {
+    async fn authenticate_sandbox_returns_the_identity_from_the_provisioner() {
+        let mut p = MockSandboxProvisioner::new();
+        p.expect_authenticate_sandbox()
+            .returning(|_| Ok(("sb-1".to_string(), "kyma://openshell/cr-uid".to_string())));
+        let d = make_driver_with_mocks(Config::default(), p, MockDriverMetrics::new());
+
+        let resp = d
+            .authenticate_sandbox(Request::new(AuthenticateSandboxRequest {
+                credential: "a-token".into(),
+            }))
+            .await
+            .expect("authentication should succeed")
+            .into_inner();
+
+        assert_eq!(resp.sandbox_id, "sb-1");
+        assert_eq!(resp.runtime_identity, "kyma://openshell/cr-uid");
+    }
+
+    #[tokio::test]
+    async fn authenticate_sandbox_propagates_rejection_codes() {
+        let mut p = MockSandboxProvisioner::new();
+        p.expect_authenticate_sandbox()
+            .returning(|_| Err(DriverError::Unauthenticated("nope".into())));
+        let d = make_driver_with_mocks(Config::default(), p, MockDriverMetrics::new());
+
+        let err = d
+            .authenticate_sandbox(Request::new(AuthenticateSandboxRequest {
+                credential: "a-token".into(),
+            }))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn capabilities_advertise_sandbox_authentication() {
         let d = make_driver_with_mocks(
             Config::default(),
             MockSandboxProvisioner::new(),
             MockDriverMetrics::new(),
         );
-        let s = d
-            .authenticate_sandbox(Request::new(AuthenticateSandboxRequest {
-                credential: "whatever".into(),
-            }))
+        let caps = d
+            .get_capabilities(Request::new(GetCapabilitiesRequest::default()))
             .await
-            .unwrap_err();
-        assert_eq!(s.code(), tonic::Code::Unimplemented);
+            .expect("capabilities")
+            .into_inner();
+        assert!(caps.supports_sandbox_authentication);
     }
 
     /// v0.0.91 reserved `supports_gpu`, so capabilities no longer vary with

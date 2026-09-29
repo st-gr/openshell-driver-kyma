@@ -219,26 +219,24 @@ async fn grpc_get_capabilities_returns_kyma() {
 }
 
 /// Over the real wire, not just the trait: a v0.1.2 gateway calling
-/// `AuthenticateSandbox` against this driver must get a clean `Unimplemented`
-/// status, not a connection error or a silently-accepted forged credential.
+/// `AuthenticateSandbox` gets the provisioner's rejection back as its gRPC
+/// status code, not a connection error or a silently-accepted credential.
 #[tokio::test]
-async fn grpc_authenticate_sandbox_is_unimplemented() {
+async fn grpc_authenticate_sandbox_propagates_rejection() {
     let (_dir, socket) = temp_socket();
-    let (mut client, shutdown, handle) = start_server(
-        socket,
-        MockProvisioner::new(),
-        MockEnricher::new(),
-        MockMetrics::new(),
-    )
-    .await;
+    let mut p = MockProvisioner::new();
+    p.expect_authenticate_sandbox()
+        .returning(|_| Err(DriverError::Unauthenticated("nope".into())));
+    let (mut client, shutdown, handle) =
+        start_server(socket, p, MockEnricher::new(), MockMetrics::new()).await;
 
     let err = client
         .authenticate_sandbox(AuthenticateSandboxRequest {
             credential: "whatever".into(),
         })
         .await
-        .expect_err("kyma driver must not accept driver-native credentials");
-    assert_eq!(err.code(), tonic::Code::Unimplemented);
+        .expect_err("a rejected credential must not authenticate");
+    assert_eq!(err.code(), tonic::Code::Unauthenticated);
 
     drop(shutdown);
     let _ = handle.await;
