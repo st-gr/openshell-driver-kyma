@@ -8,31 +8,21 @@
 # real gateway image and exercising the handshake.
 #
 # Assumes: a working kubectl context (a throwaway kind cluster), helm, and uv.
-# Required env: GATEWAY_IMAGE, SUPERVISOR_IMAGE, CLI_VERSION, DRIVER_IMAGE
+# Required env: GATEWAY_IMAGE, SUPERVISOR_IMAGE, SANDBOX_RUNTIME_IMAGE,
+#               CLI_VERSION, DRIVER_IMAGE
 #
-# Deliberately stops at "Sandbox CR created", NOT "pod Ready". Reaching Ready
-# needs the supervisor running privileged with SYS_ADMIN and netns setup
-# inside kind-in-Docker; that is the fragile part, and a weekly job that cries
-# wolf gets ignored.
+# Follows one sandbox through its whole life: CR created, supervisor and
+# workload pods Ready, bootstrap complete (the gateway reports Ready), the
+# Kyma enrichment on the workload pod, and a stop/start round-trip. It installs
+# the real agent-sandbox controller for that. An earlier version installed only
+# the CRD and stopped at "Sandbox CR created"; no sandbox could start, and a
+# release shipped with sandboxes that could not run while this stayed green.
 
 set -euo pipefail
 
 NS=openshell-system
 RELEASE=ods
 SB=smoke-$$
-# Pinned to a COMMIT, not a branch. This file lives in someone else's
-# repository, and tracking its `main` meant an unrelated upstream merge
-# could break this repo's CI with no commit of our own -- which is exactly
-# what happened on 2026-08-31: kubernetes-sigs/agent-sandbox#1470
-# ("Merge feature/drop-v1alpha1 with main", 2026-08-28) removed the
-# v1alpha1 version this driver requests, and every sandbox create started
-# failing with "404 page not found" on the initial object list.
-#
-#  (2026-07-17) is deliberately chosen: it serves BOTH
-# v1alpha1 and v1beta1, so it keeps CI green today AND lets the
-# v1beta1 migration land as a pure code change without moving this pin.
-# Bump it forward once this driver no longer asks for v1alpha1.
-CRD_URL="https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/6827cdb60bdfc0efdbaad5579b39786d7fa667c6/k8s/crds/agents.x-k8s.io_sandboxes.yaml"
 
 log()  { printf '\n=== %s\n' "$*"; }
 fail() { printf '\nFAIL: %s\n' "$*" >&2; dump_diagnostics; exit 1; }
@@ -44,35 +34,45 @@ dump_diagnostics() {
 	kubectl -n "$NS" logs "deploy/${RELEASE}-openshell-driver-kyma" -c driver --tail=50 2>&1 >&2 || true
 	printf '\n--- gateway log ---\n' >&2
 	kubectl -n "$NS" logs "deploy/${RELEASE}-openshell-driver-kyma" -c gateway --tail=50 2>&1 >&2 || true
+	printf '\n--- agent-sandbox controller log ---\n' >&2
+	kubectl -n agent-sandbox-system logs deploy/agent-sandbox-controller --tail=50 2>&1 >&2 || true
+	printf '\n--- events ---\n' >&2
+	kubectl -n "$NS" get events --sort-by=.lastTimestamp 2>&1 | tail -30 >&2 || true
 }
 
-for v in GATEWAY_IMAGE SUPERVISOR_IMAGE CLI_VERSION DRIVER_IMAGE; do
+for v in GATEWAY_IMAGE SUPERVISOR_IMAGE SANDBOX_RUNTIME_IMAGE CLI_VERSION DRIVER_IMAGE; do
 	[[ -n ${!v:-} ]] || { echo "error: $v is required" >&2; exit 1; }
 done
 
-log "installing the agent-sandbox CRD"
-# The chart's pre-install-crd-check Job aborts the install without this.
-# Strip the conversion webhook BEFORE applying.
-#
-# Upstream ships the CRD with `conversion.strategy: Webhook` pointing at
-# `agent-sandbox-webhook-service` in `agent-sandbox-system` — part of the
-# full agent-sandbox controller install, which we deliberately do NOT deploy.
-# Without that service the API server rejects every Sandbox create with a
-# 500 "conversion webhook ... service not found", before the driver is even
-# involved.
-#
-# Installing the whole controller to satisfy it would add a large moving part
-# for no coverage: this smoke stops at "CR created" on purpose and never needs
-# the controller to reconcile a pod. Removing the block entirely makes the API
-# server default to strategy None and store the submitted version as-is.
-#
-# Deleting the whole `spec.conversion` key rather than patching
-# `strategy: None` onto the applied CRD: that patch leaves `webhook` behind,
-# and the API server rejects it with "should not be set when strategy is not
-# set to Webhook". Verified `del(.spec.conversion)` leaves both served
-# versions (v1beta1, v1alpha1) intact.
-curl -fsSL "$CRD_URL" | yq 'del(.spec.conversion)' | kubectl apply -f - \
-	|| fail "could not install the agent-sandbox CRD"
+# The agent-sandbox controller turns Sandbox CRs into pods. Without it no
+# sandbox ever starts, which is how v0.8.0 shipped with sandboxes that could
+# not run while this smoke stayed green. Pinned by release and by hash.
+AGENT_SANDBOX_VERSION=v0.5.2
+AGENT_SANDBOX_SHA256=230ee446d6035f631577e1c6b857f6973a8f09a0a853675d3cc34ebfe47abd6b
+log "installing agent-sandbox ${AGENT_SANDBOX_VERSION} (CRD + controller)"
+curl -fsSL -o /tmp/agent-sandbox.yaml \
+	"https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${AGENT_SANDBOX_VERSION}/sandbox.yaml" \
+	|| fail "could not download agent-sandbox ${AGENT_SANDBOX_VERSION}"
+echo "${AGENT_SANDBOX_SHA256}  /tmp/agent-sandbox.yaml" | sha256sum -c - >/dev/null \
+	|| fail "agent-sandbox manifest does not match the pinned sha256"
+kubectl apply -f /tmp/agent-sandbox.yaml || fail "could not install agent-sandbox"
+kubectl -n agent-sandbox-system rollout status deploy/agent-sandbox-controller --timeout=3m \
+	|| fail "the agent-sandbox controller never became ready"
+# The CRD converts between its two versions through a webhook served by the
+# controller, whose CA the controller patches into the CRD at startup (tls.go
+# patchCRDs). The Deployment has no readiness probe, so `rollout status`
+# returns when the container starts, possibly before that patch has landed;
+# until it has, a Sandbox create that needs conversion fails on TLS. Wait for
+# the CA rather than trusting the time the helm install takes.
+crd_ca() {
+	kubectl get crd sandboxes.agents.x-k8s.io \
+		-o jsonpath='{.spec.conversion.webhook.clientConfig.caBundle}' 2>/dev/null
+}
+for _ in $(seq 1 60); do
+	[[ -n $(crd_ca) ]] && break
+	sleep 2
+done
+[[ -n $(crd_ca) ]] || fail "the agent-sandbox controller never published its conversion webhook CA"
 
 log "creating namespace with PSA privileged"
 # The driver refuses to start without this label; it is a real precondition,
@@ -95,6 +95,7 @@ helm install "$RELEASE" deploy/helm/openshell-driver-kyma \
 	--set gatewayService.enabled=true \
 	--set gateway.sandboxJwt.enabled=true \
 	--set driver.supervisorImage="$SUPERVISOR_IMAGE" \
+	--set driver.sandboxRuntimeImage="$SANDBOX_RUNTIME_IMAGE" \
 	--wait --timeout 5m \
 	|| fail "helm install failed"
 # gateway.sandboxJwt.enabled=true is required so supervisors can complete
@@ -226,13 +227,12 @@ kill "$CREATE_PID" 2>/dev/null || true
 [[ $cr == "default--${SB}" ]] || fail "CR name is '${cr}', expected 'default--${SB}'"
 
 labels=$(kubectl -n "$NS" get sandbox "$cr" -o jsonpath='{.metadata.labels}')
+# The labels upstream's driver sets. kagenti.io/type is not one of them: the
+# Kyma enrichment puts it on the sandbox template, so it lands on the workload
+# pod and is asserted there (ASSERT 3d).
 for key in \
 	openshell.ai/sandbox-id \
-	openshell.ai/sandbox-name \
-	openshell.ai/sandbox-namespace \
-	openshell.ai/sandbox-workspace \
-	openshell.ai/managed-by \
-	kagenti.io/type
+	openshell.ai/managed-by
 do
 	grep -q "$key" <<<"$labels" || fail "CR ${cr} is missing label ${key}: ${labels}"
 done
@@ -244,43 +244,95 @@ ${list_out}"
 printf '%s\n' "$list_out"
 grep -q "$SB" <<<"$list_out" || fail "gateway did not list ${SB} by its bare name"
 
-# --- Assertion 3b removed (2026-08-19): cannot pass in this environment --
+# --- Assertions 3c-3e: the sandbox actually runs --------------------------
 #
-# This used to stop/start the sandbox and assert on spec.replicas. It was
-# removed because it can never pass here, and this has nothing to do with
-# this driver's implementation.
+# What this smoke could not check while it installed only the CRD. The
+# controller now turns the CR into pods, so follow the sandbox to Ready, then
+# through a stop/start round-trip.
 #
-# The gateway gates StopSandbox/StartSandbox on the sandbox's own phase
-# (crates/openshell-server/src/compute/mod.rs:1082):
-#
-#   if !matches!(phase, SandboxPhase::Ready | SandboxPhase::Stopping) {
-#       return Err(Status::failed_precondition(format!(
-#           "sandbox must be Ready to stop (current phase: {phase:?})")));
-#   }
-#
-# This smoke deliberately installs only the agent-sandbox CRD and runs no
-# controller (see the CRD install step above: "this smoke stops at 'CR
-# created' on purpose and never needs the controller to reconcile a pod"),
-# so the sandbox's phase never advances to Ready -- there is no controller
-# to reconcile a pod and move it there. `openshell sandbox stop` is
-# rejected by the gateway itself, before the RPC ever reaches this driver
-# (observed: gRPC status 9 / FailedPrecondition, in ~1ms). The exact same
-# gate applies to upstream's own Kubernetes driver, so this is not a parity
-# gap and cannot be fixed by changing this driver.
-#
-# Do not re-add this assertion without also installing a real agent-sandbox
-# controller so a sandbox can actually reach Ready -- which this smoke
-# deliberately does not do; its value is exercising the real gateway path
-# without needing a full agent-sandbox deployment in CI. Driving the
-# driver's StopSandbox/StartSandbox RPC directly, bypassing the gateway,
-# would "fix" this smoke but defeat that value -- don't do that either.
-#
-# Stop/start are instead covered by:
-#   - unit tests: the patch-payload builder (lifecycle.rs) across both CRD
-#     API versions and both directions, and the RPC dispatch/NotFound
-#     handling in provisioner.rs/driver.rs
-#   - a real cluster with a running agent-sandbox controller, where a
-#     sandbox does reach Ready
+# `openshell sandbox list` prints NAME, CREATED ("YYYY-MM-DD HH:MM:SS", two
+# words) and PHASE, one row per sandbox, PHASE last. The phase is spelled
+# Provisioning, Ready, Stopping, Stopped, Starting, Error, Deleting,
+# Completed or Unknown (crates/openshell-cli/src/run.rs sandbox_list and
+# commands/common.rs phase_name at v0.1.2), so `$NF` is the phase. --color
+# never: FORCE_COLOR in the environment would otherwise wrap it in escapes.
+sandbox_phase() {
+	osh sandbox list --color never 2>/dev/null | awk -v n="$1" '$1 == n {print $NF}'
+}
+wait_phase() { # name phase timeout-seconds
+	local deadline=$((SECONDS + $3))
+	while ((SECONDS < deadline)); do
+		[[ $(sandbox_phase "$1") == "$2" ]] && return 0
+		sleep 5
+	done
+	return 1
+}
+wait_phase_not() { # name phase timeout-seconds
+	local deadline=$((SECONDS + $3))
+	while ((SECONDS < deadline)); do
+		local p
+		p=$(sandbox_phase "$1")
+		[[ -n $p && $p != "$2" ]] && return 0
+		sleep 5
+	done
+	return 1
+}
+# `kubectl wait` fails at once when nothing matches yet, and neither pod
+# exists when the CR first appears (the driver creates the supervisor pod
+# after the CR, the controller creates the workload pod once the sandbox is
+# unsuspended). Poll for the pod, then let `kubectl wait` do the waiting.
+wait_pod_exists() { # timeout-seconds kubectl-get-args...
+	local deadline=$((SECONDS + $1))
+	shift
+	while ((SECONDS < deadline)); do
+		[[ -n $(kubectl -n "$NS" get pods "$@" -o name 2>/dev/null) ]] && return 0
+		sleep 3
+	done
+	return 1
+}
+
+log "ASSERT 3c: the sandbox runtime starts and bootstraps"
+sid=$(kubectl -n "$NS" get sandbox "$cr" -o jsonpath='{.metadata.labels.openshell\.ai/sandbox-id}')
+[[ -n $sid ]] || fail "Sandbox ${cr} has no openshell.ai/sandbox-id label"
+pair=${sid,,}
+wait_pod_exists 180 "os-supervisor-${pair}" \
+	|| fail "supervisor pod os-supervisor-${pair} was never created"
+kubectl -n "$NS" wait --for=condition=Ready "pod/os-supervisor-${pair}" --timeout=5m || {
+	kubectl -n "$NS" describe pod "os-supervisor-${pair}" >&2 || true
+	fail "supervisor pod os-supervisor-${pair} never became Ready"
+}
+wait_pod_exists 180 -l "openshell.ai/boundary-pair=${pair},openshell.ai/boundary-role=workload" \
+	|| fail "the workload pod was never created"
+kubectl -n "$NS" wait --for=condition=Ready pod \
+	-l "openshell.ai/boundary-pair=${pair},openshell.ai/boundary-role=workload" --timeout=5m || {
+	kubectl -n "$NS" get pods -l "openshell.ai/boundary-pair=${pair}" -o wide >&2 || true
+	fail "the workload pod never became Ready"
+}
+wait_phase "$SB" Ready 300 || fail "gateway never reported ${SB} Ready: bootstrap did not complete (phase: $(sandbox_phase "$SB"))"
+
+log "ASSERT 3d: Kyma enrichment reached the workload pod"
+wl_labels=$(kubectl -n "$NS" get pod -l "openshell.ai/boundary-pair=${pair},openshell.ai/boundary-role=workload" \
+	-o jsonpath='{.items[0].metadata.labels}')
+grep -q '"sidecar.istio.io/inject":"false"' <<<"$wl_labels" || fail "workload pod lacks sidecar.istio.io/inject=false: ${wl_labels}"
+grep -q '"kagenti.io/type":"agent"' <<<"$wl_labels" || fail "workload pod lacks kagenti.io/type=agent: ${wl_labels}"
+
+# `sandbox stop` returns once the gateway reports Stopped and `sandbox start`
+# once it reports Ready (each waits up to OPENSHELL_LIFECYCLE_TIMEOUT, 300s by
+# default), so the waits below confirm what the CLI already established.
+log "ASSERT 3e: stop and start round-trip"
+osh sandbox stop "$SB" || fail "stop ${SB} failed"
+wait_phase_not "$SB" Ready 180 || fail "${SB} never left Ready after stop"
+osh sandbox start "$SB" || fail "start ${SB} failed"
+wait_phase "$SB" Ready 300 || fail "${SB} did not return to Ready after start (phase: $(sandbox_phase "$SB"))"
+
+# The driver's watch stream used to be asserted here by scraping
+# openshell_driver_watch_events_total from the driver's /metrics. That
+# endpoint is gone (the driver's health port serves only /healthz and
+# /readyz), so the assertion could not pass. 3c and 3e now depend on the
+# stream: the gateway learns a sandbox's phase from the driver's watch stream
+# (watch_loop in openshell-server's compute/mod.rs). It also runs a
+# reconciliation sweep every minute as a fallback, so a stream that delivered
+# nothing would be masked, not caught. No separate assertion covers it.
 
 # --- Assertion 4: nothing errored ----------------------------------------
 #
@@ -290,60 +342,6 @@ grep -q "$SB" <<<"$list_out" || fail "gateway did not list ${SB} by its bare nam
 # crash-restart with no previous logs): grep would just see empty input,
 # return 1, and the branch would be skipped — reporting "no ERRORs" without
 # ever having read a log line. "Could not check" must fail, not pass.
-# --- Assertion 3b: the driver's watch stream really delivered events -------
-#
-# WatchSandboxes was the one RPC with no real-apiserver coverage anywhere in
-# CI. Every other path here goes gateway -> driver -> kube-apiserver, but
-# watch was exercised only by unit tests against a mocked API server, so a
-# behavioural change in kube-runtime's watcher() -- event variants, reconnect
-# handling, bookmark semantics -- would have compiled, passed every test, and
-# broken only in production. That is not hypothetical: the live cluster's
-# driver reports openshell_driver_watch_events_total{event_type="updated"}
-# in the twenties, so this path carries real traffic.
-#
-# Asserting on the counter rather than on a gRPC call keeps this cheap: no
-# grpcurl, no proto, no second client. The counter is incremented only when
-# an event has actually been mapped and forwarded to the gateway
-# (driver.rs::watch_sandboxes), so a non-zero value proves the whole chain
-# ran -- apiserver -> kube-runtime watcher -> provisioner -> gRPC stream.
-#
-# Absence of the metric line is itself the failure signal: the Prometheus
-# client only emits a labelled counter once it has been incremented, so a
-# missing line means no watch event was ever forwarded.
-log "ASSERT 3b: the driver's watch stream delivered events to the gateway"
-kubectl -n "$NS" port-forward "deploy/${RELEASE}-openshell-driver-kyma" 9090:9090 >/tmp/pf-metrics.log 2>&1 &
-PF_METRICS_PID=$!
-trap 'kill "$PF_PID" "$PF_METRICS_PID" 2>/dev/null || true' EXIT
-for i in $(seq 1 20); do
-	if (echo > /dev/tcp/127.0.0.1/9090) >/dev/null 2>&1; then
-		break
-	fi
-	sleep 0.5
-	[[ $i == 20 ]] && fail "metrics port-forward never became ready (see /tmp/pf-metrics.log)"
-done
-
-# The sandbox created above triggers the events, but the watcher is async --
-# poll rather than assuming they have landed by now.
-watch_updated=""
-for _ in $(seq 1 20); do
-	watch_updated=$(curl -fsS --max-time 5 http://127.0.0.1:9090/metrics 2>/dev/null |
-		awk -F' ' '/^openshell_driver_watch_events_total\{event_type="updated"\}/ { print $2; exit }')
-	watch_updated=${watch_updated%%.*}
-	if [[ -n $watch_updated ]] && (( watch_updated >= 1 )); then
-		break
-	fi
-	sleep 3
-done
-
-[[ -n $watch_updated ]] \
-	|| fail "driver exposed no openshell_driver_watch_events_total{event_type=\"updated\"} at all -- the watch path never delivered an event"
-(( watch_updated >= 1 )) \
-	|| fail "driver forwarded ${watch_updated} watch events, expected at least 1"
-log "watch stream delivered ${watch_updated} updated event(s)"
-
-kill "$PF_METRICS_PID" 2>/dev/null || true
-trap 'kill "$PF_PID" 2>/dev/null || true' EXIT
-
 log "ASSERT 4: no ERROR in driver or gateway logs"
 for c in driver gateway; do
 	c_logs=$(kubectl -n "$NS" logs "deploy/${RELEASE}-openshell-driver-kyma" -c "$c" --tail=500 2>&1) \

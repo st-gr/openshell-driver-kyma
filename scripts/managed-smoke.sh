@@ -13,16 +13,18 @@
 # else's. This script closes that gap.
 #
 # Modeled on scripts/interop-smoke.sh: same log/fail helpers, same kind
-# cluster assumptions, same CRD conversion-webhook strip, same osh() CLI
-# wrapper. Installs `--workspace-mode=managed`, where interop-smoke.sh
-# exercises the default `shared` mode instead.
+# cluster assumptions, same pinned agent-sandbox controller install, same
+# osh() CLI wrapper. Installs `--workspace-mode=managed`, where
+# interop-smoke.sh exercises the default `shared` mode instead.
 #
 # Assumes: a working kubectl context (a throwaway kind cluster), helm, and uv.
-# Required env: GATEWAY_IMAGE, SUPERVISOR_IMAGE, CLI_VERSION, DRIVER_IMAGE
+# Required env: GATEWAY_IMAGE, SUPERVISOR_IMAGE, SANDBOX_RUNTIME_IMAGE,
+#               CLI_VERSION, DRIVER_IMAGE
 #
-# Like interop-smoke.sh, this installs only the agent-sandbox CRD, never the
-# controller -- it stops at "CR created" on purpose. No Pod is ever created,
-# so no assertion here waits for one.
+# Like interop-smoke.sh, this runs the real agent-sandbox controller and
+# follows the first sandbox to Ready, through bootstrap and a stop/start
+# round-trip, in the managed namespace. The ownership assertions (M2, M3) then
+# use sandboxes that are only created and deleted.
 
 set -euo pipefail
 
@@ -32,19 +34,6 @@ GATEWAY_ID=smoke
 NS_DEFAULT="openshell-${GATEWAY_ID}-default"
 NS_DECOY="openshell-${GATEWAY_ID}-decoy"
 NS_OWNED="openshell-${GATEWAY_ID}-owned"
-# Pinned to a COMMIT, not a branch. This file lives in someone else's
-# repository, and tracking its `main` meant an unrelated upstream merge
-# could break this repo's CI with no commit of our own -- which is exactly
-# what happened on 2026-08-31: kubernetes-sigs/agent-sandbox#1470
-# ("Merge feature/drop-v1alpha1 with main", 2026-08-28) removed the
-# v1alpha1 version this driver requests, and every sandbox create started
-# failing with "404 page not found" on the initial object list.
-#
-#  (2026-07-17) is deliberately chosen: it serves BOTH
-# v1alpha1 and v1beta1, so it keeps CI green today AND lets the
-# v1beta1 migration land as a pure code change without moving this pin.
-# Bump it forward once this driver no longer asks for v1alpha1.
-CRD_URL="https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/6827cdb60bdfc0efdbaad5579b39786d7fa667c6/k8s/crds/agents.x-k8s.io_sandboxes.yaml"
 # How long to let the gateway's reconciliation sweep catch up before
 # cross-checking Kubernetes directly. Was an inline 40x3s=120s poll, which
 # this smoke outran often enough to fail roughly half its runs.
@@ -62,6 +51,12 @@ dump_diagnostics() {
 	kubectl -n "$NS" logs "deploy/${RELEASE}-openshell-driver-kyma" -c gateway --tail=50 2>&1 >&2 || true
 	printf '\n--- managed namespaces ---\n' >&2
 	kubectl get ns "$NS_DEFAULT" "$NS_DECOY" "$NS_OWNED" -o wide 2>&1 >&2 || true
+	printf '\n--- pods (%s) ---\n' "$NS_DEFAULT" >&2
+	kubectl -n "$NS_DEFAULT" get pods -o wide 2>&1 | head -20 >&2 || true
+	printf '\n--- agent-sandbox controller log ---\n' >&2
+	kubectl -n agent-sandbox-system logs deploy/agent-sandbox-controller --tail=50 2>&1 >&2 || true
+	printf '\n--- events (%s) ---\n' "$NS_DEFAULT" >&2
+	kubectl -n "$NS_DEFAULT" get events --sort-by=.lastTimestamp 2>&1 | tail -30 >&2 || true
 }
 
 # Delete a workspace, tolerating a gateway store that lags Kubernetes.
@@ -111,19 +106,39 @@ workspace_delete_when_ready() {
 	fail "workspace delete ${workspace} was refused for ${STORE_SETTLE_SECS}s because the gateway store still lists ${sandbox}, even though its CR is gone from ${namespace} -- the store never converged"
 }
 
-for v in GATEWAY_IMAGE SUPERVISOR_IMAGE CLI_VERSION DRIVER_IMAGE; do
+for v in GATEWAY_IMAGE SUPERVISOR_IMAGE SANDBOX_RUNTIME_IMAGE CLI_VERSION DRIVER_IMAGE; do
 	[[ -n ${!v:-} ]] || { echo "error: $v is required" >&2; exit 1; }
 done
 
-log "installing the agent-sandbox CRD"
-# Same rationale as interop-smoke.sh: upstream ships the CRD with
-# conversion.strategy: Webhook pointing at a service that only exists as
-# part of the full agent-sandbox controller install, which this smoke
-# deliberately does not deploy. Strip spec.conversion entirely so the API
-# server defaults to strategy None instead of rejecting every Sandbox
-# create with "conversion webhook ... service not found".
-curl -fsSL "$CRD_URL" | yq 'del(.spec.conversion)' | kubectl apply -f - \
-	|| fail "could not install the agent-sandbox CRD"
+# The agent-sandbox controller turns Sandbox CRs into pods. Without it no
+# sandbox ever starts, which is how v0.8.0 shipped with sandboxes that could
+# not run while this smoke stayed green. Pinned by release and by hash.
+AGENT_SANDBOX_VERSION=v0.5.2
+AGENT_SANDBOX_SHA256=230ee446d6035f631577e1c6b857f6973a8f09a0a853675d3cc34ebfe47abd6b
+log "installing agent-sandbox ${AGENT_SANDBOX_VERSION} (CRD + controller)"
+curl -fsSL -o /tmp/agent-sandbox.yaml \
+	"https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${AGENT_SANDBOX_VERSION}/sandbox.yaml" \
+	|| fail "could not download agent-sandbox ${AGENT_SANDBOX_VERSION}"
+echo "${AGENT_SANDBOX_SHA256}  /tmp/agent-sandbox.yaml" | sha256sum -c - >/dev/null \
+	|| fail "agent-sandbox manifest does not match the pinned sha256"
+kubectl apply -f /tmp/agent-sandbox.yaml || fail "could not install agent-sandbox"
+kubectl -n agent-sandbox-system rollout status deploy/agent-sandbox-controller --timeout=3m \
+	|| fail "the agent-sandbox controller never became ready"
+# The CRD converts between its two versions through a webhook served by the
+# controller, whose CA the controller patches into the CRD at startup (tls.go
+# patchCRDs). The Deployment has no readiness probe, so `rollout status`
+# returns when the container starts, possibly before that patch has landed;
+# until it has, a Sandbox create that needs conversion fails on TLS. Wait for
+# the CA rather than trusting the time the helm install takes.
+crd_ca() {
+	kubectl get crd sandboxes.agents.x-k8s.io \
+		-o jsonpath='{.spec.conversion.webhook.clientConfig.caBundle}' 2>/dev/null
+}
+for _ in $(seq 1 60); do
+	[[ -n $(crd_ca) ]] && break
+	sleep 2
+done
+[[ -n $(crd_ca) ]] || fail "the agent-sandbox controller never published its conversion webhook CA"
 
 log "creating the driver/gateway namespace"
 # Unlike interop-smoke.sh's shared-mode namespace, this one does NOT need
@@ -135,10 +150,12 @@ log "creating the driver/gateway namespace"
 kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f -
 
 log "installing the chart in managed mode (gateway ${GATEWAY_IMAGE##*@})"
-# The chart refuses workspaceMode=managed together with the default
-# enableNetworkPolicy=true (main.rs's managed_network_policy_gap guard) --
-# managed-namespace NetworkPolicy support does not exist yet. This is a
-# deliberate gap, not something to work around.
+# The gateway id is gateway.sandboxJwt.gatewayId, shared by the gateway and the
+# driver; in managed mode it becomes part of every namespace name, so keep it
+# short (the chart refuses more than 33 characters).
+#
+# workspacePsaLevel=privileged is a level that always admits, so M-psa tests
+# the labelling mechanism without depending on the level the chart's users pick.
 helm install "$RELEASE" deploy/helm/openshell-driver-kyma \
 	--namespace "$NS" \
 	--set image.repository="${DRIVER_IMAGE%%:*}" \
@@ -150,9 +167,10 @@ helm install "$RELEASE" deploy/helm/openshell-driver-kyma \
 	--set gatewayService.enabled=true \
 	--set gateway.sandboxJwt.enabled=true \
 	--set driver.supervisorImage="$SUPERVISOR_IMAGE" \
+	--set driver.sandboxRuntimeImage="$SANDBOX_RUNTIME_IMAGE" \
 	--set driver.workspaceMode=managed \
-	--set driver.gatewayId="$GATEWAY_ID" \
-	--set driver.enableNetworkPolicy=false \
+	--set gateway.sandboxJwt.gatewayId="$GATEWAY_ID" \
+	--set driver.workspacePsaLevel=privileged \
 	--wait --timeout 5m \
 	|| fail "helm install failed"
 
@@ -205,8 +223,7 @@ osh() { openshell --gateway-endpoint "http://127.0.0.1:8080" "$@"; }
 # --- ASSERT M1: creating a sandbox bootstraps the workspace namespace -----
 #
 # `openshell sandbox create` blocks and does not return even once the
-# sandbox is Ready (see interop-smoke.sh's Assertion 2), and this smoke runs
-# no agent-sandbox controller, so it never will be. Run backgrounded and
+# sandbox is Ready (see interop-smoke.sh's Assertion 2). Run backgrounded and
 # poll kubectl instead of waiting on the CLI to return.
 #
 # The gateway does not call EnsureWorkspace before sandbox create -- at
@@ -246,6 +263,87 @@ kubectl -n "$NS_DEFAULT" get sa openshell-sandbox >/dev/null 2>&1 \
 # implied by the successful lookup above, asserted explicitly for clarity.
 [[ "$(kubectl -n "$NS_DEFAULT" get sandbox m1 -o jsonpath='{.metadata.name}')" == "m1" ]] \
 	|| fail "sandbox CR should be named 'm1' in managed mode"
+
+# --- ASSERT M1b-M1d: the managed sandbox actually runs ---------------------
+#
+# The same lifecycle interop-smoke.sh follows in shared mode (its ASSERT
+# 3c-3e), here for sandbox m1 in its managed namespace: pods Ready, bootstrap
+# complete, Kyma enrichment on the workload pod, stop/start round-trip. See
+# there for why each step is shaped as it is.
+#
+# `openshell sandbox list` prints NAME, CREATED ("YYYY-MM-DD HH:MM:SS", two
+# words) and PHASE, PHASE last, spelled Provisioning, Ready, Stopping,
+# Stopped, Starting, Error, Deleting, Completed or Unknown
+# (openshell-cli run.rs sandbox_list, common.rs phase_name at v0.1.2). --color
+# never: FORCE_COLOR would otherwise wrap the phase in escapes.
+sandbox_phase() {
+	osh sandbox list --color never 2>/dev/null | awk -v n="$1" '$1 == n {print $NF}'
+}
+wait_phase() { # name phase timeout-seconds
+	local deadline=$((SECONDS + $3))
+	while ((SECONDS < deadline)); do
+		[[ $(sandbox_phase "$1") == "$2" ]] && return 0
+		sleep 5
+	done
+	return 1
+}
+wait_phase_not() { # name phase timeout-seconds
+	local deadline=$((SECONDS + $3))
+	while ((SECONDS < deadline)); do
+		local p
+		p=$(sandbox_phase "$1")
+		[[ -n $p && $p != "$2" ]] && return 0
+		sleep 5
+	done
+	return 1
+}
+# `kubectl wait` fails at once when nothing matches yet, and neither pod
+# exists when the CR first appears. Poll for the pod, then wait on it.
+wait_pod_exists() { # timeout-seconds kubectl-get-args...
+	local deadline=$((SECONDS + $1))
+	shift
+	while ((SECONDS < deadline)); do
+		[[ -n $(kubectl -n "$NS_DEFAULT" get pods "$@" -o name 2>/dev/null) ]] && return 0
+		sleep 3
+	done
+	return 1
+}
+
+log "ASSERT M1b: the sandbox runtime starts and bootstraps"
+# Managed mode uses bare names, so the CR name is the sandbox name.
+sid=$(kubectl -n "$NS_DEFAULT" get sandbox "$cr" -o jsonpath='{.metadata.labels.openshell\.ai/sandbox-id}')
+[[ -n $sid ]] || fail "Sandbox ${cr} has no openshell.ai/sandbox-id label"
+pair=${sid,,}
+wait_pod_exists 180 "os-supervisor-${pair}" \
+	|| fail "supervisor pod os-supervisor-${pair} was never created in ${NS_DEFAULT}"
+kubectl -n "$NS_DEFAULT" wait --for=condition=Ready "pod/os-supervisor-${pair}" --timeout=5m || {
+	kubectl -n "$NS_DEFAULT" describe pod "os-supervisor-${pair}" >&2 || true
+	fail "supervisor pod os-supervisor-${pair} never became Ready"
+}
+wait_pod_exists 180 -l "openshell.ai/boundary-pair=${pair},openshell.ai/boundary-role=workload" \
+	|| fail "the workload pod was never created in ${NS_DEFAULT}"
+kubectl -n "$NS_DEFAULT" wait --for=condition=Ready pod \
+	-l "openshell.ai/boundary-pair=${pair},openshell.ai/boundary-role=workload" --timeout=5m || {
+	kubectl -n "$NS_DEFAULT" get pods -l "openshell.ai/boundary-pair=${pair}" -o wide >&2 || true
+	fail "the workload pod never became Ready"
+}
+wait_phase "$cr" Ready 300 || fail "gateway never reported ${cr} Ready: bootstrap did not complete (phase: $(sandbox_phase "$cr"))"
+
+log "ASSERT M1c: Kyma enrichment reached the workload pod"
+wl_labels=$(kubectl -n "$NS_DEFAULT" get pod -l "openshell.ai/boundary-pair=${pair},openshell.ai/boundary-role=workload" \
+	-o jsonpath='{.items[0].metadata.labels}')
+grep -q '"sidecar.istio.io/inject":"false"' <<<"$wl_labels" || fail "workload pod lacks sidecar.istio.io/inject=false: ${wl_labels}"
+grep -q '"kagenti.io/type":"agent"' <<<"$wl_labels" || fail "workload pod lacks kagenti.io/type=agent: ${wl_labels}"
+
+log "ASSERT M1d: stop and start round-trip"
+osh sandbox stop "$cr" || fail "stop ${cr} failed"
+wait_phase_not "$cr" Ready 180 || fail "${cr} never left Ready after stop"
+osh sandbox start "$cr" || fail "start ${cr} failed"
+wait_phase "$cr" Ready 300 || fail "${cr} did not return to Ready after start (phase: $(sandbox_phase "$cr"))"
+
+log "ASSERT M-psa: the managed namespace carries the configured Pod Security level"
+level=$(kubectl get namespace "$NS_DEFAULT" -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce}')
+[[ $level == privileged ]] || fail "managed namespace ${NS_DEFAULT} has enforce='${level}', expected 'privileged'"
 
 # --- ASSERT M2: an UNOWNED namespace of the same shape is NOT deleted -----
 #
