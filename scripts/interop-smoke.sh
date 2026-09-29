@@ -146,9 +146,8 @@ log "port-forwarding the gateway"
 kubectl -n "$NS" port-forward "svc/${RELEASE}-openshell-driver-kyma" 8080:8080 >/tmp/pf.log 2>&1 &
 PF_PID=$!
 trap 'kill "$PF_PID" 2>/dev/null || true' EXIT
-# Poll for the forwarded port instead of a fixed sleep. e2e-cli.sh uses the
-# same /dev/tcp probe; a fixed sleep is exactly the kind of flake-prone guess
-# that made ASSERT 1 unreliable before.
+# Poll for the forwarded port instead of a fixed sleep: a fixed sleep is
+# exactly the kind of flake-prone guess that made ASSERT 1 unreliable before.
 for i in $(seq 1 20); do
 	if (echo > /dev/tcp/127.0.0.1/8080) >/dev/null 2>&1; then
 		log "port-forward is up"
@@ -161,9 +160,9 @@ done
 # The CLI's endpoint env var is OPENSHELL_GATEWAY_ENDPOINT (see
 # docs/install-cli.md) -- OPENSHELL_ENDPOINT is a different variable
 # entirely, the one the DRIVER injects into sandbox pods. Pass
-# --gateway-endpoint explicitly on every call instead of relying on env,
-# matching e2e-cli.sh's osh() helper: it also keeps the test stateless (no
-# $HOME/.config/openshell registration to leak between CI runs).
+# --gateway-endpoint explicitly on every call instead of relying on env: it
+# also keeps the test stateless (no $HOME/.config/openshell registration to
+# leak between CI runs).
 osh() { openshell --gateway-endpoint "http://127.0.0.1:8080" "$@"; }
 # The same, bounded: `timeout` cannot run a shell function.
 osh_within() { local secs=$1; shift; timeout "$secs" openshell --gateway-endpoint "http://127.0.0.1:8080" "$@"; }

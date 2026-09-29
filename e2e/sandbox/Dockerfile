@@ -1,4 +1,4 @@
-# Minimal sandbox base image used by `make e2e-cli`.
+# Minimal sandbox base image, the base of e2e/sandbox-claude.
 #
 # The OpenShell supervisor running inside the sandbox pod requires:
 #   - a `sandbox` user + group (default; configurable via policy.process.run_as_user)
@@ -13,7 +13,7 @@
 # example — avoids host-UID collisions when user namespaces are off.
 #
 # Pin the base by digest so a future ubuntu:24.04 retag can't silently
-# change what `make e2e-cli` builds. Resolve a fresh digest with:
+# change what this builds. Resolve a fresh digest with:
 #   docker buildx imagetools inspect ubuntu:24.04 \
 #     --format '{{json .Manifest.Digest}}'
 

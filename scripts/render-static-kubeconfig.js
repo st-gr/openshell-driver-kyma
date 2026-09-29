@@ -3,8 +3,8 @@
 // `users[].user.exec` entry has been replaced by a static `token`, with
 // the token freshly minted on the host by running the exec auth plugin.
 //
-// Why this exists: `make test-integration` runs cargo inside the dev
-// container, but Kyma kubeconfigs use OIDC via `kubectl-oidc_login`,
+// Why this exists: tools run inside the dev container (`make dev-shell`),
+// but Kyma kubeconfigs use OIDC via `kubectl-oidc_login`,
 // which requires a browser at the first prompt and is not present in
 // the container image. Resolving the exec auth on the host once,
 // then handing the container a static kubeconfig, sidesteps both

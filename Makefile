@@ -13,7 +13,6 @@ IMAGE_NAME ?= openshell-driver-kyma
 IMAGE_TAG ?= dev
 DEV_IMAGE ?= openshell-driver-kyma-dev:latest
 HELM_CHART ?= deploy/helm/openshell-driver-kyma
-INTEGRATION_TEST_NAMESPACE ?=
 
 DOCKER_RUN := MSYS_NO_PATHCONV=1 docker run --rm \
     -v "$(CURDIR):/workspace" \
@@ -114,22 +113,6 @@ build:
 .PHONY: test
 test: fmt-check clippy
 	$(DOCKER_RUN) $(DEV_IMAGE) cargo test --workspace --lib --tests
-
-# End-to-end test: drives the upstream openshell CLI against a deployed
-# driver+gateway pod and asserts a sandbox reaches Ready. Requires the
-# chart to be installed in INTEGRATION_TEST_NAMESPACE with
-# gateway.enabled=true and gatewayService.enabled=true.
-.PHONY: e2e-cli
-e2e-cli:
-ifeq ($(strip $(INTEGRATION_TEST_NAMESPACE)),)
-	$(error INTEGRATION_TEST_NAMESPACE must be set, e.g. INTEGRATION_TEST_NAMESPACE=openshell-driver-test)
-endif
-	mkdir -p .tmp
-	node scripts/render-static-kubeconfig.js > .tmp/kubeconfig
-	$(DOCKER_RUN) -v "$(CURDIR)/.tmp/kubeconfig:/root/.kube/config:ro" \
-		-e INTEGRATION_TEST_NAMESPACE=$(INTEGRATION_TEST_NAMESPACE) \
-		$(DEV_IMAGE) \
-		bash scripts/e2e-cli.sh
 
 .PHONY: coverage
 coverage:
