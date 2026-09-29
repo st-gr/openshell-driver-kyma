@@ -295,7 +295,7 @@ jobs:
 
       - name: Set proto contract target tag
         # PROTO_TARGET_TAG (from detect's vendor_target_tag output, itself
-        # sourced from check-proto-drift.sh) is the CONTRACT tag to
+        # sourced from check-upstream-pin.sh) is the CONTRACT tag to
         # re-vendor to. GATEWAY_TAG (from resolve-upstream-refs.sh, i.e.
         # GATEWAY_REF) is the pinned gateway IMAGE tag. The two can
         # legitimately differ -- see the file header. Passed through env:
@@ -303,7 +303,7 @@ jobs:
         #
         # No fallback to GATEWAY_TAG here on purpose: that fallback is
         # exactly the bug this commit removes. An empty or malformed
-        # VENDOR_TARGET_TAG means check-proto-drift.sh changed shape or
+        # VENDOR_TARGET_TAG means check-upstream-pin.sh changed shape or
         # failed to emit its line -- fail loudly rather than silently
         # re-targeting the vendor at the (possibly wrong) image tag.
         env:
@@ -312,7 +312,7 @@ jobs:
         run: |
           if [[ -z "$VENDOR_TARGET_TAG" ]]; then
             echo "error: detect job did not report a VENDOR_TARGET_TAG." >&2
-            echo "This means check-proto-drift.sh changed shape or failed to" >&2
+            echo "This means check-upstream-pin.sh changed shape or failed to" >&2
             echo "print its 'VENDOR_TARGET_TAG: <tag>' line. Refusing to guess" >&2
             echo "a vendor target -- NOT falling back to GATEWAY_TAG (the" >&2
             echo "gateway image tag), since that is the exact bug this step" >&2
@@ -322,7 +322,7 @@ jobs:
           if [[ ! "$VENDOR_TARGET_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "error: VENDOR_TARGET_TAG ('$VENDOR_TARGET_TAG') is not a" >&2
             echo "well-formed vX.Y.Z tag. Refusing to feed it into" >&2
-            echo "make proto-vendor TAG=<...>." >&2
+            echo "make upstream-bump TAG=<...>." >&2
             exit 1
           fi
           echo "PROTO_TARGET_TAG=$VENDOR_TARGET_TAG" >> "$GITHUB_ENV"
@@ -378,10 +378,34 @@ jobs:
 
             Do all of the following:
 
-            1. Re-vendor the protos with `make proto-vendor TAG=${{ env.PROTO_TARGET_TAG }}`.
-               NEVER hand-edit anything under proto/ — scripts/check-proto-drift.sh
-               exists to catch exactly that, and it will catch you.
-            2. Run `cargo build --workspace --all-targets` and fix every compile
+            1. Move the driver to the new upstream release with
+               `make upstream-bump TAG=${{ env.PROTO_TARGET_TAG }}`. It rewrites the three
+               openshell-* git dependencies, refreshes Cargo.lock, and prints any diff in
+               upstream's option surface. Mirror that diff into
+               crates/openshell-driver-kyma/src/upstream_args.rs exactly — the two guarded
+               blocks must stay byte-identical to upstream (scripts/check-upstream-args.sh).
+            2. Update the chart to the same release: values.yaml `upstream.version`,
+               `driver.supervisorImage` (use $SUPERVISOR_IMAGE), `driver.sandboxRuntimeImage`
+               (use $SANDBOX_RUNTIME_IMAGE) and the gateway image digest (use $GATEWAY_IMAGE).
+            3. Compare upstream's chart and driver config between the old and new tags, and
+               mirror every change into both this chart and scripts/check-chart-render.sh,
+               including the upstream line references in their comments:
+               - deploy/helm/openshell/templates/role.yaml and clusterrole.yaml -> this chart's
+                 role.yaml and clusterrole.yaml, and check 5's rule constants (WORKLOAD,
+                 NODE_READER, NAMESPACE_*, ...), the SHARED/MANAGED/OPERATOR blocks built from
+                 them, and the EXPECTED table;
+               - deploy/helm/openshell/templates/workspace-secret-source-role.yaml and
+                 _helpers.tpl's openshell.workspaceSecretSourceNames -> this chart's
+                 workspace-secret-source-role.yaml (and its helper in _helpers.tpl) and
+                 check 5's secret-source rows;
+               - deploy/helm/openshell/templates/networkpolicy.yaml (the -sandbox-ssh policy)
+                 -> this chart's networkpolicy-sandbox-ssh.yaml and check 4's expected policy
+                 shape;
+               - crates/openshell-driver-kubernetes/src/config.rs validate_workspace_mode ->
+                 this chart's _workspace-guards.tpl and checks 3c and later.
+            4. Verify: `make fmt && make test`, `./scripts/check-chart-render.sh`,
+               `./scripts/check-gateway-config.sh`.
+            5. Run `cargo build --workspace --all-targets` and fix every compile
                error the new contract causes. If upstream added an RPC, implement
                it based on the vendored proto contract and this repo's existing
                conventions in crates/openshell-driver-kyma/src/driver.rs. You have
@@ -390,18 +414,18 @@ jobs:
                upstream expects new or changed behaviour to work, say so explicitly
                (a TODO comment at the call site, plus a note in your final summary)
                rather than guessing.
-            3. Add or update tests for anything new. Follow the existing style in
+            6. Add or update tests for anything new. Follow the existing style in
                crates/openshell-driver-kyma/src/driver.rs and tests/grpc_contract.rs.
-            4. Update the pinned digests in
+            7. Update the pinned digests in
                deploy/helm/openshell-driver-kyma/values.yaml:
                  gateway    -> ${{ env.GATEWAY_IMAGE }}
                  supervisor -> ${{ env.SUPERVISOR_IMAGE }}
                Update the surrounding comments so they do not contradict the values.
-            5. Bump the version in Cargo.toml and
+            8. Bump the version in Cargo.toml and
                deploy/helm/openshell-driver-kyma/Chart.yaml (version and appVersion),
                and add a CHANGELOG.md entry explaining what changed upstream and
                why it did or did not break us.
-            6. Run `cargo fmt --all`, then
+            9. Run `cargo fmt --all`, then
                `cargo clippy --workspace --all-targets -- -D warnings`, then
                `cargo test --workspace`. All three must pass.
 
@@ -519,7 +543,7 @@ jobs:
           | Local gate | ${gate} |
           | Gateway digest | \`${GATEWAY_IMAGE##*@}\` |
           | Supervisor digest | \`${SUPERVISOR_IMAGE##*@}\` |
-          | Proto pin before this sync | \`${PINNED_PROTO_REF}\` |
+          | Upstream pin before this sync | \`${PINNED_PROTO_REF}\` |
           | Gateway pin | ${pin_line} |
 
           Because this PR was created with \`GITHUB_TOKEN\`, GitHub will not

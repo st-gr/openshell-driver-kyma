@@ -22,6 +22,14 @@ updates:
           - axum
           - tower*
           - hyper*
+    # kube and k8s-openapi follow upstream NVIDIA/OpenShell's versions, because
+    # the driver links upstream's Kubernetes driver; the openshell-* git
+    # dependencies move with `make upstream-bump`. Never bump these here.
+    ignore:
+      - dependency-name: "kube"
+      - dependency-name: "kube-runtime"
+      - dependency-name: "k8s-openapi"
+      - dependency-name: "openshell-*"
 
   - package-ecosystem: github-actions
     directory: /
