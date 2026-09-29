@@ -83,7 +83,8 @@ The upstream options most deployments touch:
 | `driver.gatewayEndpoint` | `OPENSHELL_GRPC_ENDPOINT` | Gateway endpoint that sandboxes dial |
 | `driver.supervisorImage` | `OPENSHELL_SUPERVISOR_IMAGE` | Supervisor image, pinned by digest |
 | `driver.sandboxRuntimeImage` | `OPENSHELL_SANDBOX_RUNTIME_IMAGE` | Sandbox runtime image, pinned by digest |
-| `driver.allowDriverConfig` | `OPENSHELL_DRIVER_ADMISSION_CONFIG_JSON` | Whether callers may pass `driver_config` (also rendered into the gateway's config) |
+| `driver.allowDriverConfig` | `OPENSHELL_DRIVER_ADMISSION_CONFIG_JSON` | Whether callers may pass `driver_config`; `false` by default, as upstream's (also rendered into the gateway's config) |
+| `driver.resourceAdmission.{enabled,requiredLabels}` | `OPENSHELL_DRIVER_ADMISSION_CONFIG_JSON` | Approval labels an attached PVC must carry; upstream's built-in labels by default (also rendered into the gateway's config) |
 | `driver.logLevel` | `OPENSHELL_LOG_LEVEL` | Log level |
 
 Every other option is a `driver.*` key in `values.yaml`, named after the

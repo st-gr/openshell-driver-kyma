@@ -238,12 +238,16 @@ labels only the namespaces the driver creates in Managed mode
 
 `driver_config.volumes[].persistent_volume_claim` (in
 `DriverSandboxTemplate.driver_config`) is admitted by upstream's resource
-admission, not by a chart flag. `driver.allowDriverConfig` (default `true`) is
-the one switch for whether callers may pass `driver_config` at all, volumes
-included. The chart renders it into the gateway's `[openshell.drivers.kyma]
-allow_driver_config` and into the driver's
-`OPENSHELL_DRIVER_ADMISSION_CONFIG_JSON`, and leaves `resource_admission` out
-on both sides, so upstream's defaults apply: the operator must label each PVC
+admission, not by a chart flag. `driver.allowDriverConfig` (default `false`,
+as upstream's chart) is the one switch for whether callers may pass
+`driver_config` at all, volumes included, and `driver.resourceAdmission`
+(`enabled`, default `true`, and `requiredLabels`, default upstream's built-in
+set) is the approval policy for what they attach. The chart renders both, from
+one helper, into the gateway's `[openshell.drivers.kyma]` tables
+(`allow_driver_config` and `resource_admission`) and into the driver's
+`OPENSHELL_DRIVER_ADMISSION_CONFIG_JSON`, as upstream's chart renders them for
+its own driver; `scripts/check-chart-render.sh` check 2 asserts the two sides
+agree. With the defaults, the operator must label each PVC
 `openshell.ai/sandbox-attachable: "true"` and
 `openshell.ai/sandbox-attachable-workspace: "<workspace>"` before a sandbox
 of that workspace can mount it, and labels on the sandbox itself approve
@@ -251,8 +255,7 @@ nothing. The driver reads the PVC's metadata for that check, which is why its
 Role and ClusterRole grant `persistentvolumeclaims` `get` when
 `allowDriverConfig` is true. This replaces the 0.8.0 chart-level gate on
 `driver_config` volumes, under which the claim name was checked only as a
-DNS-1123 subdomain. Set `driver.allowDriverConfig=false` to refuse
-`driver_config` entirely.
+DNS-1123 subdomain.
 
 ### Switching workspace modes is breaking
 

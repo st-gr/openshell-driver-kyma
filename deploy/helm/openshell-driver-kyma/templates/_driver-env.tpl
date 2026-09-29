@@ -8,9 +8,9 @@ scripts/check-chart-render.sh fails CI when an upstream option is missing here.
 - name: OPENSHELL_COMPUTE_DRIVER_SOCKET
   value: {{ $d.socket | quote }}
 - name: OPENSHELL_DRIVER_ADMISSION_CONFIG_JSON
-  # Must agree with [openshell.drivers.kyma] allow_driver_config in
-  # gateway-config.yaml; both render from driver.allowDriverConfig.
-  value: {{ dict "allow_driver_config" $d.allowDriverConfig | toJson | quote }}
+  # Must agree with the [openshell.drivers.kyma] tables in gateway-config.yaml;
+  # both render from openshell-driver-kyma.admissionPolicy.
+  value: {{ include "openshell-driver-kyma.admissionPolicy" . | quote }}
 - name: OPENSHELL_LOG_LEVEL
   value: {{ $d.logLevel | quote }}
 - name: OPENSHELL_SANDBOX_NAMESPACE
@@ -274,14 +274,51 @@ strips those from the sandbox environment).
 Pre-flight guard for driver values that are not workspace or sandbox-env
 settings, called from deployment.yaml beside the other guards.
 
-driver.allowDriverConfig renders as a bare TOML value in the gateway's config
-and as a JSON value in the driver's admission policy. Given the string "false",
-the TOML still reads as the boolean false but the JSON carries the string
-"false", which the driver rejects. It must be a real boolean.
+driver.allowDriverConfig and driver.resourceAdmission.enabled render as bare
+TOML values in the gateway's config and as JSON values in the driver's
+admission policy. Given the string "false", the TOML still reads as the boolean
+false but the JSON carries the string "false", which the driver rejects. Each
+must be a real boolean. driver.resourceAdmission.requiredLabels is a map of
+label to value, or null for upstream's built-in set.
 */}}
 {{- define "openshell-driver-kyma.driverValueGuards" -}}
 {{- $allow := .Values.driver.allowDriverConfig -}}
 {{- if not (kindIs "bool" $allow) -}}
 {{- fail (printf "driver.allowDriverConfig must be a boolean (true or false), got %s %v. It renders into the gateway's TOML and the driver's admission JSON, and a string breaks the JSON." (kindOf $allow) $allow) -}}
 {{- end -}}
+{{- $admission := .Values.driver.resourceAdmission.enabled -}}
+{{- if not (kindIs "bool" $admission) -}}
+{{- fail (printf "driver.resourceAdmission.enabled must be a boolean (true or false), got %s %v. It renders into the gateway's TOML and the driver's admission JSON, and a string breaks the JSON." (kindOf $admission) $admission) -}}
+{{- end -}}
+{{- $labels := .Values.driver.resourceAdmission.requiredLabels -}}
+{{- if not (or (kindIs "invalid" $labels) (kindIs "map" $labels)) -}}
+{{- fail (printf "driver.resourceAdmission.requiredLabels must be a map of label to value (or null for upstream's built-in labels), got %s." (kindOf $labels)) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+The resource-admission policy, as upstream's DriverAdmissionConfig JSON
+(openshell-core src/resource_admission.rs at the pinned tag): allow_driver_config,
+and resource_admission with enabled and, only when driver.resourceAdmission.
+requiredLabels is set, required_labels (a missing map means upstream's built-in
+labels; an empty one is kept). The driver receives it as
+OPENSHELL_DRIVER_ADMISSION_CONFIG_JSON, and gateway-config.yaml renders the
+gateway's [openshell.drivers.kyma] tables from it, as upstream's chart renders
+its own driver's (deploy/helm/openshell/templates/gateway-config.yaml:141-142,
+221-228), so the two sides are one value. Label values are strings, as the TOML
+quotes them. It runs driverValueGuards first, so a template that renders the
+policy before deployment.yaml's guards run fails with the guard's message.
+*/}}
+{{- define "openshell-driver-kyma.admissionPolicy" -}}
+{{- include "openshell-driver-kyma.driverValueGuards" . -}}
+{{- $d := .Values.driver -}}
+{{- $admission := dict "enabled" $d.resourceAdmission.enabled -}}
+{{- if ne $d.resourceAdmission.requiredLabels nil -}}
+{{- $labels := dict -}}
+{{- range $key, $value := $d.resourceAdmission.requiredLabels -}}
+{{- $_ := set $labels $key (toString $value) -}}
+{{- end -}}
+{{- $_ := set $admission "required_labels" $labels -}}
+{{- end -}}
+{{- dict "allow_driver_config" $d.allowDriverConfig "resource_admission" $admission | toJson -}}
 {{- end -}}

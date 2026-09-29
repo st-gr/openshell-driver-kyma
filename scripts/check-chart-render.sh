@@ -5,8 +5,9 @@
 #      environment variable of the driver container in a render that sets every
 #      option (scripts/testdata/chart-all-options.yaml), so each is reachable from
 #      values;
-#   2. the admission policy the gateway derives from [openshell.drivers.kyma]
-#      equals the one the driver acknowledges (OPENSHELL_DRIVER_ADMISSION_CONFIG_JSON),
+#   2. the whole admission policy the gateway derives from [openshell.drivers.kyma]
+#      (allow_driver_config and resource_admission) equals the one the driver
+#      acknowledges (OPENSHELL_DRIVER_ADMISSION_CONFIG_JSON) and the one values set,
 #      and the driver's gateway id equals the gateway's;
 #   3. the driver container takes no command-line args, and removed values are
 #      gone from values.yaml;
@@ -14,7 +15,7 @@
 #      time instead, naming the value, and the values they accept still render:
 #      3b driver.sandboxEnv entries, 3c the managed-mode gateway id, 3d the
 #      operator-mode namespace selectors, 3e managed SSH ingress, 3f the sandbox
-#      UID/GID, 3g driver.allowDriverConfig;
+#      UID/GID, 3g driver.allowDriverConfig and driver.resourceAdmission;
 #   4. the chart's NetworkPolicies: exactly one selects OpenShell sandbox pods, the
 #      mirror of upstream's SSH-ingress restriction, present in shared mode with the
 #      in-pod gateway only;
@@ -78,6 +79,14 @@ for mode in shared managed; do
 			${extra[@]+"${extra[@]}"} >"$WORK/render-$mode-$allow.yaml"
 	done
 done
+# 2. Resource admission: off; custom labels, one of them the workspace placeholder;
+# and off with an explicitly empty map, which must reach both sides as empty, not as
+# upstream's built-in labels.
+render_as t --set driver.resourceAdmission.enabled=false >"$WORK/render-admission-off.yaml"
+render_as t --set-json 'driver.resourceAdmission.requiredLabels={"example.com/approved":"yes","example.com/team":"${workspace}"}' \
+	>"$WORK/render-admission-labels.yaml"
+render_as t --set driver.resourceAdmission.enabled=false --set-json 'driver.resourceAdmission.requiredLabels={}' \
+	>"$WORK/render-admission-empty.yaml"
 
 # 1. Every option set at once.
 try good-all-options '' t -f "$ALL_OPTIONS"
@@ -136,6 +145,8 @@ try good-3f-unset '' t
 # 3g. driver.allowDriverConfig is a real boolean: a string would render the JSON
 # policy as "false", which the driver rejects.
 try bad-3g-string 'driver.allowDriverConfig' t --set-string driver.allowDriverConfig=false
+try bad-3g-admission-string 'driver.resourceAdmission.enabled' t --set-string driver.resourceAdmission.enabled=false
+try bad-3g-labels-list 'driver.resourceAdmission.requiredLabels' t --set-json 'driver.resourceAdmission.requiredLabels=["a=b"]'
 
 # 7 and 7b. An inference provider. Every value goes in explicitly and as the last
 # word on its key: helm applies --set after --set-json, so an override of a --set
@@ -272,21 +283,86 @@ if all_env is not None:
         if all_env.get(name) != want:
             failures.append(f"{name}={all_env.get(name)!r} in the all-options render, want {want!r}")
 
-# 2. gateway and driver agree on the admission policy
+# 2. gateway and driver agree on the whole admission policy, and it is the one values
+# set. Both sides are reduced to upstream's effective DriverAdmissionConfig
+# (openshell-core src/resource_admission.rs): allow_driver_config defaults to false,
+# resource_admission.enabled to true, and required_labels, when absent, to the
+# built-in pair; unknown fields are refused, as upstream's deny_unknown_fields does.
+BUILTIN_LABELS = {"openshell.ai/sandbox-attachable": "true",
+                  "openshell.ai/sandbox-attachable-workspace": "${workspace}"}
+CUSTOM_LABELS = {"example.com/approved": "yes", "example.com/team": "${workspace}"}
+# render -> (allow_driver_config, resource_admission.enabled, required_labels)
+EXPECTED_POLICY = {
+    "render-shared-true": (True, True, BUILTIN_LABELS),
+    "render-shared-false": (False, True, BUILTIN_LABELS),
+    "render-managed-true": (True, True, BUILTIN_LABELS),
+    "render-managed-false": (False, True, BUILTIN_LABELS),
+    "render-admission-off": (False, False, BUILTIN_LABELS),
+    "render-admission-labels": (False, True, CUSTOM_LABELS),
+    "render-admission-empty": (False, False, {}),
+}
+TOML_KEY = r'(?:[A-Za-z0-9_-]+|"(?:[^"\\]|\\.)*")'
+TOML_VALUE = r'(?:true|false|-?[0-9]+|"(?:[^"\\]|\\.)*")'
+
+def toml_tables(text, where):
+    """{table: {key: value}} of the simple TOML the chart renders: [table] headers,
+    and `key = value` lines with a bare or quoted key and a boolean, integer or
+    quoted string value. Any other line is a failure, so nothing can hide from check 2."""
+    tables, current = {}, None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        header = re.fullmatch(r"\[([A-Za-z0-9_.-]+)\]", line)
+        if header:
+            current = tables.setdefault(header.group(1), {})
+            continue
+        pair = re.fullmatch(rf"({TOML_KEY})\s*=\s*({TOML_VALUE})", line)
+        if not pair or current is None:
+            failures.append(f"{where}: gateway TOML line check 2 cannot read: {line!r}")
+            continue
+        key, value = pair.groups()
+        current[json.loads(key) if key.startswith('"') else key] = (
+            value == "true" if value in ("true", "false") else json.loads(value))
+    return tables
+
+def effective_policy(allow, admission, labels, where, side):
+    if not isinstance(allow, bool) or not isinstance(admission.get("enabled", True), bool):
+        failures.append(f"{where}: the {side} admission policy has a non-boolean flag: {allow!r}, {admission!r}")
+    return (allow, admission.get("enabled", True), BUILTIN_LABELS if labels is None else labels)
+
 for render in sorted(work.glob("render-*.yaml")):
-    expected = render.stem.endswith("-true")
+    expected = EXPECTED_POLICY.get(render.stem)
+    if expected is None:
+        failures.append(f"{render.name}: no expected admission policy in check 2's table")
+        continue
     documents = docs(render)
     toml = next(d["data"]["gateway.toml"] for d in documents
                 if d.get("kind") == "ConfigMap" and "gateway.toml" in d.get("data", {}))
-    kyma_table = toml.split("[openshell.drivers.kyma]", 1)[1].split("\n[", 1)[0]
-    m = re.search(r"^\s*allow_driver_config\s*=\s*(true|false)\s*$", kyma_table, re.M)
-    gateway_side = m and m.group(1) == "true"
+    tables = toml_tables(toml, render.name)
+    kyma = tables.get("openshell.drivers.kyma", {})
+    toml_admission = tables.get("openshell.drivers.kyma.resource_admission", {})
+    extra = (set(kyma) - {"socket_path", "allow_driver_config"}) | (set(toml_admission) - {"enabled"})
+    if extra:
+        failures.append(f"{render.name}: unexpected keys in the gateway's kyma driver tables: {sorted(extra)}")
+    gateway_side = effective_policy(kyma.get("allow_driver_config", False), toml_admission,
+                                    tables.get("openshell.drivers.kyma.resource_admission.required_labels"),
+                                    render.name, "gateway")
     env = {e["name"]: e.get("value") for e in driver_container(documents).get("env", [])}
-    admission = env.get("OPENSHELL_DRIVER_ADMISSION_CONFIG_JSON")
-    driver_side = json.loads(admission).get("allow_driver_config") if admission else None
+    policy = json.loads(env.get("OPENSHELL_DRIVER_ADMISSION_CONFIG_JSON") or "null")
+    if not isinstance(policy, dict):
+        failures.append(f"{render.name}: OPENSHELL_DRIVER_ADMISSION_CONFIG_JSON is not a JSON object: {policy!r}")
+        continue
+    json_admission = policy.get("resource_admission", {})
+    extra = (set(policy) - {"allow_driver_config", "resource_admission"}) | (
+        set(json_admission) - {"enabled", "required_labels"})
+    if extra:
+        failures.append(f"{render.name}: unknown fields in the driver's admission JSON, which upstream refuses: {sorted(extra)}")
+    driver_side = effective_policy(policy.get("allow_driver_config", False), json_admission,
+                                   json_admission.get("required_labels"), render.name, "driver")
     if not (gateway_side == driver_side == expected):
-        failures.append(f"{render.name}: gateway allow_driver_config={gateway_side}, "
-                        f"driver={driver_side}, values={expected}")
+        failures.append(f"{render.name}: admission policy (allow_driver_config, enabled, required_labels) "
+                        f"gateway={gateway_side}, driver={driver_side}, values={expected}")
     # upstream's chart derives the gateway's and the driver's gateway_id from one value
     jwt_id = re.search(r'^\s*gateway_id\s*=\s*"([^"]*)"', toml, re.M)
     if not jwt_id or env.get("OPENSHELL_GATEWAY_ID") != jwt_id.group(1):
@@ -496,32 +572,33 @@ def secret_sources(*names):
     """upstream's workspace-secret-source-role.yaml: get on exactly these Secrets."""
     return [("", "secrets", ["get"], names)]
 
-SHARED = [PVC_GET, WORKLOAD, BOOTSTRAP_SECRETS]     # in the sandbox namespace, by the Role
+# driver.allowDriverConfig defaults to false, as upstream's does, so PVC_GET is added
+# only to the renders that set it true.
+SHARED = [WORKLOAD, BOOTSTRAP_SECRETS]     # in the sandbox namespace, by the Role
 SHARED_CLUSTER = [NODE_READER, NAMESPACE_GET]
-MANAGED = [NODE_READER, NAMESPACE_GET, NAMESPACE_DISCOVERY, NAMESPACE_LIFECYCLE, PVC_GET, WORKLOAD,
+MANAGED = [NODE_READER, NAMESPACE_GET, NAMESPACE_DISCOVERY, NAMESPACE_LIFECYCLE, WORKLOAD,
            BOOTSTRAP_SECRETS, WORKSPACE_SERVICEACCOUNTS]
-MANAGED_NO_PVC = [b for b in MANAGED if b is not PVC_GET]
-OPERATOR = [NODE_READER, NAMESPACE_GET, NAMESPACE_DISCOVERY, PVC_GET, WORKLOAD]   # no secrets, no lifecycle
+OPERATOR = [NODE_READER, NAMESPACE_GET, NAMESPACE_DISCOVERY, WORKLOAD]   # no secrets, no lifecycle
 opts = (yaml.safe_load(all_options.read_text()) or {})["driver"]
 all_options_secrets = secret_sources(opts["clientTlsSecretName"], *opts["sandboxImagePullSecrets"])
 
 # render -> (blocks the driver holds in the sandbox namespace, blocks it holds cluster-wide)
 EXPECTED = {
-    "render-shared-true": (SHARED, SHARED_CLUSTER),
-    "render-shared-false": ([b for b in SHARED if b is not PVC_GET], SHARED_CLUSTER),      # no allowDriverConfig, no PVC get
+    "render-shared-true": (SHARED + [PVC_GET], SHARED_CLUSTER),                            # allowDriverConfig adds PVC get
+    "render-shared-false": (SHARED, SHARED_CLUSTER),
     "rbac-shared-no-netpol": (SHARED, SHARED_CLUSTER),
     "rbac-shared-no-gateway": (SHARED, SHARED_CLUSTER),                                    # an external gateway changes no RBAC
     "rbac-apirule": (SHARED + [KYMA_EXPOSURE], SHARED_CLUSTER),
     "rbac-shared-secrets": (SHARED, SHARED_CLUSTER),                                       # shared mode stages no Secret
     "rbac-inference": (SHARED, SHARED_CLUSTER),                                            # the hook's own Role is bound to the hook
-    "render-managed-true": ([], MANAGED),
-    "render-managed-false": ([], MANAGED_NO_PVC),
+    "render-managed-true": ([], MANAGED + [PVC_GET]),
+    "render-managed-false": ([], MANAGED),
     "rbac-managed-apirule": ([], MANAGED + [KYMA_EXPOSURE, KYMA_PSA_LABEL]),
     "rbac-managed-ssh": ([], MANAGED + [SSH_INGRESS_POLICY]),
     "rbac-managed-secrets": ([secret_sources("client-tls", "pull-a", "pull-b")], MANAGED),
     "rbac-operator-apirule": ([], OPERATOR + [KYMA_EXPOSURE]),
     "rbac-operator-secrets": ([secret_sources("client-tls")], OPERATOR),                   # TLS Secret only, no pull Secrets
-    "good-all-options": ([all_options_secrets], MANAGED + [SSH_INGRESS_POLICY, KYMA_EXPOSURE, KYMA_PSA_LABEL]),
+    "good-all-options": ([all_options_secrets], MANAGED + [PVC_GET, SSH_INGRESS_POLICY, KYMA_EXPOSURE, KYMA_PSA_LABEL]),
 }
 
 def table(scope, blocks):

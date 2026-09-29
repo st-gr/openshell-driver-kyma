@@ -130,14 +130,33 @@ driver:
   # existing sandboxes become unreachable. Delete every sandbox before
   # switching, then recreate.
   workspaceMode: shared
-  # Whether callers may pass driver_config at all, including its volumes and
-  # volume mounts: upstream's resource admission checks those too, so this one
-  # value governs them. Rendered into BOTH the gateway's
-  # [openshell.drivers.kyma] allow_driver_config and the driver's
-  # OPENSHELL_DRIVER_ADMISSION_CONFIG_JSON: the gateway refuses to start unless
-  # the driver acknowledges the identical policy, so never set them separately.
-  # Must be a real boolean, not a string; the chart refuses to render otherwise.
-  allowDriverConfig: true
+  # Whether callers may pass driver_config at all (node selector, runtime
+  # class, resource overrides, volumes and volume mounts). Default false, as
+  # upstream's chart (server.drivers.kubernetes.allowDriverConfig): a caller's
+  # driver_config is refused until an operator opts in. Set true to keep the
+  # 0.8.0 behaviour; volumes are then still checked by resourceAdmission below.
+  # Rendered into BOTH the gateway's [openshell.drivers.kyma]
+  # allow_driver_config and the driver's OPENSHELL_DRIVER_ADMISSION_CONFIG_JSON:
+  # the gateway refuses to start unless the driver acknowledges the identical
+  # policy, so never set them separately. Must be a real boolean, not a string;
+  # the chart refuses to render otherwise.
+  allowDriverConfig: false
+  # Operator approval of the external resources a sandbox attaches (caller
+  # PVCs): upstream's resource admission (server.drivers.kubernetes.
+  # resourceAdmission). Rendered, like allowDriverConfig, into both the
+  # gateway's [openshell.drivers.kyma.resource_admission] and the driver's
+  # admission JSON.
+  resourceAdmission:
+    # Require the approval labels below on every attached resource. Must be a
+    # real boolean.
+    enabled: true
+    # The labels an attached resource must carry, as a map. null keeps
+    # upstream's built-in set: openshell.ai/sandbox-attachable: "true" and
+    # openshell.ai/sandbox-attachable-workspace: "${workspace}". A map replaces
+    # that set; a value of exactly "${workspace}" must equal the sandbox's
+    # workspace. Upstream refuses at startup an empty map while enabled, a map
+    # whose values are all "${workspace}", and its own reserved label keys.
+    requiredLabels: null
   # --- Upstream openshell-driver-kubernetes options (same names upstream's
   # chart uses; each maps to the upstream environment variable in
   # templates/_driver-env.tpl). Empty/false leaves the variable unset, so
