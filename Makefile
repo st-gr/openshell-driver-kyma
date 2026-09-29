@@ -16,11 +16,15 @@ INTEGRATION_TEST_NAMESPACE ?=
 DOCKER_RUN := MSYS_NO_PATHCONV=1 docker run --rm \
     -v "$(CURDIR):/workspace" \
     -v "openshell-cargo-cache:/workspace/target" \
+    -v "openshell-cargo-registry:/usr/local/cargo/registry" \
+    -v "openshell-cargo-git:/usr/local/cargo/git" \
     -w /workspace
 
 DOCKER_RUN_INTERACTIVE := MSYS_NO_PATHCONV=1 docker run --rm -it \
     -v "$(CURDIR):/workspace" \
     -v "openshell-cargo-cache:/workspace/target" \
+    -v "openshell-cargo-registry:/usr/local/cargo/registry" \
+    -v "openshell-cargo-git:/usr/local/cargo/git" \
     -w /workspace
 
 .PHONY: help
