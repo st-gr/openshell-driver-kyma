@@ -99,7 +99,6 @@ gateway:
   sandboxJwt:
     enabled: true
     ttlSecs: 3600
-    saTokenTtlSecs: 3600
 
   # Gateway DB persistence. Without this, every gateway pod restart wipes
   # provider/inference configs and breaks every sandbox's bundle fetch.

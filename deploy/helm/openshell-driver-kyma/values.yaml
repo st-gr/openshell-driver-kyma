@@ -398,8 +398,9 @@ gateway:
   # the chart provisions:
   #   - a pre-install Helm hook Job that runs `openshell-gateway
   #     generate-certs` to create the signing-key Secret in this namespace
-  #   - a ConfigMap with the gateway TOML (`[openshell.gateway.gateway_jwt]`
-  #     + `[openshell.drivers.kubernetes]` tables)
+  #   - the `[openshell.gateway.gateway_jwt]` table in the gateway TOML
+  #     ConfigMap (the ConfigMap itself, with `[openshell.drivers.kyma]`,
+  #     is rendered whenever `gateway.enabled` is true)
   #   - extra RBAC: `tokenreviews:create` (cluster) + `pods:get` (sandbox ns)
   #   - mounts on the gateway container (Secret at /etc/openshell-jwt,
   #     ConfigMap at /etc/openshell)
@@ -413,7 +414,6 @@ gateway:
     clientTlsSecretName: ""     # default: <fullname>-client-tls
     gatewayId: ""               # default: <fullname>
     ttlSecs: 3600               # gateway-minted sandbox JWT lifetime
-    saTokenTtlSecs: 3600        # projected SA token lifetime (sandbox pod)
 
 # ClusterIP Service exposing the gateway's gRPC + metrics ports.
 # Requires .Values.gateway.enabled. When false, only the driver's

@@ -77,7 +77,6 @@ gateway:
   sandboxJwt:
     enabled: true
     ttlSecs: 3600
-    saTokenTtlSecs: 3600
 
   # Persist the gateway's DB across pod restarts. Without this, every
   # gateway pod restart wipes the provider/inference DB set by the

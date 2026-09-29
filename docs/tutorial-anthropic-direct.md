@@ -23,7 +23,7 @@ flowchart TB
     end
 
     subgraph S3["3 — helm install chart 0.1.2"]
-        POD["driver + gateway pod 2/2<br/>gateway 0.0.91, Unix socket,<br/>--drivers kyma"]
+        POD["driver + gateway pod 2/2<br/>gateway 0.0.91, Unix socket,<br/>--compute-driver kyma"]
         HOOK["hook Job: provider create +<br/>inference set (auto-deletes)"]
     end
 

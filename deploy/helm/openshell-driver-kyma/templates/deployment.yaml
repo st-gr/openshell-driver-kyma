@@ -148,15 +148,14 @@ spec:
           # The gateway has no `run` subcommand; the default action is to
           # run the server. Listing flags directly under args is correct.
           args:
-            {{- if .Values.gateway.sandboxJwt.enabled }}
-            # Load gateway TOML when sandbox-JWT is enabled. The TOML
-            # carries [openshell.gateway.gateway_jwt] (signing material
-            # paths) and [openshell.drivers.kyma] (driver socket + the
-            # admission policy the driver must acknowledge). CLI flags below
-            # still override anything in the file.
+            # Always load the gateway TOML. It carries [openshell.drivers.kyma]
+            # (driver socket + the admission policy the driver must
+            # acknowledge, so it must exist whenever a gateway runs) and,
+            # when sandbox-JWT is enabled, [openshell.gateway.gateway_jwt]
+            # (signing material paths). CLI flags below still override
+            # anything in the file.
             - --config
             - /etc/openshell/gateway.toml
-            {{- end }}
             {{- if and .Values.gateway.dbPersistence.enabled .Values.gateway.dbPersistence.dbUrl }}
             - --db-url
             - {{ .Values.gateway.dbPersistence.dbUrl | quote }}
@@ -253,10 +252,10 @@ spec:
             - name: gateway-db
               mountPath: /var/lib/openshell
             {{- end }}
-            {{- if .Values.gateway.sandboxJwt.enabled }}
             - name: gateway-config
               mountPath: /etc/openshell
               readOnly: true
+            {{- if .Values.gateway.sandboxJwt.enabled }}
             - name: sandbox-jwt
               mountPath: /etc/openshell-jwt
               readOnly: true
@@ -282,10 +281,10 @@ spec:
           persistentVolumeClaim:
             claimName: {{ include "openshell-driver-kyma.fullname" . }}-gateway-db
         {{- end }}
-        {{- if .Values.gateway.sandboxJwt.enabled }}
         - name: gateway-config
           configMap:
             name: {{ include "openshell-driver-kyma.fullname" . }}-gateway-config
+        {{- if .Values.gateway.sandboxJwt.enabled }}
         - name: sandbox-jwt
           secret:
             secretName: {{ include "openshell-driver-kyma.jwtSecretName" . }}

@@ -1,8 +1,9 @@
-{{- if and .Values.gateway.enabled .Values.gateway.sandboxJwt.enabled -}}
+{{- if .Values.gateway.enabled -}}
 # Gateway TOML configuration. Mounted at /etc/openshell/gateway.toml.
-# Required when sandboxJwt is enabled — the gateway needs:
+# Rendered whenever the gateway sidecar runs — the gateway needs:
 #
-#   [openshell.gateway.gateway_jwt]   — paths to the signing material
+#   [openshell.gateway.gateway_jwt]   — (only when sandboxJwt is enabled)
+#                                       paths to the signing material
 #                                       (mounted from the JWT Secret)
 #                                       so it can mint per-sandbox JWTs
 #                                       in IssueSandboxToken.
@@ -47,12 +48,15 @@ data:
     allow_unauthenticated_users = true
     {{- end }}
 
+    {{- if .Values.gateway.sandboxJwt.enabled }}
+
     [openshell.gateway.gateway_jwt]
     signing_key_path = "/etc/openshell-jwt/signing.pem"
     public_key_path  = "/etc/openshell-jwt/public.pem"
     kid_path         = "/etc/openshell-jwt/kid"
     gateway_id       = {{ include "openshell-driver-kyma.gatewayId" . | quote }}
     ttl_secs         = {{ .Values.gateway.sandboxJwt.ttlSecs }}
+    {{- end }}
 
     [openshell.drivers.kyma]
     # Schema-v2 access path for an external compute driver reached over
