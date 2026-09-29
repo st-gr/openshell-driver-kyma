@@ -104,6 +104,7 @@ spec:
             - --operator-namespace-allowlist={{ join "," .Values.driver.operatorNamespaceAllowlist }}
             {{- end }}
             - --driver-config-allow-volumes={{ .Values.driver.driverConfigAllowVolumes }}
+            - --allow-driver-config={{ .Values.driver.allowDriverConfig }}
           env:
             - name: RUST_LOG
               value: {{ .Values.driver.logLevel | quote }}
@@ -150,8 +151,8 @@ spec:
             {{- if .Values.gateway.sandboxJwt.enabled }}
             # Load gateway TOML when sandbox-JWT is enabled. The TOML
             # carries [openshell.gateway.gateway_jwt] (signing material
-            # paths) and [openshell.drivers.kubernetes] (sandbox ns + SA
-            # for the K8s SA bootstrap authenticator). CLI flags below
+            # paths) and [openshell.drivers.kyma] (driver socket + the
+            # admission policy the driver must acknowledge). CLI flags below
             # still override anything in the file.
             - --config
             - /etc/openshell/gateway.toml
@@ -171,7 +172,7 @@ spec:
             - {{ .Values.gateway.healthPort | quote }}
             - --metrics-port
             - {{ .Values.gateway.metricsPort | quote }}
-            - --drivers
+            - --compute-driver
             - kyma
             - --compute-driver-socket
             - {{ .Values.driver.socket | quote }}
