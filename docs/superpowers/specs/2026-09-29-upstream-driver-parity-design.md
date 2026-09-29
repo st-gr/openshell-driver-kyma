@@ -150,7 +150,9 @@ Mapping of today's flags:
 | `--log-level`, `--workspace-mode`, `--gateway-id` | upstream equivalents |
 | `--operator-namespace-allowlist` | upstream `--operator-namespace-label` / `--operator-namespace-file` (upstream's mechanism replaces ours) |
 | `--allow-driver-config`, `--driver-config-allow-volumes` | upstream `OPENSHELL_DRIVER_ADMISSION_CONFIG_JSON` (upstream resource admission now governs caller volumes, closing the v0.8.0 known gap) |
-| `--supervisor-binary-path`, `--supervisor-mount-path`, `--sandbox-uid`, `--sandbox-gid`, `--stop-timeout-secs`, `--gpu-support`, `--enable-network-policy`, `--telemetry-enabled`, `--sandbox-storage-size`, `--sandbox-storage-class` | removed — superseded by upstream's runtime, isolation or `driver_config` |
+| `--sandbox-uid`, `--sandbox-gid` | upstream `--sandbox-uid` / `--sandbox-gid` (`OPENSHELL_K8S_SANDBOX_UID` / `_GID`) |
+| `--sandbox-storage-size`, `--sandbox-storage-class` | upstream env-only options `OPENSHELL_K8S_WORKSPACE_DEFAULT_STORAGE_SIZE` / `OPENSHELL_K8S_WORKSPACE_STORAGE_CLASS` |
+| `--supervisor-binary-path`, `--supervisor-mount-path`, `--stop-timeout-secs`, `--gpu-support`, `--enable-network-policy`, `--telemetry-enabled` | removed — superseded by upstream's runtime and isolation |
 | `--istio-inject-sandboxes`, `--enable-apirule`, `--cluster-domain`, `--disable-claude-telemetry` | Kyma: `--kyma-istio-inject-sandboxes`, `--kyma-enable-apirule`, `--kyma-cluster-domain`, `--kyma-disable-claude-telemetry` |
 | `--health-port` | Kyma: `--kyma-health-port`. Upstream exposes only its gRPC bind and no HTTP health endpoint, while this chart's liveness/readiness probes use HTTP `/healthz`, so the endpoint is Kyma-owned |
 
@@ -175,9 +177,9 @@ disagree.
 ## Providers
 
 The inference-provider hook is rewritten for v0.1.2's provider-profile model.
-Gateway config gains `provider_profile_sources = [{ type = "user" }]`, and the
-hook creates the Anthropic profile, the provider and its credential through the
-CLI matching the pinned upstream ref. The CLI version is derived from that ref,
+Upstream's default profile source is already `user`, so the gateway
+configuration needs no change; the hook creates the Anthropic profile, the
+provider and its credential through the CLI matching the pinned upstream ref. The CLI version is derived from that ref,
 never hard-coded. The exact v0.1.2 commands are taken from the v0.1.2 CLI
 source during planning and verified against the running gateway.
 
@@ -228,3 +230,73 @@ These are resolved in planning with the decision rule stated, not left open.
   only driver-relevant parts (RBAC, images, admission) mirror upstream's chart.
 - Any change to upstream code. If the wrapper needs a hook upstream lacks, that
   becomes an upstream issue, not a fork.
+
+## Amendments from planning (2026-09-29)
+
+Reading upstream v0.1.2's driver source while planning corrected or sharpened
+the following. Where they conflict with an earlier section, this section wins.
+
+1. **More of our flags map than first stated.** `--sandbox-uid`/`--sandbox-gid`
+   and workspace storage size/class map to upstream options (table updated
+   above). Upstream also exposes `--sa-token-ttl-secs`,
+   `--sandbox-runtime-boundary-port`, `--sandbox-runtime-image`, OTLP and
+   runtime-class settings; all 39 flags plus 3 env-only options are part of
+   the mirrored surface.
+2. **Dependency versions follow upstream, not us.** Upstream v0.1.2 is on
+   `kube` 0.99 and `k8s-openapi` 0.24 (`v1_29`). The Kyma layer must use the
+   same versions so there is one Kubernetes stack in the binary; our earlier
+   `kube` 4 migration is superseded for the driver. Dependabot must stop
+   proposing `kube`/`k8s-openapi` bumps for this workspace.
+3. **Images must be passed explicitly.** Upstream bakes its default supervisor
+   and sandbox-runtime image tags in at compile time from build environment
+   variables, which a git-dependency build does not set. The chart therefore
+   always passes digest-pinned `OPENSHELL_SUPERVISOR_IMAGE` and
+   `OPENSHELL_SANDBOX_RUNTIME_IMAGE` (`ghcr.io/nvidia/openshell/sandbox`).
+4. **APIRule exposure is an explicit exception to upstream's isolation.**
+   Upstream installs a namespace workload fence (`openshell-sandbox-workloads`):
+   workload pods accept ingress only from supervisor pods on the boundary port
+   and have no egress at all. Direct HTTPS exposure of port 8080 therefore needs
+   a Kyma-owned NetworkPolicy admitting the Istio ingress gateway
+   (`istio: ingressgateway` in the namespace named by
+   `--kyma-ingress-namespace`, default `istio-system`) to the workload pod on
+   8080. It exists only when `--kyma-enable-apirule` is set (chart default
+   off), and the chart documents that enabling it bypasses the supervisor for
+   inbound traffic.
+5. **The chart's own sandbox NetworkPolicy must go.** Its `<release>-sandbox`
+   policy selects `openshell.ai/managed-by: openshell`, which upstream puts on
+   both workload and supervisor pods. NetworkPolicies are additive, so it would
+   grant workloads egress that upstream's fence denies. Removed.
+6. **Our objects never look like upstream's.** Service, NetworkPolicy and
+   APIRule created by the Kyma layer carry
+   `app.kubernetes.io/managed-by: openshell-driver-kyma`, never
+   `openshell.ai/managed-by: openshell`. The exposure Service selects the
+   workload with upstream's boundary labels (`openshell.ai/boundary-pair`,
+   `openshell.ai/boundary-role: workload`); selecting on `openshell.ai/sandbox-id`
+   alone would also match the supervisor pod.
+7. **No delete hook.** Exposure objects are owner-referenced to the Sandbox CR,
+   so Kubernetes garbage-collects them. Hook 2 is create-only.
+8. **Hook 3 labels Managed-mode namespaces only**, resolved through upstream's
+   `KubernetesComputeConfig::namespace_for_workspace`. Operator-mode namespaces
+   belong to the operator and are not relabelled. The level comes from
+   `--kyma-workspace-psa-level`; the chart default is chosen during cluster
+   verification with a server-side dry-run, because upstream's pods request
+   only `RuntimeDefault` seccomp and no privileges.
+9. **Enrichment env uses `template.environment`**, which upstream merges into
+   the workload environment (`build_sandbox_env`). A generic repeatable
+   `--kyma-sandbox-env KEY=VALUE` carries chart-supplied variables; the Claude
+   telemetry flag is sugar over it.
+10. **Providers follow upstream's profile model.** The chart renders a custom
+    profile whose endpoint is the configured inference proxy host (sail-proxy
+    on this cluster) and whose `binaries` allowlist names the processes that
+    call it — `node` for claude-code, not only `claude`. Sandboxes attach the
+    provider per sandbox (`openshell sandbox create --provider <name>`), as
+    upstream does; `ANTHROPIC_BASE_URL` and `ANTHROPIC_MODEL` reach sandboxes
+    through `--kyma-sandbox-env`.
+11. **CI must run the agent-sandbox controller.** The smokes install only the
+    CRD today, so no pod is ever created. They install the pinned controller
+    release so "pod Ready" is reachable.
+12. **One gateway id for gateway and driver.** Upstream's chart derives the
+    gateway's `gateway_jwt.gateway_id` and the Kubernetes driver's `gateway_id`
+    from one value (`sandboxJwt.gatewayId`, defaulting to the release fullname).
+    This chart does the same through its `openshell-driver-kyma.gatewayId`
+    helper, and `driver.gatewayId` is removed so the two can never diverge.
