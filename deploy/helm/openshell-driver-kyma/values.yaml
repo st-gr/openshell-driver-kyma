@@ -179,6 +179,10 @@ driver:
   runtimeClassName: ""
   sandboxSshSocketPath: ""
   bindAddress: ""
+  # OTLP/gRPC trace collector (OPENSHELL_OTLP_ENDPOINT), e.g.
+  # http://collector.observability:4317. Plain http:// (upstream v0.1.2 builds
+  # its exporter without TLS). With networkPolicy.enabled the driver pod may
+  # then reach that port (80 when none is given), on any address.
   otlpEndpoint: ""
   gatewayName: ""
   # Secret with the client certificate sandboxes present to a TLS gateway
@@ -241,7 +245,8 @@ upstream:
 
 networkPolicy:
   # NetworkPolicies the chart renders:
-  #   - one for the driver+gateway pod;
+  #   - one for the driver+gateway pod (its egress: DNS, 443 and, with
+  #     driver.otlpEndpoint, the collector's port);
   #   - in shared mode with gateway.enabled, `<fullname>-sandbox-ssh` in the
   #     sandbox namespace, which restricts SSH ingress (TCP 2222) on OpenShell
   #     sandbox pods to the driver+gateway pod. It mirrors upstream's chart of the

@@ -19,6 +19,9 @@
 #     a namespaceSelector breaks all kube-rs/client-go calls. Operators
 #     who want a tighter rule can pin the apiserver Service IP via a
 #     custom overlay.
+#   - with driver.otlpEndpoint, the driver's trace export on that
+#     endpoint's port (openshell-driver-kyma.otlpPort) to anywhere, as for
+#     the apiserver: the chart does not know the collector's address.
 #
 # Sandbox pods are fenced by upstream's own per-namespace NetworkPolicies
 # (openshell-sandbox-workloads, openshell-sandbox-supervisors). NetworkPolicies
@@ -61,6 +64,12 @@ spec:
     - ports:
         - port: 443
           protocol: TCP
+    {{- with include "openshell-driver-kyma.otlpPort" . }}
+    # OTLP trace export to driver.otlpEndpoint: its port only, any destination.
+    - ports:
+        - port: {{ . }}
+          protocol: TCP
+    {{- end }}
 {{- end }}
 {{- if and .Values.networkPolicy.enabled .Values.bedrockBridge.enabled }}
 ---

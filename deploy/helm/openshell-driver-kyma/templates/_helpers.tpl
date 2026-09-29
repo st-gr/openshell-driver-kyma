@@ -202,6 +202,24 @@ read this, so they follow one effective value.
 {{- end -}}
 
 {{/*
+The TCP port the driver's OTLP trace export dials, for its NetworkPolicy egress;
+empty without driver.otlpEndpoint. Upstream parses the endpoint as a URI and
+hands it to tonic's OTLP/gRPC exporter (openshell-otel src/lib.rs build_provider
+at the pinned tag), which dials an explicit port, else its scheme's: 443 for
+https, 80 for http. An endpoint without an http(s) scheme (for example a bare
+host:4317) gives no port: tonic refuses every request to an endpoint with no
+scheme, so upstream exports nothing there and there is no port to open.
+*/}}
+{{- define "openshell-driver-kyma.otlpPort" -}}
+{{- with .Values.driver.otlpEndpoint -}}
+{{- $url := urlParse . -}}
+{{- if and (has $url.scheme (list "http" "https")) $url.host -}}
+{{- default (ternary "443" "80" (eq $url.scheme "https")) (trimPrefix ":" (regexFind ":[0-9]+$" $url.host)) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 Secrets in the sandbox namespace whose contents the driver stages into
 workspace namespaces, as a JSON array; empty in shared mode. Mirrors upstream's
 openshell.workspaceSecretSourceNames (deploy/helm/openshell/templates/_helpers.tpl

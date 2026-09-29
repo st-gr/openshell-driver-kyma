@@ -234,7 +234,9 @@ the CLI redirects to your OIDC issuer on first use.
   `upstream.version`, and install an `openshell` CLI of the same release.
 - **Tracing.** The driver's health port serves only `/healthz` and
   `/readyz`. Upstream's driver exports traces over OTLP: set
-  `driver.otlpEndpoint` (plain `http://`; see Known limitations).
+  `driver.otlpEndpoint` (plain `http://`; see Known limitations). With
+  `networkPolicy.enabled` the chart lets the driver pod reach that endpoint's
+  port (80 when the URL names none), on any address.
 
 ## Exposing a sandbox through an APIRule (opt-in exception)
 

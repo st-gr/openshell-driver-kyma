@@ -23,7 +23,8 @@
 #      the in-pod gateway, naming its own pod);
 #      the rest select only the chart's own pods. Upstream fences sandboxes per
 #      namespace and NetworkPolicies are additive, so any other policy could only
-#      widen that fence;
+#      widen that fence. The driver pod's egress is DNS and 443, plus the port of
+#      driver.otlpEndpoint when one is set;
 #   5. the RBAC the driver's ServiceAccount is granted, by bindings, is exactly
 #      upstream's rules plus the Kyma layer's for that render: nothing missing and
 #      nothing extra, per scope, in every workspace mode and option combination the
@@ -251,6 +252,14 @@ render_as t --set gateway.tls.enabled=true --set driver.workspaceMode=operator \
 # NetworkPolicies off; an external gateway (the chart's default gateway.enabled=false,
 # which render_as overrides); and the bedrock bridge, which has a NetworkPolicy of its own.
 render_as t --set networkPolicy.enabled=false >"$WORK/rbac-shared-no-netpol.yaml"
+# OTLP trace export: the driver pod may reach the collector's port; 80 and 443 are the
+# schemes' defaults, and an endpoint without a scheme, which upstream cannot export to,
+# opens nothing. (The all-options render names port 4317.)
+render_as t --set driver.otlpEndpoint=https://collector.example >"$WORK/rbac-otlp-https.yaml"
+render_as t --set driver.otlpEndpoint=http://collector.example >"$WORK/rbac-otlp-http.yaml"
+render_as t --set driver.otlpEndpoint=collector.example:4317 >"$WORK/rbac-otlp-no-scheme.yaml"
+render_as t --set driver.otlpEndpoint=http://collector.example:4317 --set networkPolicy.enabled=false \
+	>"$WORK/rbac-otlp-no-netpol.yaml"
 render_as t --set gateway.enabled=false >"$WORK/rbac-shared-no-gateway.yaml"
 render_as t --set bedrockBridge.enabled=true --set bedrockBridge.sap.serviceKeySecret.name=sap-key \
 	--set bedrockBridge.singleDeploymentId=deployment >"$WORK/rbac-bedrock-bridge.yaml"
@@ -479,6 +488,7 @@ own_pods = [{"app.kubernetes.io/name": chart_name, "app.kubernetes.io/instance":
             {"app.kubernetes.io/name": chart_name + "-bedrock-bridge", "app.kubernetes.io/instance": "t"}]
 # Shared-mode renders in which the SSH-ingress restriction must be absent, and why.
 NO_SSH_RESTRICTION = {"rbac-shared-no-netpol.yaml": "networkPolicy.enabled=false",
+                      "rbac-otlp-no-netpol.yaml": "networkPolicy.enabled=false",
                       "rbac-shared-no-gateway.yaml": "gateway.enabled=false"}
 
 # Managed-mode renders -> the driver's managed SSH ingress (gateway namespace, pod
@@ -498,6 +508,12 @@ MANAGED_SSH = {
     "rbac-managed-tls": (None, own_pods[0]),
     "good-all-options.yaml": ("example-gateway", {"app": "gateway"}),
 }
+
+# The driver pod's egress: DNS and the apiserver's 443, and the OTLP collector's port
+# (render -> port) when driver.otlpEndpoint is set.
+DRIVER_EGRESS = [{"ports": [{"port": 53, "protocol": "UDP"}, {"port": 53, "protocol": "TCP"}]},
+                 {"ports": [{"port": 443, "protocol": "TCP"}]}]
+OTLP_PORT = {"good-all-options.yaml": 4317, "rbac-otlp-https.yaml": 443, "rbac-otlp-http.yaml": 80}
 
 def ssh_restriction(release_namespace):
     return {"podSelector": {"matchLabels": {"openshell.ai/managed-by": "openshell"}},
@@ -538,6 +554,17 @@ for render in sorted(work.glob("r*.yaml")) + [work / "good-all-options.yaml"]:
         failures.append(f"{render.name}: {len(ssh)} SSH-ingress restrictions in {mode} mode"
                         + (f" with {NO_SSH_RESTRICTION[render.name]}" if render.name in NO_SSH_RESTRICTION else "")
                         + f", want {want}")
+    driver_policy = [d for d in policies if d["metadata"]["name"] == pod["metadata"]["name"] + "-driver"]
+    if driver_policy:
+        otlp = OTLP_PORT.get(render.name)
+        want_egress = DRIVER_EGRESS + ([{"ports": [{"port": otlp, "protocol": "TCP"}]}] if otlp else [])
+        if (driver_policy[0].get("spec") or {}).get("egress") != want_egress:
+            failures.append(f"{render.name}: the driver pod's egress is {driver_policy[0]['spec'].get('egress')}, "
+                            f"want {want_egress}")
+    elif render.name == "rbac-otlp-no-netpol.yaml" and policies:
+        failures.append(f"{render.name}: NetworkPolicies rendered with networkPolicy.enabled=false")
+    elif render.name not in ("rbac-shared-no-netpol.yaml", "rbac-managed-no-netpol.yaml", "rbac-otlp-no-netpol.yaml"):
+        failures.append(f"{render.name}: no NetworkPolicy for the driver pod")
     for d in policies:
         name, spec = d["metadata"]["name"], d.get("spec") or {}
         if d in ssh:
