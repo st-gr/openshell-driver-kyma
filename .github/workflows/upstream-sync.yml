@@ -363,7 +363,12 @@ jobs:
                blocks must stay byte-identical to upstream (scripts/check-upstream-args.sh).
                The target exits non-zero while that diff exists; the dependency edits are
                already done by then, so mirror the diff and re-run
-               scripts/check-upstream-args.sh until it exits 0.
+               scripts/check-upstream-args.sh until it exits 0. It also fails with
+               UPSTREAM_MAIN_DRIFT when the rest of upstream's main.rs (its main():
+               tracing, socket and TCP serving, the RPC layer) changed: mirror that diff
+               into crates/openshell-driver-kyma/src/main.rs, then put the line it prints
+               into scripts/upstream-main-rs.sha256, and say so in your final summary so
+               the reviewer checks the mirror before merging.
                Run every make target in this list as `make DOCKER_RUN= DEV_IMAGE= <target>`:
                by default the Makefile runs cargo inside a dev container image that this job
                does not build, and the two empty overrides make it call the host's cargo
@@ -387,7 +392,9 @@ jobs:
                source with:
                  git clone --filter=blob:none https://github.com/NVIDIA/OpenShell "$RUNNER_TEMP/upstream"
                  git -C "$RUNNER_TEMP/upstream" diff ${{ env.PINNED_PROTO_REF }} ${{ env.PROTO_TARGET_TAG }} -- \
-                   deploy/helm/openshell/templates crates/openshell-driver-kubernetes/src/config.rs
+                   deploy/helm/openshell/templates deploy/helm/openshell/values.yaml \
+                   crates/openshell-driver-kubernetes/src/config.rs \
+                   crates/openshell-driver-kubernetes/src/main.rs
                Read that diff yourself and mirror every change into both this chart and
                scripts/check-chart-render.sh, including the upstream line references in their
                comments. The script's RBAC, NetworkPolicy and guard checks encode the OLD tag's
@@ -406,7 +413,15 @@ jobs:
                  -> this chart's networkpolicy-sandbox-ssh.yaml and check 4's expected policy
                  shape;
                - crates/openshell-driver-kubernetes/src/config.rs validate_workspace_mode ->
-                 this chart's _workspace-guards.tpl and checks 3c and later.
+                 this chart's _workspace-guards.tpl and checks 3c and later;
+               - crates/openshell-driver-kubernetes/src/main.rs -> the driver's main()
+                 behaviour (tracing, socket and TCP serving, the RPC layer) into
+                 crates/openshell-driver-kyma/src/main.rs (item 1 covers its option struct
+                 and config literal);
+               - deploy/helm/openshell/values.yaml -> this chart's defaults in
+                 deploy/helm/openshell-driver-kyma/values.yaml for the same settings
+                 (for example allowDriverConfig, resourceAdmission, the sandbox image,
+                 networkPolicy and managed SSH ingress), and the checks that assert them.
             4. Run `cargo build --workspace --all-targets` and fix every compile error the new
                upstream release causes. The wrapper around upstream's driver is
                crates/openshell-driver-kyma/src/service.rs; follow its conventions and those of

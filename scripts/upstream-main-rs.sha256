@@ -1,0 +1,10 @@
+# sha256 of upstream NVIDIA/OpenShell crates/openshell-driver-kubernetes/src/main.rs
+# at the tag on the last line, with the two regions scripts/check-upstream-args.sh
+# compares line by line (the body of `struct Args` and of the
+# `KubernetesComputeConfig { ... }` literal) removed. What remains is upstream's
+# main(): tracing, the private Unix socket or TCP serving, the RPC layer, which
+# crates/openshell-driver-kyma/src/main.rs mirrors by hand. check-upstream-args.sh
+# fails when upstream's differs, printing the diff and the line to put below once
+# the change is mirrored into src/main.rs and reviewed. Never update the line
+# without that review: it records that src/main.rs matches this upstream main().
+e11fc5107b6e8d9b3eabc99dfdd3bdf952ec423c2205c38e927f9dd2dc378325  v0.1.2

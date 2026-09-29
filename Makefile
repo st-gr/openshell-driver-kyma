@@ -79,7 +79,8 @@ upstream-args-check:
 # Move the driver to a new upstream release: make upstream-bump TAG=v0.1.3
 # Rewrites the tag on the three openshell-* git dependencies, refreshes
 # Cargo.lock, then prints any option-surface diff to mirror into
-# crates/openshell-driver-kyma/src/upstream_args.rs.
+# crates/openshell-driver-kyma/src/upstream_args.rs, and any change to the rest
+# of upstream's main.rs to mirror into src/main.rs and re-acknowledge.
 .PHONY: upstream-bump
 upstream-bump:
 	@test -n "$(TAG)" || { echo "usage: make upstream-bump TAG=vX.Y.Z" >&2; exit 2; }
@@ -88,6 +89,10 @@ upstream-bump:
 	@test "$$(grep -E '^openshell-[a-z-]+ = \{ git = "https://github.com/NVIDIA/OpenShell", tag = "' Cargo.toml | grep -cF 'tag = "$(TAG)"')" = 3 \
 		|| { echo "error: upstream-bump: Cargo.toml does not pin all three openshell-* dependencies to $(TAG) after the rewrite; check its formatting (git diff Cargo.toml)" >&2; exit 1; }
 	$(DOCKER_RUN) $(DEV_IMAGE) cargo update -p openshell-driver-kubernetes
+	@echo "note: check-upstream-args.sh also hashes the rest of upstream's main.rs. If it reports"
+	@echo "      UPSTREAM_MAIN_DRIFT, review the diff it prints, mirror it into"
+	@echo "      crates/openshell-driver-kyma/src/main.rs, and only then re-acknowledge the hash"
+	@echo "      by putting the line it prints into scripts/upstream-main-rs.sha256."
 	./scripts/check-upstream-args.sh
 
 .PHONY: fmt

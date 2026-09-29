@@ -60,7 +60,9 @@ jobs:
   # driver. The driver links upstream's crates at a pinned tag, but upstream
   # declares its CLI options in the driver binary's main.rs, so they are copied
   # into upstream_args.rs. A copy that drifted from the pin would silently drop
-  # or misread flags.
+  # or misread flags. The same script holds the rest of that main.rs (serving,
+  # tracing) to the hash recorded in scripts/upstream-main-rs.sha256, which
+  # src/main.rs mirrors.
   upstream-parity:
     name: driver options match upstream
     runs-on: ubuntu-latest
