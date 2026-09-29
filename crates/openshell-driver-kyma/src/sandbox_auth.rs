@@ -29,6 +29,8 @@ pub fn runtime_identity(namespace: &str, sandbox_uid: &str) -> String {
 use crate::error::DriverError;
 use crate::provisioner::SA_TOKEN_AUDIENCE;
 use k8s_openapi::api::authentication::v1::{TokenReviewStatus, UserInfo};
+use serde::Serialize;
+use std::collections::BTreeMap;
 
 /// Kubernetes-populated TokenReview extras identifying the presenting Pod.
 pub const POD_NAME_EXTRA: &str = "authentication.kubernetes.io/pod-name";
@@ -232,6 +234,61 @@ pub fn map_token_review_error(error: &kube::Error) -> DriverError {
         }
     }
     DriverError::Unavailable("Kubernetes TokenReview call failed".to_string())
+}
+
+#[derive(Serialize)]
+struct ResourceAdmission<'a> {
+    enabled: bool,
+    required_labels: &'a BTreeMap<String, String>,
+}
+
+#[derive(Serialize)]
+struct DriverAdmission<'a> {
+    allow_driver_config: bool,
+    resource_admission: ResourceAdmission<'a>,
+}
+
+/// Acknowledgement of the gateway's effective resource-admission policy.
+///
+/// The gateway builds the same policy from `[openshell.drivers.kyma]` and
+/// rejects the driver at startup unless this string matches byte-for-byte, so
+/// the wire format mirrors upstream's `DriverAdmissionConfig::acknowledgement`:
+/// the literal `v1:` followed by the serialised policy. `BTreeMap` keeps key
+/// order deterministic, which the equality check depends on.
+#[must_use]
+pub fn admission_acknowledgement(
+    allow_driver_config: bool,
+    admission_enabled: bool,
+    required_labels: &BTreeMap<String, String>,
+) -> String {
+    let policy = DriverAdmission {
+        allow_driver_config,
+        resource_admission: ResourceAdmission {
+            enabled: admission_enabled,
+            required_labels,
+        },
+    };
+    format!(
+        "v1:{}",
+        serde_json::to_string(&policy).expect("admission policy is plain data")
+    )
+}
+
+/// Upstream's default `required_labels`, which apply when the gateway config
+/// omits `resource_admission`. The workspace label's value is the literal
+/// placeholder upstream substitutes per workspace.
+#[must_use]
+pub fn default_required_labels() -> BTreeMap<String, String> {
+    BTreeMap::from([
+        (
+            "openshell.ai/sandbox-attachable".to_string(),
+            "true".to_string(),
+        ),
+        (
+            "openshell.ai/sandbox-attachable-workspace".to_string(),
+            "${workspace}".to_string(),
+        ),
+    ])
 }
 
 #[cfg(test)]
@@ -667,5 +724,33 @@ mod tests {
             ..Default::default()
         })));
         assert!(matches!(mapped, DriverError::Kube(_)), "got {mapped:?}");
+    }
+
+    #[test]
+    fn acknowledgement_uses_upstreams_versioned_json_format() {
+        let mut labels = BTreeMap::new();
+        labels.insert(
+            "openshell.ai/sandbox-attachable".to_string(),
+            "true".to_string(),
+        );
+        let ack = admission_acknowledgement(true, true, &labels);
+        assert_eq!(
+            ack,
+            r#"v1:{"allow_driver_config":true,"resource_admission":{"enabled":true,"required_labels":{"openshell.ai/sandbox-attachable":"true"}}}"#
+        );
+    }
+
+    #[test]
+    fn acknowledgement_is_deterministic() {
+        // The gateway re-reads capabilities and fails if the value changed, so
+        // key ordering must not depend on map iteration luck.
+        let mut labels = BTreeMap::new();
+        labels.insert("b".to_string(), "2".to_string());
+        labels.insert("a".to_string(), "1".to_string());
+        assert_eq!(
+            admission_acknowledgement(false, true, &labels),
+            admission_acknowledgement(false, true, &labels)
+        );
+        assert!(admission_acknowledgement(false, true, &labels).contains(r#""a":"1","b":"2""#));
     }
 }

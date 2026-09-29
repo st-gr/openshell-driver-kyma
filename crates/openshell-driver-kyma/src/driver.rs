@@ -155,11 +155,16 @@ impl ComputeDriver for Driver {
             // new operator admission/policy negotiation system
             // (`DriverSandboxSpec.policy`, `WorkloadIdentityRequest`,
             // `DriverFenceEvidence`, `resolved_identity`, `fence_evidence`,
-            // etc. on compute_driver.proto). Empty is the documented
-            // "legacy driver" value for this field; gateways that enforce
-            // admission policy will need an explicit opt-out configured on
-            // the gateway side until this driver implements the new system.
-            resource_admission_policy: String::new(),
+            // etc. on compute_driver.proto).
+            // Must equal the policy the gateway derives from
+            // `[openshell.drivers.kyma]`, or it refuses the driver at
+            // startup. Empty is accepted only when the gateway has admission
+            // explicitly disabled, which is not the default.
+            resource_admission_policy: crate::sandbox_auth::admission_acknowledgement(
+                self.cfg.allow_driver_config,
+                self.cfg.resource_admission_enabled,
+                &crate::sandbox_auth::default_required_labels(),
+            ),
         }))
     }
 
@@ -559,6 +564,28 @@ mod tests {
             .unwrap()
             .into_inner();
         assert!(!r.gateway_manages_lifecycle);
+    }
+
+    #[tokio::test]
+    async fn capabilities_acknowledge_the_admission_policy() {
+        let d = make_driver_with_mocks(
+            Config::default(),
+            MockSandboxProvisioner::new(),
+            MockDriverMetrics::new(),
+        );
+        let caps = d
+            .get_capabilities(Request::new(GetCapabilitiesRequest::default()))
+            .await
+            .expect("capabilities")
+            .into_inner();
+        assert!(
+            caps.resource_admission_policy.starts_with("v1:"),
+            "got {}",
+            caps.resource_admission_policy
+        );
+        assert!(caps
+            .resource_admission_policy
+            .contains(r#""allow_driver_config":true"#));
     }
 
     /// Capability names the gateway requires are matched against what this
