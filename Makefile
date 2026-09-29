@@ -111,25 +111,6 @@ build:
 test: fmt-check clippy
 	$(DOCKER_RUN) $(DEV_IMAGE) cargo test --workspace --lib --tests
 
-.PHONY: test-integration
-test-integration:
-ifeq ($(strip $(INTEGRATION_TEST_NAMESPACE)),)
-	$(error INTEGRATION_TEST_NAMESPACE must be set, e.g. INTEGRATION_TEST_NAMESPACE=openshell-driver-test)
-endif
-	# Render a static (exec-auth-resolved) kubeconfig on the host once,
-	# then bind-mount it into the dev container at /root/.kube/config.
-	# The dev image lacks `kubectl-oidc_login` and a browser, so it
-	# cannot run exec-based auth itself. Kyma kubeconfigs use OIDC,
-	# so we resolve to a bearer token here and pass that through.
-	# The rendered file lands under .tmp/ (gitignored).
-	mkdir -p .tmp
-	node scripts/render-static-kubeconfig.js > .tmp/kubeconfig
-	$(DOCKER_RUN) -v "$(CURDIR)/.tmp/kubeconfig:/root/.kube/config:ro" \
-		-e INTEGRATION_TEST_NAMESPACE=$(INTEGRATION_TEST_NAMESPACE) \
-		-e INTEGRATION_TEST_NAMESPACE_DENYLIST=$${INTEGRATION_TEST_NAMESPACE_DENYLIST:-} \
-		$(DEV_IMAGE) \
-		cargo test -p openshell-driver-kyma --test live_cluster --features integration -- --test-threads=1
-
 .PHONY: test-all
 test-all: test test-integration
 

@@ -16,62 +16,14 @@ name = "openshell-driver-kyma"
 path = "src/main.rs"
 
 [dependencies]
-computev1 = { path = "../computev1" }
-
-# gRPC + protobuf
-tonic = { workspace = true }
-prost = { workspace = true }
-prost-types = { workspace = true }
-
-# Kubernetes
-kube = { workspace = true }
-k8s-openapi = { workspace = true }
-
-# Async runtime
+openshell-driver-kubernetes = { workspace = true }
+openshell-core = { workspace = true }
+openshell-otel = { workspace = true }
+tonic = { workspace = true, features = ["transport"] }
 tokio = { workspace = true }
-tokio-stream = { workspace = true }
-futures = { workspace = true }
-async-trait = { workspace = true }
-
-# HTTP server
-axum = { workspace = true }
-tower = { workspace = true }
-http = { workspace = true }
-http-body-util = { workspace = true }
-
-# Observability
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-prometheus = { workspace = true }
-
-# CLI
 clap = { workspace = true }
-
-# Errors
-thiserror = { workspace = true }
-anyhow = { workspace = true }
-
-# TLS provider. rustls 0.23 requires the binary to call
-# CryptoProvider::install_default() explicitly before any TLS use; the
-# library version of this crate does not do that to avoid global side
-# effects in tests, so the binary main installs it.
-rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
-
-# Serde
-serde = { workspace = true }
-serde_json = { workspace = true }
-serde_yaml = { workspace = true }
+miette = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
-mockall = { workspace = true }
-tower-test = { workspace = true }
-tempfile = { workspace = true }
-assert_cmd = { workspace = true }
-reqwest = { workspace = true }
-tokio = { workspace = true, features = ["full", "test-util"] }
-hyper-util = { workspace = true }
-async-trait = { workspace = true }
-
-[features]
-# Gates Tier-3 live-cluster tests in tests/live_cluster.rs.
-integration = []
+futures = { workspace = true }
