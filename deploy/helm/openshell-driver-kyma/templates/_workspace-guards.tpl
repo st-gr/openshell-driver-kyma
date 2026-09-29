@@ -12,7 +12,10 @@ instead of crash-looping the pod:
             config.rs:671   "openshell-<id>-" plus a 19-character workspace
                             name fits 63 characters, so the id is at most 33
             config.rs:682   managed SSH ingress needs a gateway namespace
-                            and a gateway pod selector
+                            and a gateway pod selector (checked on the
+                            effective values, openshell-driver-kyma.
+                            managedSshIngress: with the in-pod gateway both
+                            default to its own pod)
   operator  config.rs:697   exactly one of the namespace label or file...
             config.rs:703   ...not both
 Not mirrored because no chart value can reach them: an empty gateway id
@@ -37,13 +40,13 @@ deployment.yaml. */}}
 {{- if gt (add (len $prefix) 19) 63 -}}
 {{- fail (printf "gateway.sandboxJwt.gatewayId %q (default: the release's fullname) is %d characters, too long for managed mode: the namespace prefix %q plus the longest workspace name (19 characters) must fit the 63-character namespace limit, so the id may be at most %d characters. Set gateway.sandboxJwt.gatewayId to a shorter DNS-1123 label." $gid (len $gid) $prefix $maxId) -}}
 {{- end -}}
-{{- $ssh := .Values.driver.managedSshIngress -}}
+{{- $ssh := include "openshell-driver-kyma.managedSshIngress" . | fromJson -}}
 {{- if $ssh.enabled -}}
 {{- if not $ssh.gatewayNamespace -}}
-{{- fail "driver.managedSshIngress.enabled in managed mode requires driver.managedSshIngress.gatewayNamespace." -}}
+{{- fail "driver.managedSshIngress.enabled in managed mode requires driver.managedSshIngress.gatewayNamespace (it defaults to the release namespace only with the in-pod gateway, gateway.enabled)." -}}
 {{- end -}}
 {{- if not $ssh.gatewayPodSelector -}}
-{{- fail "driver.managedSshIngress.enabled in managed mode requires driver.managedSshIngress.gatewayPodSelector (key=value entries)." -}}
+{{- fail "driver.managedSshIngress.enabled in managed mode requires driver.managedSshIngress.gatewayPodSelector (key=value entries; it defaults to this chart's pod labels only with the in-pod gateway, gateway.enabled)." -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

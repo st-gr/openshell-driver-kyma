@@ -168,7 +168,10 @@ the next `helm upgrade` re-runs the post-install Job.
 the driver). Kubernetes NetworkPolicies are additive, so the chart adds none
 that select sandbox pods, apart from `<fullname>-sandbox-ssh` (shared mode
 with the in-pod gateway), which restricts SSH ingress (TCP 2222) on sandbox
-pods to the gateway pod, as upstream's chart does. With an external gateway
+pods to the gateway pod, as upstream's chart does. In managed mode the driver
+applies the same restriction in each workspace namespace itself
+(`driver.managedSshIngress`, on by default with the in-pod gateway and
+`networkPolicy.enabled`, as upstream's). With an external gateway
 (`gateway.enabled=false`) the gateway's own deployment owns that policy. There
 is no `gatewayUpstreamEgress` value: an in-cluster upstream needs no
 NetworkPolicy from this chart.

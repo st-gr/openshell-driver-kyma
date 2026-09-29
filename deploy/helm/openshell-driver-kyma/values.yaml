@@ -121,8 +121,8 @@ driver:
   #              gateway.sandboxJwt.gatewayId (default: the release's
   #              fullname) and must be a DNS-1123 label of at most 33
   #              characters, so a long release name needs an explicit,
-  #              shorter gatewayId. managedSshIngress.enabled also needs
-  #              its gatewayNamespace and gatewayPodSelector.
+  #              shorter gatewayId. managedSshIngress (below) is on by
+  #              default with the in-pod gateway.
   #   operator - namespaces the operator selects: set exactly one of
   #              operatorNamespaceLabel or operatorNamespaceConfigMap below.
   #
@@ -190,10 +190,20 @@ driver:
   operatorNamespaceConfigMap:
     name: ""
     key: namespaces
+  # Managed mode: the NetworkPolicy the driver applies in each workspace
+  # namespace, restricting SSH ingress (TCP 2222) on sandbox pods to the
+  # gateway pod; the managed-mode counterpart of <fullname>-sandbox-ssh.
+  # Upstream's chart turns it on with networkPolicy.enabled, naming its own
+  # gateway pod. Here, in managed mode with the in-pod gateway
+  # (gateway.enabled) and networkPolicy.enabled, it is on by default, with the
+  # release namespace as gatewayNamespace and this chart's pod labels as
+  # gatewayPodSelector. Each key overrides its part: enabled: false turns it
+  # off. With an external gateway (gateway.enabled=false) nothing is derived:
+  # set enabled: true and both of the others.
   managedSshIngress:
-    enabled: false
-    gatewayNamespace: ""
-    gatewayPodSelector: []   # key=value entries
+    enabled: null            # null = the default above; true or false overrides it
+    gatewayNamespace: ""     # "" = the release namespace, with gateway.enabled
+    gatewayPodSelector: []   # key=value entries; empty = this chart's pod labels, with gateway.enabled
   upstreamProxy:
     url: ""
     noProxy: ""
@@ -231,7 +241,8 @@ networkPolicy:
   #     external gateway (gateway.enabled=false) no SSH policy is rendered here:
   #     the gateway's own deployment owns it, as upstream's chart does for its
   #     gateway. In managed mode the driver applies the equivalent policy to each
-  #     workspace itself, when driver.managedSshIngress.enabled;
+  #     workspace itself (driver.managedSshIngress, on by default with the in-pod
+  #     gateway and this value);
   #   - one for the bedrock bridge, when bedrockBridge.enabled.
   # Nothing else selects sandbox pods. Upstream's driver fences them per
   # namespace (openshell-sandbox-workloads, openshell-sandbox-supervisors), and

@@ -18,7 +18,9 @@
 #      UID/GID, 3g driver.allowDriverConfig and driver.resourceAdmission;
 #   4. the chart's NetworkPolicies: exactly one selects OpenShell sandbox pods, the
 #      mirror of upstream's SSH-ingress restriction, present in shared mode with the
-#      in-pod gateway only;
+#      in-pod gateway only; in managed mode the driver applies it instead, so the
+#      driver's managed SSH ingress settings are asserted there (on by default with
+#      the in-pod gateway, naming its own pod);
 #      the rest select only the chart's own pods. Upstream fences sandboxes per
 #      namespace and NetworkPolicies are additive, so any other policy could only
 #      widen that fence;
@@ -125,12 +127,16 @@ try good-3d-label '' t --set driver.workspaceMode=operator --set driver.operator
 try good-3d-configmap '' t --set driver.workspaceMode=operator --set driver.operatorNamespaceConfigMap.name=ns
 
 # 3e. Managed SSH ingress needs a gateway namespace and a pod selector, in managed
-# mode only.
+# mode only. The guard reads the effective values: with the in-pod gateway both
+# default to its own pod, so the refusals need an external gateway.
 try bad-3e-no-namespace 'driver.managedSshIngress.gatewayNamespace' t --set driver.workspaceMode=managed \
+	--set gateway.enabled=false \
 	--set driver.managedSshIngress.enabled=true --set 'driver.managedSshIngress.gatewayPodSelector[0]=app=gateway'
 try bad-3e-no-selector 'driver.managedSshIngress.gatewayPodSelector' t --set driver.workspaceMode=managed \
+	--set gateway.enabled=false \
 	--set driver.managedSshIngress.enabled=true --set driver.managedSshIngress.gatewayNamespace=gw
 try good-3e-shared-unchecked '' t --set driver.managedSshIngress.enabled=true
+try good-3e-in-pod-defaults '' t --set driver.workspaceMode=managed --set driver.managedSshIngress.enabled=true
 
 # 3f. A set sandbox UID/GID is a whole number from 1 to 4294967294; unset stays unset.
 try bad-3f-uid-zero 'driver.sandboxUid' t --set driver.sandboxUid=0
@@ -209,10 +215,19 @@ render_as t --set driver.workspaceMode=managed --set gateway.sandboxJwt.gatewayI
 render_as t --set driver.workspaceMode=operator --set driver.operatorNamespaceLabel=team=a \
 	--set driver.enableApirule=true --set driver.clusterDomain=example.org \
 	>"$WORK/rbac-operator-apirule.yaml"
-# Managed SSH ingress, which makes the driver write a NetworkPolicy in every workspace.
+# Managed SSH ingress, which makes the driver write a NetworkPolicy in every workspace:
+# on by default with the in-pod gateway and networkPolicy.enabled (every managed render
+# above), here with an explicit namespace and selector, and off when networkPolicy is,
+# with an external gateway, or when disabled explicitly.
 render_as t --set driver.workspaceMode=managed --set gateway.sandboxJwt.gatewayId=gw \
 	--set driver.managedSshIngress.enabled=true --set driver.managedSshIngress.gatewayNamespace=gw-ns \
 	--set 'driver.managedSshIngress.gatewayPodSelector[0]=app=gateway' >"$WORK/rbac-managed-ssh.yaml"
+render_as t --set driver.workspaceMode=managed --set gateway.sandboxJwt.gatewayId=gw \
+	--set networkPolicy.enabled=false >"$WORK/rbac-managed-no-netpol.yaml"
+render_as t --set driver.workspaceMode=managed --set gateway.sandboxJwt.gatewayId=gw \
+	--set gateway.enabled=false >"$WORK/rbac-managed-no-gateway.yaml"
+render_as t --set driver.workspaceMode=managed --set gateway.sandboxJwt.gatewayId=gw \
+	--set driver.managedSshIngress.enabled=false >"$WORK/rbac-managed-ssh-off.yaml"
 # The Secrets the driver stages into workspace namespaces: a client TLS Secret and
 # image-pull Secrets. The pull list repeats a name, repeats the TLS name and holds
 # an empty entry, so each render also proves the deduplication and the skip.
@@ -414,6 +429,12 @@ if env is not None and (env.get("OPENSHELL_OPERATOR_NAMESPACE_FILE") != "/etc/op
     failures.append("operator mode with only a ConfigMap did not emit only OPENSHELL_OPERATOR_NAMESPACE_FILE")
 
 rendered("good-3e-shared-unchecked")
+env = rendered("good-3e-in-pod-defaults")
+if env is not None and (env.get("OPENSHELL_MANAGED_SSH_INGRESS_ENABLED") != "true"
+                        or not env.get("OPENSHELL_MANAGED_SSH_GATEWAY_NAMESPACE")
+                        or not env.get("OPENSHELL_MANAGED_SSH_GATEWAY_POD_SELECTOR")):
+    failures.append("managed SSH ingress enabled with the in-pod gateway did not default its gateway "
+                    f"namespace and pod selector: {env}")
 
 env = rendered("good-3f-bounds")
 if env is not None and (env.get("OPENSHELL_K8S_SANDBOX_UID"), env.get("OPENSHELL_K8S_SANDBOX_GID")) != ("1", "4294967294"):
@@ -450,6 +471,23 @@ own_pods = [{"app.kubernetes.io/name": chart_name, "app.kubernetes.io/instance":
 NO_SSH_RESTRICTION = {"rbac-shared-no-netpol.yaml": "networkPolicy.enabled=false",
                       "rbac-shared-no-gateway.yaml": "gateway.enabled=false"}
 
+# Managed-mode renders -> the driver's managed SSH ingress (gateway namespace, pod
+# selector), or None when it must be off. None for a namespace is the release's.
+# Upstream derives it from networkPolicy.enabled with its own gateway pod
+# (deploy/helm/openshell/templates/gateway-config.yaml:230-233); here that pod is
+# the in-pod gateway's, the chart's own.
+MANAGED_SSH = {
+    "render-managed-true": (None, own_pods[0]),
+    "render-managed-false": (None, own_pods[0]),
+    "rbac-managed-apirule": (None, own_pods[0]),
+    "rbac-managed-secrets": (None, own_pods[0]),
+    "rbac-managed-ssh": ("gw-ns", {"app": "gateway"}),            # explicit values override the defaults
+    "rbac-managed-no-netpol": None,                              # networkPolicy.enabled=false, as upstream
+    "rbac-managed-no-gateway": None,                             # an external gateway: nothing derived
+    "rbac-managed-ssh-off": None,                                # driver.managedSshIngress.enabled=false
+    "good-all-options.yaml": ("example-gateway", {"app": "gateway"}),
+}
+
 def ssh_restriction(release_namespace):
     return {"podSelector": {"matchLabels": {"openshell.ai/managed-by": "openshell"}},
             "policyTypes": ["Ingress"],
@@ -465,6 +503,23 @@ for render in sorted(work.glob("r*.yaml")) + [work / "good-all-options.yaml"]:
         continue
     mode = {e["name"]: e.get("value") for e in driver_container(documents).get("env", [])}.get(
         "OPENSHELL_WORKSPACE_MODE")
+    env = {e["name"]: e.get("value") for e in driver_container(documents).get("env", [])}
+    ssh_env = (env.get("OPENSHELL_MANAGED_SSH_INGRESS_ENABLED"), env.get("OPENSHELL_MANAGED_SSH_GATEWAY_NAMESPACE"),
+               dict(e.split("=", 1) for e in env["OPENSHELL_MANAGED_SSH_GATEWAY_POD_SELECTOR"].split(","))
+               if env.get("OPENSHELL_MANAGED_SSH_GATEWAY_POD_SELECTOR") else None)
+    key = render.stem if render.stem in MANAGED_SSH else render.name
+    if mode == "managed":
+        if key not in MANAGED_SSH:
+            failures.append(f"{render.name}: a managed-mode render with no entry in check 4's MANAGED_SSH table")
+        else:
+            want_ssh = MANAGED_SSH[key]
+            want_env = (None, None, None) if want_ssh is None else (
+                "true", want_ssh[0] or pod["metadata"].get("namespace"), want_ssh[1])
+            if ssh_env != want_env:
+                failures.append(f"{render.name}: managed SSH ingress (enabled, gateway namespace, pod selector) "
+                                f"is {ssh_env}, want {want_env}")
+    elif ssh_env[0] is not None:
+        failures.append(f"{render.name}: managed SSH ingress is enabled in {mode} mode, where nothing sets it")
     policies = [d for d in documents if d.get("kind") == "NetworkPolicy"]
     ssh = [d for d in policies if d["metadata"]["name"].endswith("-sandbox-ssh")]
     want = 1 if mode == "shared" and render.name not in NO_SSH_RESTRICTION else 0
@@ -559,7 +614,8 @@ NAMESPACE_DISCOVERY = [("", "namespaces", ["list", "watch"])]                   
 NAMESPACE_LIFECYCLE = [("", "namespaces", ["create", "delete"])]                    # clusterrole.yaml:53-56, managed
 WORKSPACE_SERVICEACCOUNTS = [("", "serviceaccounts", ["create", "get"])]            # clusterrole.yaml:109-116, managed
 # clusterrole.yaml:118-129 applies the SSH-ingress policy in each workspace. Upstream gates it on its
-# networkPolicy.enabled, which sets managed_ssh_ingress.enabled there; here that is driver.managedSshIngress.enabled.
+# networkPolicy.enabled, which sets managed_ssh_ingress.enabled there; here it follows the effective
+# managed SSH ingress, which derives from networkPolicy.enabled with the in-pod gateway (see check 4).
 SSH_INGRESS_POLICY = [("networking.k8s.io", "networkpolicies", ["get", "create", "patch", "update"])]
 # The Kyma layer (src/exposure.rs, src/namespaces.rs): server-side apply of a Service, a
 # NetworkPolicy and an APIRule (patch, and create for a new object; nothing reads an
@@ -591,11 +647,15 @@ EXPECTED = {
     "rbac-apirule": (SHARED + [KYMA_EXPOSURE], SHARED_CLUSTER),
     "rbac-shared-secrets": (SHARED, SHARED_CLUSTER),                                       # shared mode stages no Secret
     "rbac-inference": (SHARED, SHARED_CLUSTER),                                            # the hook's own Role is bound to the hook
-    "render-managed-true": ([], MANAGED + [PVC_GET]),
-    "render-managed-false": ([], MANAGED),
-    "rbac-managed-apirule": ([], MANAGED + [KYMA_EXPOSURE, KYMA_PSA_LABEL]),
+    # Managed SSH ingress is on by default with the in-pod gateway and networkPolicy.enabled.
+    "render-managed-true": ([], MANAGED + [PVC_GET, SSH_INGRESS_POLICY]),
+    "render-managed-false": ([], MANAGED + [SSH_INGRESS_POLICY]),
+    "rbac-managed-apirule": ([], MANAGED + [SSH_INGRESS_POLICY, KYMA_EXPOSURE, KYMA_PSA_LABEL]),
     "rbac-managed-ssh": ([], MANAGED + [SSH_INGRESS_POLICY]),
-    "rbac-managed-secrets": ([secret_sources("client-tls", "pull-a", "pull-b")], MANAGED),
+    "rbac-managed-no-netpol": ([], MANAGED),                                               # as upstream, off with networkPolicy
+    "rbac-managed-no-gateway": ([], MANAGED),                                              # an external gateway: off unless set
+    "rbac-managed-ssh-off": ([], MANAGED),
+    "rbac-managed-secrets": ([secret_sources("client-tls", "pull-a", "pull-b")], MANAGED + [SSH_INGRESS_POLICY]),
     "rbac-operator-apirule": ([], OPERATOR + [KYMA_EXPOSURE]),
     "rbac-operator-secrets": ([secret_sources("client-tls")], OPERATOR),                   # TLS Secret only, no pull Secrets
     "good-all-options": ([all_options_secrets], MANAGED + [PVC_GET, SSH_INGRESS_POLICY, KYMA_EXPOSURE, KYMA_PSA_LABEL]),

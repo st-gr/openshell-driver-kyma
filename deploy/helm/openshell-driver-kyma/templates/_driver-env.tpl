@@ -66,15 +66,16 @@ scripts/check-chart-render.sh fails CI when an upstream option is missing here.
 - name: OPENSHELL_SANDBOX_IMAGE_PULL_SECRETS
   value: {{ join "," . | quote }}
 {{- end }}
-{{- if $d.managedSshIngress.enabled }}
+{{- $ssh := include "openshell-driver-kyma.managedSshIngress" . | fromJson }}
+{{- if $ssh.enabled }}
 - name: OPENSHELL_MANAGED_SSH_INGRESS_ENABLED
   value: "true"
 {{- end }}
-{{- with $d.managedSshIngress.gatewayNamespace }}
+{{- with $ssh.gatewayNamespace }}
 - name: OPENSHELL_MANAGED_SSH_GATEWAY_NAMESPACE
   value: {{ . | quote }}
 {{- end }}
-{{- with $d.managedSshIngress.gatewayPodSelector }}
+{{- with $ssh.gatewayPodSelector }}
 - name: OPENSHELL_MANAGED_SSH_GATEWAY_POD_SELECTOR
   value: {{ join "," . | quote }}
 {{- end }}

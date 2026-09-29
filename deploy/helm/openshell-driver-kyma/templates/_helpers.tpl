@@ -146,6 +146,41 @@ this release's Service. Empty lets upstream decide.
 {{- end -}}
 
 {{/*
+The effective managed SSH ingress, as JSON {enabled, gatewayNamespace,
+gatewayPodSelector}. Upstream's chart sets managed_ssh_ingress from its own
+networkPolicy.enabled, with its release namespace and its gateway pod's labels
+(deploy/helm/openshell/templates/gateway-config.yaml:230-233 at the pinned tag).
+Here the gateway is the in-pod sidecar (gateway.enabled), so in managed mode
+with gateway.enabled and networkPolicy.enabled it is on by default, naming
+.Release.Namespace and this chart's selectorLabels. driver.managedSshIngress
+overrides each part: enabled (true or false; null for the default),
+gatewayNamespace and gatewayPodSelector. The namespace and selector are derived
+only when it is enabled and the gateway is in-pod; with an external gateway
+(gateway.enabled=false) nothing is derived, so it is off unless enabled and then
+takes both from values. The env, the ClusterRole and the workspace guards all
+read this, so they follow one effective value.
+*/}}
+{{- define "openshell-driver-kyma.managedSshIngress" -}}
+{{- $ssh := .Values.driver.managedSshIngress -}}
+{{- $enabled := $ssh.enabled -}}
+{{- if kindIs "invalid" $enabled -}}
+{{- $enabled = and (eq .Values.driver.workspaceMode "managed") .Values.gateway.enabled .Values.networkPolicy.enabled -}}
+{{- end -}}
+{{- $namespace := $ssh.gatewayNamespace -}}
+{{- $selector := $ssh.gatewayPodSelector -}}
+{{- if and $enabled .Values.gateway.enabled -}}
+{{- $namespace = default .Release.Namespace $namespace -}}
+{{- if not $selector -}}
+{{- $selector = list -}}
+{{- range $key, $value := include "openshell-driver-kyma.selectorLabels" . | fromYaml -}}
+{{- $selector = append $selector (printf "%s=%s" $key $value) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- dict "enabled" $enabled "gatewayNamespace" $namespace "gatewayPodSelector" $selector | toJson -}}
+{{- end -}}
+
+{{/*
 Secrets in the sandbox namespace whose contents the driver stages into
 workspace namespaces, as a JSON array; empty in shared mode. Mirrors upstream's
 openshell.workspaceSecretSourceNames (deploy/helm/openshell/templates/_helpers.tpl

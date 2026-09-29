@@ -1,4 +1,5 @@
 {{- $mode := .Values.driver.workspaceMode }}
+{{- $ssh := include "openshell-driver-kyma.managedSshIngress" . | fromJson }}
 # Cluster-scoped rights for the driver: upstream's ClusterRole for the same
 # driver (deploy/helm/openshell/templates/clusterrole.yaml at the pinned tag),
 # plus the Kyma layer's needs in the multi-namespace modes. Shared mode keeps
@@ -80,11 +81,12 @@ rules:
   - apiGroups: [""]
     resources: ["serviceaccounts"]
     verbs: ["create", "get"]
-  {{- if .Values.driver.managedSshIngress.enabled }}
+  {{- if $ssh.enabled }}
   # Apply the gateway-only SSH ingress policy in each managed namespace.
   # Upstream gates this on its networkPolicy.enabled, the value that sets
-  # managed_ssh_ingress.enabled in its gateway config; here that option is
-  # driver.managedSshIngress.enabled, so the rule follows it.
+  # managed_ssh_ingress.enabled in its gateway config; here the rule follows
+  # the effective value (openshell-driver-kyma.managedSshIngress), which
+  # derives from the same networkPolicy.enabled with the in-pod gateway.
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
     verbs: ["get", "create", "patch", "update"]
