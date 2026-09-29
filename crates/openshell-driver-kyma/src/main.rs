@@ -15,6 +15,7 @@ use miette::{IntoDiagnostic, Result};
 use openshell_core::proto::compute::v1::compute_driver_server::ComputeDriverServer;
 use openshell_core::VERSION;
 use openshell_driver_kubernetes::{ComputeDriverService, KubernetesComputeDriver};
+use openshell_driver_kyma::exposure::{ExposureConfig, ExposureReconciler};
 use openshell_driver_kyma::hooks::KymaHookSet;
 use openshell_driver_kyma::kyma_args::KymaArgs;
 use openshell_driver_kyma::service::KymaComputeDriver;
@@ -101,12 +102,25 @@ async fn main() -> Result<()> {
             }
         }
     });
-    let driver = KubernetesComputeDriver::new(compute_config(upstream, selector), shutdown_rx)
+    let config = compute_config(upstream, selector);
+    // The Kyma layer's own client; upstream's driver builds its own internally.
+    let hook_client = kube::Client::try_default().await.into_diagnostic()?;
+    let exposure = kyma.kyma_enable_apirule.then(|| {
+        ExposureReconciler::new(
+            hook_client.clone(),
+            ExposureConfig {
+                cluster_domain: kyma.kyma_cluster_domain.clone(),
+                ingress_namespace: kyma.kyma_ingress_namespace.clone(),
+                search_namespace: (!config.is_multi_namespace()).then(|| config.namespace.clone()),
+            },
+        )
+    });
+    let driver = KubernetesComputeDriver::new(config.clone(), shutdown_rx)
         .await
         .into_diagnostic()?;
     let service = ComputeDriverServer::new(KymaComputeDriver::new(
         ComputeDriverService::new(driver),
-        Arc::new(KymaHookSet::new(kyma.enrich_config())),
+        Arc::new(KymaHookSet::new(kyma.enrich_config(), exposure)),
     ));
     let shutdown = async move {
         shutdown_signal().await;

@@ -25,7 +25,12 @@ clap = { workspace = true }
 miette = { workspace = true }
 tracing = { workspace = true }
 axum = { workspace = true }
+kube = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 futures = { workspace = true }
 tower = { workspace = true, features = ["util"] }
+http = { workspace = true }
+http-body-util = { workspace = true }
