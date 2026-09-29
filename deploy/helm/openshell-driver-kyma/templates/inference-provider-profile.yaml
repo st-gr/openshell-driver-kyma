@@ -1,12 +1,22 @@
-{{- if .Values.inferenceProvider.enabled }}
+{{- if .Values.inferenceProvider.enabled -}}
+{{- include "openshell-driver-kyma.inferenceProviderGuards" . -}}
+{{- /* The guards leave a host name with at most one colon, so what follows it is the port. */ -}}
 {{- $url := urlParse .Values.inferenceProvider.baseUrl }}
-{{- $hostPort := splitList ":" $url.host }}
-{{- $host := first $hostPort }}
-{{- $port := ternary (last $hostPort) (ternary "443" "80" (eq $url.scheme "https")) (eq (len $hostPort) 2) }}
+{{- $host := $url.hostname }}
+{{- $explicitPort := "" }}
+{{- if contains ":" $url.host }}
+{{- $explicitPort = last (splitList ":" $url.host) }}
+{{- end }}
+{{- $port := default (ternary "443" "80" (eq $url.scheme "https")) $explicitPort }}
 # Provider profile for upstream's profile model. The endpoint is the inference
 # proxy the sandbox actually calls (inferenceProvider.baseUrl), not
-# api.anthropic.com: the supervisor injects the credential only for requests
-# to this host, and only from the processes in `binaries`.
+# api.anthropic.com. The credential is bound to that host and port: the
+# supervisor resolves it only for requests to them. `binaries` gates which
+# processes may reach the endpoint when the profile contributes policy to a
+# sandbox; upstream v0.1.2 does not yet restrict the credential by calling
+# binary, so treat the endpoint as the scope. The baseUrl path is not part of
+# the binding: the endpoint sets no `path:`, so the credential applies to every
+# path on that host and port.
 apiVersion: v1
 kind: ConfigMap
 metadata:

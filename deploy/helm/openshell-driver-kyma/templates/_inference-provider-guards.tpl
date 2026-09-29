@@ -21,6 +21,20 @@ gets immediate feedback. */}}
 {{- if not .Values.inferenceProvider.baseUrl -}}
 {{- fail "inferenceProvider.enabled=true requires inferenceProvider.baseUrl (e.g. http://gateway.your-llm-ns.svc.cluster.local:8080/anthropic)." -}}
 {{- end -}}
+{{- $url := urlParse .Values.inferenceProvider.baseUrl -}}
+{{- /* Checked before any message that would echo the value: a URL can carry credentials. */ -}}
+{{- if $url.userinfo -}}
+{{- fail "inferenceProvider.baseUrl must not carry credentials (user:password@host): the profile is stored in a ConfigMap and the sandboxes' environment. The API key comes from inferenceProvider.credentialSecret." -}}
+{{- end -}}
+{{- if not (has $url.scheme (list "http" "https")) -}}
+{{- fail "inferenceProvider.baseUrl must be an http:// or https:// URL (e.g. http://gateway.your-llm-ns.svc.cluster.local:8080/anthropic)." -}}
+{{- end -}}
+{{- if not $url.hostname -}}
+{{- fail "inferenceProvider.baseUrl has no host (e.g. http://gateway.your-llm-ns.svc.cluster.local:8080/anthropic)." -}}
+{{- end -}}
+{{- if contains ":" $url.hostname -}}
+{{- fail "inferenceProvider.baseUrl uses an IPv6 literal, which the chart does not support: the provider profile takes a host name. Use a DNS name." -}}
+{{- end -}}
 {{- if contains "," .Values.inferenceProvider.baseUrl -}}
 {{- fail (printf "inferenceProvider.baseUrl %q contains a comma; it reaches sandboxes as ANTHROPIC_BASE_URL through OPENSHELL_KYMA_SANDBOX_ENV, which the driver splits on commas, so a value cannot contain one." .Values.inferenceProvider.baseUrl) -}}
 {{- end -}}
@@ -29,6 +43,9 @@ gets immediate feedback. */}}
 {{- end -}}
 {{- if contains "," .Values.inferenceProvider.modelId -}}
 {{- fail (printf "inferenceProvider.modelId %q contains a comma; it reaches sandboxes as ANTHROPIC_MODEL through OPENSHELL_KYMA_SANDBOX_ENV, which the driver splits on commas, so a value cannot contain one." .Values.inferenceProvider.modelId) -}}
+{{- end -}}
+{{- if not .Values.inferenceProvider.binaries -}}
+{{- fail "inferenceProvider.enabled=true requires inferenceProvider.binaries: the executable paths allowed to reach the endpoint (e.g. /usr/bin/node, which runs claude-code). An empty list leaves the provider's policy with no process able to use it." -}}
 {{- end -}}
 {{- if not .Values.inferenceProvider.credentialSecret.name -}}
 {{- fail "inferenceProvider.enabled=true requires inferenceProvider.credentialSecret.name pointing at a Secret you manage in .Release.Namespace." -}}

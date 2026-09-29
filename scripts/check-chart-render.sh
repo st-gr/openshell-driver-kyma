@@ -27,10 +27,13 @@
 #      table names, including the Secrets the driver may read;
 #   6. values.yaml's upstream.version equals the tag Cargo.toml pins;
 #   7. providers follow upstream's profile model: no template calls the removed
-#      `openshell inference`, the chart renders a provider profile for the configured
-#      endpoint, the hook installs the pinned CLI, sandboxes receive the endpoint and
-#      model, and 7b an endpoint or model the driver would refuse (a comma) or a
-#      missing one fails the render, naming the value.
+#      `openshell inference`; the chart renders a provider profile with exactly the
+#      configured endpoint and binaries; the hook installs the pinned CLI, checks it
+#      against the release checksums, keeps the API key out of its script, and mounts
+#      that profile; sandboxes receive the endpoint and model; and 7b an endpoint,
+#      model or binaries list the driver or upstream would refuse (a comma, a URL
+#      that is not plain http(s) to a host name, credentials in the URL, nothing
+#      listed) fails the render, naming the value and never echoing credentials.
 # Needs helm, python3 with PyYAML, and network access (for check 1).
 set -euo pipefail
 
@@ -155,12 +158,34 @@ try bad-7b-model-empty 'inferenceProvider.modelId' t "${inference_common[@]}" \
 try bad-7b-type 'inferenceProvider.type "openai"' t "${inference_common[@]}" \
 	--set inferenceProvider.type=openai --set "inferenceProvider.baseUrl=$inference_url" \
 	--set "inferenceProvider.modelId=$inference_model"
+# bad-7b-url-* : the endpoint becomes the profile's host and port, so it must be a
+# plain http(s) URL to a host name, and must not carry credentials (the message must
+# not echo them either; check 7 tests that).
+inference_try() {
+	local name=$1 expect=$2
+	shift 2
+	try "$name" "$expect" t "${inference_common[@]}" --set "inferenceProvider.modelId=$inference_model" "$@"
+}
+inference_try bad-7b-url-no-scheme 'http:// or https://' --set inferenceProvider.baseUrl=gateway.llm.svc.cluster.local:8080/anthropic
+inference_try bad-7b-url-ftp 'http:// or https://' --set inferenceProvider.baseUrl=ftp://gateway.llm.svc.cluster.local/anthropic
+inference_try bad-7b-url-userinfo 'must not carry credentials' \
+	--set inferenceProvider.baseUrl=http://user:secretpw@gateway.llm.svc.cluster.local:8080/anthropic
+inference_try bad-7b-url-no-host 'has no host' --set inferenceProvider.baseUrl=http:///anthropic
+inference_try bad-7b-url-ipv6 'IPv6' --set 'inferenceProvider.baseUrl=http://[::1]:8080/anthropic'
+inference_try bad-7b-binaries-empty 'inferenceProvider.binaries' --set "inferenceProvider.baseUrl=$inference_url" \
+	--set-json 'inferenceProvider.binaries=[]'
 # The endpoint and model join what driver.sandboxEnv already sets, in that order.
 try good-7-env '' t "${inference_common[@]}" --set "inferenceProvider.baseUrl=$inference_url" \
 	--set "inferenceProvider.modelId=$inference_model" --set-json 'driver.sandboxEnv=["OPTS=a=b"]'
 # An endpoint without a port gets its scheme's default port in the profile.
 try good-7-https '' t "${inference_common[@]}" --set inferenceProvider.baseUrl=https://llm.example.org/anthropic \
 	--set "inferenceProvider.modelId=$inference_model"
+try good-7-http '' t "${inference_common[@]}" --set inferenceProvider.baseUrl=http://llm.example.org/anthropic \
+	--set "inferenceProvider.modelId=$inference_model"
+# The binaries in values are the binaries in the profile, and only those.
+try good-7-binaries '' t "${inference_common[@]}" --set "inferenceProvider.baseUrl=$inference_url" \
+	--set "inferenceProvider.modelId=$inference_model" \
+	--set-json 'inferenceProvider.binaries=["/opt/agent/bin/python3","/usr/bin/node"]'
 
 # 4 and 5. Renders for the NetworkPolicy and RBAC checks. Named rbac-*, so check 2's
 # render-*.yaml glob skips them, and check 4's r*.yaml glob takes them.
@@ -523,29 +548,92 @@ if chart_version != pinned:
 
 # 7. providers use upstream's profile model, the pinned CLI, and reach sandboxes
 templates = "\n".join(p.read_text() for p in sorted((chart / "templates").iterdir()) if p.is_file())
-if "openshell inference" in templates or "inference set" in templates:
+# The removed command in any spelling: `openshell inference set`, or with the global
+# flags between, as in `openshell --gateway-endpoint "$URL" inference set`.
+REMOVED_INFERENCE = re.compile(r"\bopenshell\b[^\n]*\binference\s+[a-z]")
+if REMOVED_INFERENCE.search(templates) or "inference set" in templates:
     failures.append("templates still call the removed `openshell inference` command")
+
+def profile_of(documents):
+    """The provider profile ConfigMap of a render and the profile it holds, or (None, None)."""
+    cm = next((d for d in documents if d.get("kind") == "ConfigMap"
+               and "profile.yaml" in d.get("data", {})), None)
+    return cm, yaml.safe_load(cm["data"]["profile.yaml"]) if cm else None
+
+def check_endpoint(profile, host, port, where):
+    # The credential is bound to every endpoint of the profile: more than the one
+    # inference endpoint would hand the API key to more hosts.
+    endpoints = profile.get("endpoints") or []
+    if len(endpoints) != 1:
+        failures.append(f"{where}: the profile has {len(endpoints)} endpoints, want exactly the one "
+                        f"inference endpoint: {[e.get('host') for e in endpoints]}")
+    elif (endpoints[0].get("host"), endpoints[0].get("port")) != (host, port):
+        failures.append(f"{where}: profile endpoint {endpoints[0]} is not {host}:{port} from inferenceProvider.baseUrl")
+
 inference = docs(work / "rbac-inference.yaml")
-profile_cm = next((d for d in inference if d.get("kind") == "ConfigMap"
-                   and "profile.yaml" in d.get("data", {})), None)
+profile_cm, profile = profile_of(inference)
+default_binaries = ((yaml.safe_load(values) or {}).get("inferenceProvider") or {}).get("binaries")
 if profile_cm is None:
     failures.append("no provider profile ConfigMap rendered")
 else:
-    profile = yaml.safe_load(profile_cm["data"]["profile.yaml"])
-    endpoint = profile["endpoints"][0]
-    if (endpoint["host"], endpoint["port"]) != ("gateway.llm.svc.cluster.local", 8080):
-        failures.append(f"profile endpoint {endpoint} does not match inferenceProvider.baseUrl")
-    if "/usr/bin/node" not in profile["binaries"]:
+    check_endpoint(profile, "gateway.llm.svc.cluster.local", 8080, "rbac-inference")
+    if profile.get("binaries") != default_binaries:
+        failures.append(f"profile binaries {profile.get('binaries')} are not inferenceProvider.binaries "
+                        f"of values.yaml {default_binaries}")
+    if "/usr/bin/node" not in (profile.get("binaries") or []):
         failures.append("profile binaries must include node, which runs claude-code")
+    wild = [b for b in profile.get("binaries") or [] if "*" in str(b)]
+    if wild:
+        failures.append(f"profile binaries contain a wildcard, which would let any process use the credential: {wild}")
 # The chart has other hook Jobs (the gateway's PKI): the provider's is the one named for it.
 job = next((d for d in inference if d.get("kind") == "Job"
             and d["metadata"]["name"].endswith("-inference-provider-hook")), None)
 if job is None:
     failures.append("no inference provider hook Job rendered")
 else:
-    job_env = {e["name"]: e.get("value") for e in job["spec"]["template"]["spec"]["containers"][0].get("env", [])}
+    pod_spec = job["spec"]["template"]["spec"]
+    hook = pod_spec["containers"][0]
+    job_env = {e["name"]: e.get("value") for e in hook.get("env", [])}
     if job_env.get("CLI_VERSION") != pinned:
         failures.append(f"hook CLI_VERSION={job_env.get('CLI_VERSION')!r}, expected the pinned {pinned!r}")
+    # The API key reaches the hook only from its Secret, and never leaves the CLI's own
+    # environment lookup (`--credential ANTHROPIC_API_KEY`): not in the pod spec, not
+    # expanded in the script (an argument shows in the process list), not traced.
+    key_env = [e for e in hook.get("env", []) if e["name"] == "ANTHROPIC_API_KEY"]
+    ref = (key_env[0].get("valueFrom") or {}).get("secretKeyRef") if len(key_env) == 1 else None
+    if len(key_env) != 1 or "value" in key_env[0] or not ref:
+        failures.append(f"the hook's ANTHROPIC_API_KEY env must be exactly one secretKeyRef entry with no literal value: {key_env}")
+    elif (ref.get("name"), ref.get("key")) != ("creds", "api-key"):
+        failures.append(f"the hook's ANTHROPIC_API_KEY comes from {ref}, not inferenceProvider.credentialSecret")
+    command = hook.get("command") or []
+    script = command[-1] if command else ""
+    if re.search(r"\$\{?ANTHROPIC_API_KEY\b", script):
+        failures.append("the hook script expands ANTHROPIC_API_KEY; the CLI must read it from its own environment")
+    if re.search(r"(?:^|[\s;&|(])set\s+(?:-[A-Za-z]*x|-o\s+xtrace)", script, re.M) or any(
+            arg.startswith("-") and "x" in arg[1:] for arg in command[1:-1]):
+        failures.append("the hook script traces its commands (set -x / sh -x), which would print the key")
+    if REMOVED_INFERENCE.search(script) or "inference set" in script:
+        failures.append("the hook script still calls the removed `openshell inference` command")
+    # The CLI is the pinned release's, checked against its checksum file before it runs.
+    tags = re.findall(r'releases/download/([^/\s"]+)', script)
+    if not tags or set(tags) != {"${CLI_VERSION}"}:
+        failures.append(f"the hook downloads from release tag(s) {sorted(set(tags))}, want only ${{CLI_VERSION}}")
+    extract = re.search(r"^\s*tar\s+-x", script, re.M)
+    if ("uname -m" not in script or "openshell-checksums-sha256.txt" not in script
+            or "sha256sum -c" not in script or not extract
+            or script.index("sha256sum -c") > extract.start()):
+        failures.append("the hook must pick the CLI asset by `uname -m` and verify it against "
+                        "openshell-checksums-sha256.txt (sha256sum -c) before extracting it")
+    # ...and it registers the profile this render holds, mounted from that ConfigMap.
+    volume = next((v for v in pod_spec.get("volumes") or [] if v.get("name") == "profile"), None)
+    mount = next((m for m in hook.get("volumeMounts") or [] if m.get("name") == "profile"), None)
+    if profile_cm is not None and (
+            (volume or {}).get("configMap", {}).get("name") != profile_cm["metadata"]["name"]
+            or not profile_cm["metadata"]["name"].endswith("-inference-profile")):
+        failures.append(f"the hook's profile volume {volume} is not the rendered ConfigMap "
+                        f"{profile_cm['metadata']['name']}")
+    if (mount or {}).get("mountPath") != "/profile" or "/profile/profile.yaml" not in script:
+        failures.append(f"the hook does not read the profile from its mount: {mount}")
 driver_env = {e["name"]: e.get("value") for e in driver_container(inference).get("env", [])}
 sandbox_env = driver_env.get("OPENSHELL_KYMA_SANDBOX_ENV", "")
 for wanted in ("ANTHROPIC_BASE_URL=http://gateway.llm.svc.cluster.local:8080/anthropic",
@@ -559,12 +647,23 @@ if env is not None and env.get("OPENSHELL_KYMA_SANDBOX_ENV") != (
         "ANTHROPIC_MODEL=claude-opus-4-7"):
     failures.append("the provider's endpoint and model did not follow driver.sandboxEnv in "
                     f"OPENSHELL_KYMA_SANDBOX_ENV: {env.get('OPENSHELL_KYMA_SANDBOX_ENV')!r}")
-if rendered("good-7-https") is not None:
-    https_cm = next((d for d in docs(work / "good-7-https.yaml") if d.get("kind") == "ConfigMap"
-                     and "profile.yaml" in d.get("data", {})), None)
-    https_endpoint = yaml.safe_load(https_cm["data"]["profile.yaml"])["endpoints"][0] if https_cm else None
-    if not https_endpoint or (https_endpoint["host"], https_endpoint["port"]) != ("llm.example.org", 443):
-        failures.append(f"an https baseUrl without a port did not give port 443: {https_endpoint}")
+# An endpoint without a port gets its scheme's default port; binaries pass through as set.
+for name, host, port in (("good-7-https", "llm.example.org", 443), ("good-7-http", "llm.example.org", 80)):
+    if rendered(name) is not None:
+        _, rendered_profile = profile_of(docs(work / f"{name}.yaml"))
+        if rendered_profile is None:
+            failures.append(f"{name}: no provider profile ConfigMap rendered")
+        else:
+            check_endpoint(rendered_profile, host, port, name)
+if rendered("good-7-binaries") is not None:
+    _, rendered_profile = profile_of(docs(work / "good-7-binaries.yaml"))
+    if (rendered_profile or {}).get("binaries") != ["/opt/agent/bin/python3", "/usr/bin/node"]:
+        failures.append("inferenceProvider.binaries did not reach the profile exactly as set: "
+                        f"{(rendered_profile or {}).get('binaries')}")
+# A URL's credentials must never be echoed by the error that refuses them.
+userinfo_err = work / "bad-7b-url-userinfo.err"
+if userinfo_err.exists() and "secretpw" in userinfo_err.read_text():
+    failures.append("bad-7b-url-userinfo: the render error echoes the credentials in inferenceProvider.baseUrl")
 
 if failures:
     print("CHART_RENDER_FAIL:")

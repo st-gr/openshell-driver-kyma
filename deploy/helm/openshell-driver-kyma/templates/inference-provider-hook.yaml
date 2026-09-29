@@ -156,9 +156,30 @@ spec:
               # 1. Install curl + ca-certificates (apk does not drop privileges)
               apk add --no-cache curl ca-certificates >/dev/null
 
-              # 2. Download the openshell CLI musl tarball
-              curl -fsSL "https://github.com/NVIDIA/OpenShell/releases/download/${CLI_VERSION}/openshell-x86_64-unknown-linux-musl.tar.gz" \
-                | tar -xz -C /usr/local/bin
+              # 2. Download the openshell CLI musl tarball for this node's
+              #    architecture, and verify it against the release's published
+              #    checksums before it runs: the API key is in this container's
+              #    environment. A mismatch, or an asset the checksum file does
+              #    not list, fails the hook.
+              case "$(uname -m)" in
+                x86_64) cli_arch=x86_64 ;;
+                aarch64) cli_arch=aarch64 ;;
+                *)
+                  echo "[hook] unsupported architecture $(uname -m): the openshell CLI is published for x86_64 and aarch64" >&2
+                  exit 1
+                  ;;
+              esac
+              cli_asset="openshell-${cli_arch}-unknown-linux-musl.tar.gz"
+              cli_base="https://github.com/NVIDIA/OpenShell/releases/download/${CLI_VERSION}"
+              curl -fsSL -o "/tmp/${cli_asset}" "${cli_base}/${cli_asset}"
+              curl -fsSL -o /tmp/openshell-checksums-sha256.txt "${cli_base}/openshell-checksums-sha256.txt"
+              cli_sum=$(awk -v asset="${cli_asset}" '$2 == asset { print $1 }' /tmp/openshell-checksums-sha256.txt)
+              if [ -z "${cli_sum}" ]; then
+                echo "[hook] ${cli_asset} is not in the ${CLI_VERSION} checksum file" >&2
+                exit 1
+              fi
+              echo "${cli_sum}  /tmp/${cli_asset}" | sha256sum -c -
+              tar -xz -C /usr/local/bin -f "/tmp/${cli_asset}"
               chmod +x /usr/local/bin/openshell
 
               # 3. Wait for the gateway to be reachable on its HTTP healthz port.
@@ -204,13 +225,31 @@ spec:
               #    The CLI reads ANTHROPIC_API_KEY from this container's env.
               #    `provider update` takes the positional <NAME>, `provider
               #    create` takes --name.
+              #    When the provider exists, `provider update` rotates the key
+              #    only: it cannot change the provider's type. So an existing
+              #    provider is updated only when it already has this profile as
+              #    its type. Otherwise the hook fails, and never deletes it:
+              #    sandboxes may be attached to it.
               echo "[hook] configuring provider ${PROVIDER_NAME}..."
               if openshell --gateway-endpoint "${GATEWAY_URL}" provider create \
                    --name "${PROVIDER_NAME}" --type "${PROFILE_ID}" \
                    --credential ANTHROPIC_API_KEY --global-profile; then
                 echo "[hook] provider created"
               else
-                echo "[hook] provider create failed (likely AlreadyExists); updating"
+                echo "[hook] provider create failed (likely AlreadyExists); checking the existing provider"
+                if ! existing=$(openshell --gateway-endpoint "${GATEWAY_URL}" provider get "${PROVIDER_NAME}"); then
+                  echo "[hook] cannot read provider ${PROVIDER_NAME} to check its type; see the errors above" >&2
+                  exit 1
+                fi
+                existing_type=$(printf '%s\n' "${existing}" | sed -n 's/^[[:space:]]*Type:[[:space:]]*//p')
+                if [ "${existing_type}" != "${PROFILE_ID}" ]; then
+                  echo "[hook] provider ${PROVIDER_NAME} exists with type '${existing_type}', but the configured profile is '${PROFILE_ID}'." >&2
+                  echo "[hook] A provider's type cannot be changed, so it would keep the old profile's binding." >&2
+                  echo "[hook] Either delete the provider (openshell provider delete ${PROVIDER_NAME}; sandboxes attached to it lose it) and re-run the upgrade," >&2
+                  echo "[hook] or set inferenceProvider.name to a new name." >&2
+                  exit 1
+                fi
+                echo "[hook] provider ${PROVIDER_NAME} already has type '${PROFILE_ID}'; updating its key"
                 openshell --gateway-endpoint "${GATEWAY_URL}" provider update "${PROVIDER_NAME}" \
                   --credential ANTHROPIC_API_KEY
               fi

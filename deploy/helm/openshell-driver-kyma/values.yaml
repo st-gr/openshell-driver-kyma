@@ -446,9 +446,12 @@ inferenceProvider:
   modelId: ""             # e.g. claude-opus-4-7
   # Provider profile id registered with the gateway. Empty = "kyma-<type>".
   profileId: ""
-  # Processes allowed to reach the inference endpoint through the sandbox
-  # supervisor. claude-code runs under node, so node must be listed; add the
-  # interpreter of any other SDK your sandbox image uses.
+  # Executable paths the profile's `binaries` list: the processes that may reach
+  # the inference endpoint through the sandbox supervisor. The API key itself is
+  # bound to the endpoint's host and port (upstream v0.1.2 does not yet restrict
+  # it by calling binary); the path of `baseUrl` is not part of that binding.
+  # claude-code runs under node, so node must be listed; add the interpreter of
+  # any other SDK your sandbox image uses. Must not be empty.
   binaries:
     - /usr/bin/node
     - /usr/local/bin/node
