@@ -13,18 +13,12 @@ deployment.yaml. */}}
 {{- fail (printf "driver.workspaceMode must be one of shared|managed|operator, got %q." $mode) -}}
 {{- end -}}
 {{- if eq $mode "managed" -}}
-{{- $gid := default .Values.gateway.sandboxJwt.gatewayId .Values.driver.gatewayId -}}
-{{- if not $gid -}}
-{{- fail "driver.workspaceMode=managed requires driver.gatewayId (or gateway.sandboxJwt.gatewayId). It becomes part of every managed namespace name." -}}
-{{- end -}}
+{{- $gid := include "openshell-driver-kyma.gatewayId" . -}}
 {{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $gid) -}}
-{{- fail (printf "driver.gatewayId %q is not a DNS-1123 label; it becomes part of every managed namespace name." $gid) -}}
-{{- end -}}
-{{- if .Values.driver.enableNetworkPolicy -}}
-{{- fail "driver.workspaceMode=managed requires --set driver.enableNetworkPolicy=false (the chart's own default is true, so managed installs must set this explicitly). This is deliberate, not a bug: managed namespaces get no NetworkPolicy today, so switching to managed means consciously accepting weaker network isolation until that lands. The driver itself already refuses to start on this combination (main.rs, see provisioner.rs::bootstrap_managed_namespace's doc comment for why); this guard turns that into an immediate install-time error instead of a pod crash-loop." -}}
+{{- fail (printf "gateway.sandboxJwt.gatewayId %q (default: the release's fullname) is not a DNS-1123 label; it becomes part of every managed namespace name." $gid) -}}
 {{- end -}}
 {{- end -}}
-{{- if and (eq $mode "operator") (not .Values.driver.operatorNamespaceAllowlist) -}}
-{{- fail "driver.workspaceMode=operator requires a non-empty driver.operatorNamespaceAllowlist. An empty allowlist denies every workspace." -}}
+{{- if and (eq $mode "operator") (not .Values.driver.operatorNamespaceLabel) (not .Values.driver.operatorNamespaceConfigMap.name) -}}
+{{- fail "driver.workspaceMode=operator requires driver.operatorNamespaceLabel or driver.operatorNamespaceConfigMap.name, which select the namespaces upstream's driver may use." -}}
 {{- end -}}
 {{- end -}}

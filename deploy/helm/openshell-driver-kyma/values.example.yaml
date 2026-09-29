@@ -50,12 +50,14 @@ driver:
   #     --format '{{json .Manifest.Digest}}'
   supervisorImage: ghcr.io/nvidia/openshell/supervisor:latest
 
-  # Default-on. Renders two NetworkPolicies (driver+gateway pod, sandbox pod).
-  enableNetworkPolicy: true
-
   # Set true when your in-cluster LLM gateway can't service Anthropic's
   # optional telemetry endpoints. Independent of inference routing.
   disableClaudeTelemetry: true
+
+# ─── Driver+gateway pod NetworkPolicy ─────────────────────────────────────
+# Default-on. Sandbox pods are fenced by upstream's own per-namespace policies.
+networkPolicy:
+  enabled: true
 
 # ─── Driver pod resources ─────────────────────────────────────────────────
 # Defaults are intentionally modest; raise for hot paths.

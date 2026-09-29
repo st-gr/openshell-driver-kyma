@@ -1,4 +1,4 @@
-{{- if .Values.driver.enableNetworkPolicy -}}
+{{- if .Values.networkPolicy.enabled -}}
 # NetworkPolicy for the driver+gateway pod.
 #
 # Default-deny ingress except:
@@ -177,7 +177,7 @@ spec:
           protocol: TCP
     {{- end }}
 {{- end }}
-{{- if and .Values.driver.enableNetworkPolicy .Values.bedrockBridge.enabled }}
+{{- if and .Values.networkPolicy.enabled .Values.bedrockBridge.enabled }}
 ---
 # NetworkPolicy for the bedrock-bridge pod.
 #

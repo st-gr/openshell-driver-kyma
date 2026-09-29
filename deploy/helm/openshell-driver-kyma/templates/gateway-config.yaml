@@ -63,16 +63,16 @@ data:
     # Schema-v2 access path for an external compute driver reached over
     # --compute-driver-socket. The gateway also derives its resource-admission
     # policy from this table and requires the driver to acknowledge the same
-    # policy, so these values are the single source of truth for both
-    # sides; the driver reads them from its own flags of the same name.
+    # policy, so both sides render from one value; the driver receives its
+    # side as OPENSHELL_DRIVER_ADMISSION_CONFIG_JSON.
     socket_path         = {{ .Values.driver.socket | quote }}
     # Defaults to false upstream, which would reject every caller
     # driver_config this driver supports (node selector, runtime class,
     # resource overrides). Rendered from driver.allowDriverConfig, which the
-    # driver container also receives as --allow-driver-config, so the two
+    # driver container also receives in its admission JSON, so the two
     # sides cannot disagree.
     allow_driver_config = {{ .Values.driver.allowDriverConfig }}
-    # resource_admission is deliberately omitted: the driver's
-    # --resource-admission-enabled flag is left unset too, so both sides fall
-    # back to upstream's secure defaults and still agree.
+    # resource_admission is deliberately omitted: the driver's admission JSON
+    # leaves it out too, so both sides fall back to upstream's secure defaults
+    # and still agree.
 {{- end }}

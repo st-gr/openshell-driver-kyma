@@ -131,3 +131,16 @@ Stable identifier baked into every gateway-minted sandbox JWT (claim "iss").
 {{- define "openshell-driver-kyma.gatewayId" -}}
 {{- default (include "openshell-driver-kyma.fullname" .) .Values.gateway.sandboxJwt.gatewayId }}
 {{- end }}
+
+{{/*
+The gateway endpoint sandboxes dial (upstream --grpc-endpoint). An explicit
+driver.gatewayEndpoint wins; with the gateway sidecar enabled it defaults to
+this release's Service. Empty lets upstream decide.
+*/}}
+{{- define "openshell-driver-kyma.grpcEndpoint" -}}
+{{- if .Values.driver.gatewayEndpoint -}}
+{{- .Values.driver.gatewayEndpoint -}}
+{{- else if .Values.gateway.enabled -}}
+{{- printf "http://%s.%s.svc.cluster.local:%v" (include "openshell-driver-kyma.fullname" .) .Release.Namespace .Values.gateway.grpcPort -}}
+{{- end -}}
+{{- end -}}
