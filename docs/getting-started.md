@@ -362,24 +362,13 @@ only if you set an OIDC issuer) or the driver's ClusterRole lacks
 `tokenreviews:create` (check
 `kubectl get clusterrole -l app.kubernetes.io/instance=<release> -o yaml`).
 
-**`inference-provider-hook` Job stuck or failed.**
-With `gateway.oidc.issuer` set (the gateway runs in OIDC-authenticated
-mode), the Job needs an admin token to call the gateway — not yet
-wired. Either register the profile and provider manually from an
-authenticated CLI session, or leave OIDC unset for in-cluster-only
-deployments (the gateway runs `allow_unauthenticated_users=true` and the
-Job needs no extra auth). The manual steps, with the profile the chart
-rendered:
-
-```bash
-kubectl -n "$NS" get cm <release>-openshell-driver-kyma-inference-profile \
-  -o jsonpath='{.data.profile\.yaml}' > profile.yaml
-openshell provider profile lint   -f profile.yaml --global
-openshell provider profile import -f profile.yaml --global
-ANTHROPIC_API_KEY='sk-ant-…' openshell provider create \
-  --name <provider-name> --type <profile-id> \
-  --credential ANTHROPIC_API_KEY --global-profile
-```
+**`inference-provider-hook` Job stuck or failed.** Read its log
+(`kubectl -n "$NS" logs job/<release>-openshell-driver-kyma-inference-provider-hook`).
+The chart refuses to render `inferenceProvider.enabled` together with
+`gateway.oidc.issuer`: the Job calls the gateway without a token, which a
+gateway with OIDC refuses. With OIDC, register the profile and provider from
+an authenticated CLI session instead; see
+[`production-deployment.md`](production-deployment.md), step 3b.
 
 If the Job's log says the provider "exists with type …", a provider of that
 name was created under another profile (for example by 0.8.0). A provider's

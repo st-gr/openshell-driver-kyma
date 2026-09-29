@@ -18,11 +18,11 @@
 #
 # Auth note: this script assumes the gateway runs with
 # --disable-tls + allow_unauthenticated_users=true (the default when
-# gateway.oidc.issuer is unset). When the gateway has OIDC enabled,
-# the Job's CLI calls would require a valid admin token — that case is
-# out of scope here (Tasks 8/9). In an OIDC-enabled cluster the operator
-# must register the profile and provider manually via an authenticated
-# CLI session.
+# gateway.oidc.issuer is unset). A gateway with OIDC enabled refuses the
+# Job's token-less CLI calls, so the chart refuses inferenceProvider.enabled
+# together with gateway.oidc.issuer (inferenceProviderGuards); in an
+# OIDC-enabled cluster the operator registers the profile and provider from
+# an authenticated CLI session (docs/production-deployment.md).
 #
 # The chart never touches the API key — it stays inside the Secret
 # named by .Values.inferenceProvider.credentialSecret.{name,key}.

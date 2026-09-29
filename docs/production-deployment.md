@@ -75,9 +75,9 @@ gateway:
     ttlSecs: 3600
 
   # Persist the gateway's DB across pod restarts. Without this, every
-  # gateway pod restart wipes the provider profile and provider set by the
-  # post-install Job, so sandboxes cannot be created with `--provider` until
-  # the next `helm upgrade` re-runs it.
+  # gateway pod restart wipes the provider profile and provider you register
+  # in step 3b, so sandboxes cannot be created with `--provider` until you
+  # register them again.
   dbPersistence:
     enabled: true
     dbUrl: ""               # empty = chart renders a PVC; set to postgres URL for external DB
@@ -101,25 +101,16 @@ gatewayApirule:
         authorizations:
           - requiredScopes: []   # rely on OIDC roles in the gateway
 
-# Gateway-side inference provider config. The chart renders a provider
-# profile (the endpoint host and port of baseUrl, and the binaries allowed to
-# reach it); a post-install Job imports it (`openshell provider profile
-# import`) and creates the provider from it (`openshell provider create`)
-# against the in-pod gateway. The chart never sees the API key — it's
-# mounted into the Job from a Secret you create separately:
-#   kubectl -n openshell-system create secret generic my-anthropic-creds \
-#     --from-literal=api-key=sk-ant-…
-# Sandboxes are created with `--provider <release>-anthropic`.
-inferenceProvider:
-  enabled: true
-  type: anthropic
-  baseUrl: "http://gateway.your-llm-ns.svc.cluster.local:8080/anthropic"
-  modelId: "claude-opus-4-7"
-  credentialSecret:
-    name: my-anthropic-creds
-    key: api-key
-
+# No `inferenceProvider` block. Its post-install Job registers the provider
+# with the gateway's CLI, without a token, and a gateway with OIDC refuses
+# unauthenticated calls, so the chart refuses `inferenceProvider.enabled`
+# together with `gateway.oidc.issuer`. Register the provider yourself after
+# the install, from an authenticated CLI session (step 3b), and give
+# sandboxes the endpoint and model it would have set:
 driver:
+  sandboxEnv:
+    - ANTHROPIC_BASE_URL=http://gateway.your-llm-ns.svc.cluster.local:8080/anthropic
+    - ANTHROPIC_MODEL=claude-opus-4-7
   # Silence Claude's optional telemetry endpoints when the in-cluster
   # gateway can't service them.
   disableClaudeTelemetry: true
@@ -161,7 +152,7 @@ treat the endpoint as the scope.
 The provider and its profile live in the gateway's DB. That is what
 `gateway.dbPersistence.enabled` provides: without it, every gateway pod
 restart wipes them, and sandboxes cannot be created with `--provider` until
-the next `helm upgrade` re-runs the post-install Job.
+they are registered again (step 3b).
 
 **NetworkPolicies.** Upstream fences sandboxes per namespace
 (`openshell-sandbox-workloads` and `openshell-sandbox-supervisors`, created by
@@ -208,6 +199,49 @@ kubectl -n openshell-system get apirule
 Then register the gateway with the `openshell` CLI on a laptop
 (`openshell gateway add https://openshell.<cluster-domain>`);
 the CLI redirects to your OIDC issuer on first use.
+
+### 3b. Register the inference provider
+
+With OIDC on, the provider is registered from that authenticated CLI session
+(an admin role), with the profile the chart's hook would have imported. Write
+it for your endpoint: `host` and `port` are those of `ANTHROPIC_BASE_URL`
+above (the path is not part of the binding), and `binaries` are the processes
+allowed to reach it (claude-code runs under `node`):
+
+```yaml
+# profile.yaml
+id: kyma-anthropic
+display_name: Anthropic via gateway.your-llm-ns.svc.cluster.local
+description: Anthropic inference through the cluster's inference proxy
+category: inference
+inference_capable: true
+credentials:
+  - name: api_key
+    description: Anthropic API key
+    env_vars: [ANTHROPIC_API_KEY]
+    required: true
+    auth_style: header
+    header_name: x-api-key
+discovery:
+  credentials: [api_key]
+endpoints:
+  - host: gateway.your-llm-ns.svc.cluster.local
+    port: 8080
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+binaries: [/usr/bin/node, /usr/local/bin/node, /usr/bin/claude, /usr/local/bin/claude]
+```
+
+```bash
+openshell provider profile lint   -f profile.yaml --global
+openshell provider profile import -f profile.yaml --global
+ANTHROPIC_API_KEY='sk-ant-…' openshell provider create \
+  --name ods-anthropic --type kyma-anthropic \
+  --credential ANTHROPIC_API_KEY --global-profile
+```
+
+Sandboxes are then created with `--provider ods-anthropic`.
 
 ## 5. Operational notes
 

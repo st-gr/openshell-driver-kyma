@@ -88,6 +88,8 @@ gateway:
   # OIDC for client auth (the openshell CLI authenticates via OIDC).
   # Leave issuer empty for in-cluster-only deployments behind a service mesh.
   # When set, the chart drops --disable-tls and renders the OIDC flags.
+  # An issuer requires inferenceProvider.enabled: false below: the provider
+  # hook cannot authenticate to an OIDC gateway (see production-deployment.md).
   oidc:
     issuer: ""           # e.g. https://my-tenant.accounts.ondemand.com
     audience: ""         # e.g. openshell

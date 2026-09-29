@@ -31,6 +31,7 @@ render() {
   helm template check "$CHART" \
     --set gateway.enabled=true \
     --set gateway.sandboxJwt.enabled=true \
+    --set gatewayService.enabled=true \
     --show-only "$1"
 }
 

@@ -339,7 +339,10 @@ gateway:
   healthPort: 9092
   extraArgs: []      # extra flags passed to `openshell-gateway run`
   # OIDC for client auth (the openshell CLI authenticates via OIDC).
-  # Independent of TLS: configure both, neither, or either alone.
+  # Independent of TLS: configure both, neither, or either alone. An issuer
+  # cannot be combined with inferenceProvider.enabled: the provider hook calls
+  # the gateway without a token, so the chart refuses the pair (register the
+  # provider from an authenticated CLI instead; docs/production-deployment.md).
   oidc:
     issuer: ""
     audience: ""
@@ -395,9 +398,10 @@ gateway:
     storageSize: 1Gi
     storageClassName: ""    # "" = cluster default StorageClass
   # Sandbox-JWT signing & validation. Required for the supervisor inside
-  # each sandbox to complete its IssueSandboxToken bootstrap (without it,
-  # phase=Ready and `openshell sandbox exec` never succeed). When enabled,
-  # the chart provisions:
+  # each sandbox to complete its IssueSandboxToken bootstrap (upstream answers
+  # it with Unavailable without the keys), so the chart refuses gateway.enabled
+  # without it; upstream's chart has no switch and always configures it. When
+  # enabled, the chart provisions:
   #   - a pre-install Helm hook Job that runs `openshell-gateway
   #     generate-certs` to create the signing-key Secret in this namespace
   #   - the `[openshell.gateway.gateway_jwt]` table in the gateway TOML
@@ -425,7 +429,10 @@ gateway:
 
 # ClusterIP Service exposing the gateway's gRPC + metrics ports.
 # Requires .Values.gateway.enabled. When false, only the driver's
-# health port is exposed (existing behavior).
+# health port is exposed (existing behavior). gateway.enabled requires it,
+# unless driver.gatewayEndpoint names another address sandboxes reach the
+# gateway at: by default they dial this Service. inferenceProvider.enabled
+# requires it too: the provider hook reaches the gateway through it.
 gatewayService:
   enabled: false
 

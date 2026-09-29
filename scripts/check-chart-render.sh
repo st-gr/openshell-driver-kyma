@@ -11,11 +11,14 @@
 #      and the driver's gateway id equals the gateway's;
 #   3. the driver container takes no command-line args, and removed values are
 #      gone from values.yaml;
-#   3b-3g. values the driver or upstream would refuse at startup fail at render
+#   3b-3h. values the driver or upstream would refuse at startup fail at render
 #      time instead, naming the value, and the values they accept still render:
 #      3b driver.sandboxEnv entries, 3c the managed-mode gateway id, 3d the
 #      operator-mode namespace selectors, 3e managed SSH ingress, 3f the sandbox
-#      UID/GID, 3g driver.allowDriverConfig and driver.resourceAdmission;
+#      UID/GID, 3g driver.allowDriverConfig and driver.resourceAdmission; and 3h
+#      gateway settings that cannot work: the in-pod gateway without the Service
+#      sandboxes dial or without sandbox-JWT keys, and the provider hook without
+#      the gateway's Service or against an OIDC gateway it cannot authenticate to;
 #   4. the chart's NetworkPolicies: exactly one selects OpenShell sandbox pods, the
 #      mirror of upstream's SSH-ingress restriction, present in shared mode with the
 #      in-pod gateway only; in managed mode the driver applies it instead, so the
@@ -57,12 +60,14 @@ trap 'rm -rf "$WORK"' EXIT
 "$SCRIPT_DIR/check-upstream-args.sh" --print-env >"$WORK/upstream-env.txt"
 pinned_upstream_tag >"$WORK/pinned-tag.txt"
 
-# render_as RELEASE [helm args...]. Sandbox JWT is on for every render: the gateway
-# TOML only carries a gateway_id (check 2) inside [openshell.gateway.gateway_jwt].
+# render_as RELEASE [helm args...]. The in-pod gateway runs in every render, with
+# what it needs to work (3h): its Service, which sandboxes dial, and sandbox JWT,
+# which is also where the gateway TOML carries a gateway_id (check 2).
 render_as() {
 	local release=$1
 	shift
-	helm template "$release" "$CHART" --set gateway.enabled=true --set gateway.sandboxJwt.enabled=true "$@"
+	helm template "$release" "$CHART" --set gateway.enabled=true --set gateway.sandboxJwt.enabled=true \
+		--set gatewayService.enabled=true "$@"
 }
 
 # try NAME EXPECT RELEASE [helm args...]: render, and keep the output, the error
@@ -157,6 +162,14 @@ try bad-3g-string 'driver.allowDriverConfig' t --set-string driver.allowDriverCo
 try bad-3g-admission-string 'driver.resourceAdmission.enabled' t --set-string driver.resourceAdmission.enabled=false
 try bad-3g-labels-list 'driver.resourceAdmission.requiredLabels' t --set-json 'driver.resourceAdmission.requiredLabels=["a=b"]'
 
+# 3h. Gateway settings that cannot work. Sandboxes dial the release's Service unless
+# driver.gatewayEndpoint names another address, and their supervisors cannot
+# bootstrap without the gateway's sandbox-JWT keys.
+try bad-3h-gateway-no-service 'gatewayService.enabled' t --set gatewayService.enabled=false
+try bad-3h-gateway-no-jwt 'gateway.sandboxJwt.enabled' t --set gateway.sandboxJwt.enabled=false
+try good-3h-gateway-endpoint '' t --set gatewayService.enabled=false \
+	--set driver.gatewayEndpoint=http://gateway.example:8080
+
 # 7 and 7b. An inference provider. Every value goes in explicitly and as the last
 # word on its key: helm applies --set after --set-json, so an override of a --set
 # value with --set-json would be ignored. baseUrl and modelId reach the sandboxes'
@@ -194,6 +207,14 @@ inference_try bad-7b-url-no-host 'has no host' --set inferenceProvider.baseUrl=h
 inference_try bad-7b-url-ipv6 'IPv6' --set 'inferenceProvider.baseUrl=http://[::1]:8080/anthropic'
 inference_try bad-7b-binaries-empty 'inferenceProvider.binaries' --set "inferenceProvider.baseUrl=$inference_url" \
 	--set-json 'inferenceProvider.binaries=[]'
+# 3h. The provider hook reaches the in-pod gateway through the release's Service, and
+# cannot authenticate to a gateway with OIDC.
+inference_try bad-3h-inference-no-service 'gatewayService.enabled' --set "inferenceProvider.baseUrl=$inference_url" \
+	--set gatewayService.enabled=false --set driver.gatewayEndpoint=http://gateway.example:8080
+inference_try bad-3h-inference-no-gateway 'gateway.enabled' --set "inferenceProvider.baseUrl=$inference_url" \
+	--set gateway.enabled=false
+inference_try bad-3h-inference-oidc 'gateway.oidc.issuer' --set "inferenceProvider.baseUrl=$inference_url" \
+	--set gateway.oidc.issuer=https://issuer.example --set gateway.oidc.audience=openshell
 # The endpoint and model join what driver.sandboxEnv already sets, in that order.
 try good-7-env '' t "${inference_common[@]}" --set "inferenceProvider.baseUrl=$inference_url" \
 	--set "inferenceProvider.modelId=$inference_model" --set-json 'driver.sandboxEnv=["OPTS=a=b"]'
@@ -415,7 +436,7 @@ still = [k for k in removed if k in driver_values]
 if still:
     failures.append("removed values still in values.yaml: " + ", ".join(still))
 
-# 3b-3g and 7b. values upstream or the driver would refuse fail the render, naming the value
+# 3b-3h and 7b. values upstream or the driver would refuse fail the render, naming the value
 bad_cases = sorted(pathlib.Path(p).stem for p in glob.glob(str(work / "bad-*.rc")))
 if not bad_cases:
     failures.append("no refused-value cases were rendered")
@@ -448,6 +469,9 @@ if env is not None and (env.get("OPENSHELL_OPERATOR_NAMESPACE_FILE") != "/etc/op
     failures.append("operator mode with only a ConfigMap did not emit only OPENSHELL_OPERATOR_NAMESPACE_FILE")
 
 rendered("good-3e-shared-unchecked")
+env = rendered("good-3h-gateway-endpoint")
+if env is not None and env.get("OPENSHELL_GRPC_ENDPOINT") != "http://gateway.example:8080":
+    failures.append(f"driver.gatewayEndpoint did not reach the driver: {env.get('OPENSHELL_GRPC_ENDPOINT')!r}")
 env = rendered("good-3e-in-pod-defaults")
 if env is not None and (env.get("OPENSHELL_MANAGED_SSH_INGRESS_ENABLED") != "true"
                         or not env.get("OPENSHELL_MANAGED_SSH_GATEWAY_NAMESPACE")

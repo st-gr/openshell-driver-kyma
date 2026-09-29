@@ -53,6 +53,22 @@ gets immediate feedback. */}}
 {{- if not .Values.inferenceProvider.credentialSecret.key -}}
 {{- fail "inferenceProvider.enabled=true requires inferenceProvider.credentialSecret.key (the key inside the Secret holding the API token)." -}}
 {{- end -}}
+{{- /* The hook registers the provider with this release's in-pod gateway through
+the release's Service (GATEWAY_URL and GATEWAY_HEALTH_URL in
+inference-provider-hook.yaml), whose gateway ports exist only with
+gatewayService.enabled (service.yaml). Without either, it waits for a gateway that
+never answers and fails the install. */ -}}
+{{- if not (and .Values.gateway.enabled .Values.gatewayService.enabled) -}}
+{{- fail "inferenceProvider.enabled=true requires gateway.enabled=true and gatewayService.enabled=true: the provider hook registers the provider with this release's in-pod gateway through the release's Service, which exposes the gateway's ports only with gatewayService.enabled." -}}
+{{- end -}}
+{{- /* With an OIDC issuer the gateway runs allow_unauthenticated_users = false
+(gateway-config.yaml), and upstream then answers a call without a bearer token
+with Unauthenticated (openshell-server src/multiplex.rs AuthGrpcRouter at the
+pinned tag). The hook's CLI calls carry no token, so every one fails and so does
+the install. */ -}}
+{{- if .Values.gateway.oidc.issuer -}}
+{{- fail "inferenceProvider.enabled=true cannot be combined with gateway.oidc.issuer: the provider hook calls the gateway without a token, and a gateway with OIDC refuses unauthenticated calls. Leave inferenceProvider disabled and register the profile and provider from an authenticated CLI session (docs/production-deployment.md)." -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 
@@ -63,6 +79,30 @@ gets immediate feedback. */}}
 {{- end -}}
 {{- if not .Values.gateway.sandboxJwt.enabled -}}
 {{- fail "gateway.tls.enabled=true requires gateway.sandboxJwt.enabled=true — the chart's gateway-jwt-pki-hook is what creates the server-tls Secret. Either flip sandboxJwt on, or pre-create a kubernetes.io/tls Secret named per gateway.sandboxJwt.serverTlsSecretName and disable the hook." -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Pre-flight guards for the in-pod gateway, called from deployment.yaml.
+
+- Sandboxes dial OPENSHELL_GRPC_ENDPOINT (upstream hands it to each supervisor as
+  OPENSHELL_ENDPOINT, openshell-driver-kubernetes src/sandbox_runtime.rs:245 at
+  the pinned tag). Unless driver.gatewayEndpoint names another address it is this
+  release's Service (openshell-driver-kyma.grpcEndpoint), whose gateway port
+  exists only with gatewayService.enabled (service.yaml).
+- A supervisor bootstraps by calling IssueSandboxToken, which upstream answers
+  with Unavailable unless the gateway has [openshell.gateway.gateway_jwt]
+  (openshell-server src/grpc/auth_rpc.rs handle_issue_sandbox_token; without it
+  the gateway also never enables the compute-driver authenticator,
+  src/lib.rs:747-756). The chart renders that table only with
+  gateway.sandboxJwt.enabled; upstream's chart always renders it. */}}
+{{- define "openshell-driver-kyma.gatewayGuards" -}}
+{{- if .Values.gateway.enabled -}}
+{{- if and (not .Values.gatewayService.enabled) (not .Values.driver.gatewayEndpoint) -}}
+{{- fail "gateway.enabled=true requires gatewayService.enabled=true, or driver.gatewayEndpoint naming the address sandboxes reach the gateway at: by default sandboxes dial this release's Service, which exposes the gateway's port only with gatewayService.enabled." -}}
+{{- end -}}
+{{- if not .Values.gateway.sandboxJwt.enabled -}}
+{{- fail "gateway.enabled=true requires gateway.sandboxJwt.enabled=true: without the gateway's sandbox-JWT keys a sandbox's supervisor cannot complete its IssueSandboxToken bootstrap, so no sandbox ever becomes ready." -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
