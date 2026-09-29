@@ -36,6 +36,8 @@ help:
 	@echo "  build                cargo build --release --workspace"
 	@echo "  test                 fmt-check + clippy + cargo test --workspace"
 	@echo "  coverage             cargo llvm-cov over the workspace"
+	@echo "  upstream-args-check  verify the mirrored option surface matches upstream"
+	@echo "  upstream-bump        move to a new upstream tag: make upstream-bump TAG=vX.Y.Z"
 	@echo ""
 	@echo "  image                build the production container ($(IMAGE_NAME):$(IMAGE_TAG))"
 	@echo "  helm-lint            helm lint $(HELM_CHART)"
@@ -77,6 +79,8 @@ upstream-bump:
 	@test -n "$(TAG)" || { echo "usage: make upstream-bump TAG=vX.Y.Z" >&2; exit 2; }
 	sed -i.bak -E 's#^(openshell-[a-z-]+ = \{ git = "https://github.com/NVIDIA/OpenShell", tag = ")[^"]+(")#\1$(TAG)\2#' Cargo.toml
 	rm -f Cargo.toml.bak
+	@test "$$(grep -E '^openshell-[a-z-]+ = \{ git = "https://github.com/NVIDIA/OpenShell", tag = "' Cargo.toml | grep -cF 'tag = "$(TAG)"')" = 3 \
+		|| { echo "error: upstream-bump: Cargo.toml does not pin all three openshell-* dependencies to $(TAG) after the rewrite; check its formatting (git diff Cargo.toml)" >&2; exit 1; }
 	$(DOCKER_RUN) $(DEV_IMAGE) cargo update -p openshell-driver-kubernetes
 	./scripts/check-upstream-args.sh
 

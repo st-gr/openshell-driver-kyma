@@ -12,8 +12,9 @@
 # sandbox and relies on the supervisor's L7 proxy to swap in the real
 # credential. When that release lands, the host stops resolving.
 #
-# Nothing else would warn. check-upstream-pin.sh compares the ComputeDriver
-# contract and check-pin-status.sh compares image digests; this is an
+# Nothing else would warn. check-upstream-pin.sh compares the pinned upstream
+# tag with the latest release, check-upstream-args.sh compares the mirrored
+# option surface, and check-pin-status.sh compares image digests; this is an
 # ARCHITECTURAL change behind an UNCHANGED wire contract, so it arrives looking
 # like a routine image bump and surfaces as a confusing red smoke. This turns it
 # into a named, expected event.

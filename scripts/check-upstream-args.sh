@@ -12,6 +12,8 @@
 # Usage:
 #   scripts/check-upstream-args.sh              check (exit 0 match, 1 drift)
 #   scripts/check-upstream-args.sh --print-env  list every upstream env var
+# Exit 2 means the check could not run: bad usage, a fetch failure, or a
+# region that could not be found or read. It is never reported as a match.
 # UPSTREAM_TAG overrides the tag read from the workspace Cargo.toml.
 # UPSTREAM_MAIN_RS points at a local upstream main.rs instead of fetching.
 set -euo pipefail
@@ -20,9 +22,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/proto-lib.sh
 . "${SCRIPT_DIR}/proto-lib.sh"
 
+MODE=${1:-check}
+if [[ $# -gt 1 || ( $MODE != check && $MODE != --print-env ) ]]; then
+	echo "usage: ${0##*/} [--print-env]" >&2
+	exit 2
+fi
+
 ROOT=$(git rev-parse --show-toplevel)
 OURS=${OURS_ARGS_RS:-$ROOT/crates/openshell-driver-kyma/src/upstream_args.rs}
-TAG=${UPSTREAM_TAG:-$(pinned_upstream_tag)} || die "could not read the pinned upstream tag from Cargo.toml"
+[[ -r $OURS ]] || { echo "error: cannot read $OURS" >&2; exit 2; }
+TAG=${UPSTREAM_TAG:-$(pinned_upstream_tag)} \
+	|| { echo "error: could not read the pinned upstream tag from Cargo.toml" >&2; exit 2; }
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
@@ -30,10 +40,9 @@ if [[ -n ${UPSTREAM_MAIN_RS:-} ]]; then
 	cp "$UPSTREAM_MAIN_RS" "$WORK/upstream.rs"
 else
 	url="https://raw.githubusercontent.com/NVIDIA/OpenShell/${TAG}/crates/openshell-driver-kubernetes/src/main.rs"
-	curl -fsSL "$url" -o "$WORK/upstream.rs" || { echo "could not fetch $url" >&2; exit 2; }
+	curl -fsSL --retry 3 "$url" -o "$WORK/upstream.rs" || { echo "could not fetch $url" >&2; exit 2; }
 fi
 
-MODE=${1:-check}
 python3 - "$WORK/upstream.rs" "$OURS" "$MODE" "$TAG" <<'PY'
 import difflib, re, sys
 
@@ -50,7 +59,8 @@ def body(lines, start_re, what, where):
                     if depth <= 0:
                         return out
                     out.append(lines[j])
-    sys.exit(f"could not find {what} in {where}")
+    print(f"error: could not find {what} in {where}", file=sys.stderr)
+    sys.exit(2)
 
 if mode == "--print-env":
     text = "\n".join(upstream)
