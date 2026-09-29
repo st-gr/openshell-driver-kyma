@@ -390,9 +390,13 @@ for msg in \
 	"Compute driver watch stream ended unexpectedly" \
 	"Failed to apply compute driver event"
 do
-	if grep -qF "$msg" <<<"$gw_all"; then
+	# Upstream retries a sandbox-row CAS conflict on the next watch event
+	# (compute/mod.rs: "concurrent modification detected"), so that one
+	# cause of "Failed to apply compute driver event" is not a failure.
+	hits=$(grep -F "$msg" <<<"$gw_all" | grep -vF "concurrent modification detected" || true)
+	if [[ -n $hits ]]; then
 		fail "the gateway logged '${msg}':
-$(grep -F "$msg" <<<"$gw_all" | tail -3)"
+$(tail -3 <<<"$hits")"
 	fi
 done
 

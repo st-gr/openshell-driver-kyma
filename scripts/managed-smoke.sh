@@ -404,14 +404,19 @@ for msg in \
 	"Compute driver watch stream ended unexpectedly" \
 	"Failed to apply compute driver event"
 do
-	if grep -qF "$msg" <<<"$gw_all"; then
+	# Upstream retries a sandbox-row CAS conflict on the next watch event
+	# (compute/mod.rs: "concurrent modification detected"), so that one
+	# cause of "Failed to apply compute driver event" is not a failure.
+	hits=$(grep -F "$msg" <<<"$gw_all" | grep -vF "concurrent modification detected" || true)
+	if [[ -n $hits ]]; then
 		fail "the gateway logged '${msg}':
-$(grep -F "$msg" <<<"$gw_all" | tail -3)"
+$(tail -3 <<<"$hits")"
 	fi
 done
 
 log "ASSERT M-psa: the managed namespace carries the configured Pod Security level"
-level=$(kubectl get namespace "$NS_DEFAULT" -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce}')
+level=$(kubectl get namespace "$NS_DEFAULT" -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce}') \
+	|| fail "could not read the Pod Security label of ${NS_DEFAULT}"
 [[ $level == privileged ]] || fail "managed namespace ${NS_DEFAULT} has enforce='${level}', expected 'privileged'"
 
 # --- ASSERT M2: an UNOWNED namespace of the same shape is NOT deleted -----
@@ -494,7 +499,8 @@ kubectl get ns "$NS_DECOY" >/dev/null 2>&1 || fail "managed namespace $NS_DECOY 
 
 for key in openshell.ai/managed-by openshell.ai/gateway-id openshell.ai/sandbox-workspace; do
 	esc=${key//./\\.}
-	val=$(kubectl get ns "$NS_DECOY" -o jsonpath="{.metadata.labels.${esc}}")
+	val=$(kubectl get ns "$NS_DECOY" -o jsonpath="{.metadata.labels.${esc}}") \
+		|| fail "could not read labels of ${NS_DECOY}"
 	[[ -n $val ]] || fail "$NS_DECOY is missing ownership label $key"
 done
 
@@ -516,7 +522,8 @@ for _ in $(seq 1 100); do
 done
 [[ $gone == 1 ]] || fail "sandbox m2 was not deleted from ${NS_DECOY}"
 
-# A sandbox delete removes only the CR and its PVC -- it must never touch
+# A sandbox delete removes only that sandbox's own objects (CR, pods,
+# bootstrap Secrets, PVC) -- it must never touch
 # the namespace. Confirm that before trusting the "workspace delete should
 # succeed" assertion below to mean what it claims.
 kubectl get ns "$NS_DECOY" >/dev/null 2>&1 \
@@ -541,7 +548,8 @@ workspace_delete_when_ready decoy m2 "$NS_DECOY"
 sleep 15
 kubectl get ns "$NS_DECOY" >/dev/null 2>&1 \
 	|| fail "GUARDRAIL BREACH: an unlabelled namespace was deleted"
-phase=$(kubectl get ns "$NS_DECOY" -o jsonpath='{.status.phase}')
+phase=$(kubectl get ns "$NS_DECOY" -o jsonpath='{.status.phase}') \
+	|| fail "could not read the phase of ${NS_DECOY}"
 [[ "$phase" == "Active" ]] \
 	|| fail "GUARDRAIL BREACH: $NS_DECOY phase is '$phase', expected 'Active'"
 
@@ -572,7 +580,8 @@ kubectl get ns "$NS_OWNED" >/dev/null 2>&1 || fail "managed namespace $NS_OWNED 
 
 for key in openshell.ai/managed-by openshell.ai/gateway-id openshell.ai/sandbox-workspace; do
 	esc=${key//./\\.}
-	val=$(kubectl get ns "$NS_OWNED" -o jsonpath="{.metadata.labels.${esc}}")
+	val=$(kubectl get ns "$NS_OWNED" -o jsonpath="{.metadata.labels.${esc}}") \
+		|| fail "could not read labels of ${NS_OWNED}"
 	[[ -n $val ]] || fail "$NS_OWNED is missing ownership label $key"
 done
 
