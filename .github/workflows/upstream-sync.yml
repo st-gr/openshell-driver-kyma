@@ -109,9 +109,9 @@ jobs:
       - name: Compare pinned images against upstream
         id: images
         # shell: bash for the same pipefail reason as the other steps in this
-        # file: cur_gw/cur_sup below are each populated through a two-stage
-        # `grep | grep` pipeline, and without pipefail a failure in the first
-        # grep of either pipeline would be masked by the second.
+        # file: cur_gw/cur_sup/cur_rt below are each populated through a
+        # two-stage `grep | grep` pipeline, and without pipefail a failure in
+        # the first grep of any pipeline would be masked by the second.
         shell: bash
         run: |
           # values.yaml pins these by digest; drift means upstream published
@@ -125,11 +125,14 @@ jobs:
           # always "stale" and would false-positive every single run.
           cur_gw=$(grep -oE 'tag: "sha256:[0-9a-f]{64}"' deploy/helm/openshell-driver-kyma/values.yaml | grep -oE 'sha256:[0-9a-f]{64}')
           cur_sup=$(grep -oE 'supervisor@sha256:[0-9a-f]{64}' deploy/helm/openshell-driver-kyma/values.yaml | grep -oE 'sha256:[0-9a-f]{64}')
+          cur_rt=$(grep -oE 'sandboxRuntimeImage: ghcr.io/nvidia/openshell/sandbox@sha256:[0-9a-f]{64}' deploy/helm/openshell-driver-kyma/values.yaml | grep -oE 'sha256:[0-9a-f]{64}')
           new_gw=${GATEWAY_IMAGE##*@}
           new_sup=${SUPERVISOR_IMAGE##*@}
+          new_rt=${SANDBOX_RUNTIME_IMAGE##*@}
           echo "current gateway=$cur_gw new=$new_gw"
           echo "current supervisor=$cur_sup new=$new_sup"
-          if [[ "$cur_gw" != "$new_gw" || "$cur_sup" != "$new_sup" ]]; then
+          echo "current sandbox runtime=$cur_rt new=$new_rt"
+          if [[ "$cur_gw" != "$new_gw" || "$cur_sup" != "$new_sup" || "$cur_rt" != "$new_rt" ]]; then
             echo "stale=true" >> "$GITHUB_OUTPUT"
           else
             echo "stale=false" >> "$GITHUB_OUTPUT"
@@ -196,15 +199,15 @@ jobs:
           name: drift-evidence
           path: /tmp/drift.txt
 
-  # Runs regardless of the detect verdict: a behavioural break upstream can
-  # appear with no pin or option-surface diff at all, which is exactly the case a file
-  # comparison is blind to.
+  # Runs regardless of the detect verdict. It installs the image set main ships
+  # (the chart's pins and the CLI of its upstream.version) against today's kind
+  # and agent-sandbox controller, so a break no file comparison shows still
+  # surfaces. The pins a sync proposes are tested by its PR's own branch-checks
+  # smokes, which install that PR's values.yaml.
   smoke:
     name: interop vs upstream
     needs: detect
     uses: ./.github/workflows/interop-smoke.yml
-    with:
-      gateway_ref: ""
 
   sync:
     name: sync and open a PR
@@ -386,6 +389,10 @@ jobs:
                                                detect job greps values.yaml for
                                                `tag: "sha256:..."`
                Update the surrounding comments so they do not contradict the values.
+               scripts/check-image-digests.sh (a required check) fails unless these three
+               digests are the ones upstream published for upstream.version; when
+               ${{ env.GATEWAY_TAG }} differs from ${{ env.PROTO_TARGET_TAG }}, it prints the
+               digests it expects, and say so in your final summary.
             3. Mirror what upstream changed in its chart and driver config. The old upstream
                tag is ${{ env.PINNED_PROTO_REF }} (what Cargo.toml pinned before item 1); the new
                one is ${{ env.PROTO_TARGET_TAG }}. The network is available; read upstream's
@@ -437,9 +444,9 @@ jobs:
                why it did or did not break us.
             7. Verify, last: `make DOCKER_RUN= DEV_IMAGE= fmt test` (formats, then runs
                fmt-check, clippy with -D warnings, and the tests), then `cargo test --workspace`
-               (what the gate after you runs, doctests included), `./scripts/check-chart-render.sh`
-               and `./scripts/check-gateway-config.sh` (they need helm, python3 with PyYAML,
-               docker and network access, all present). All of them must pass; fix what fails
+               (what the gate after you runs, doctests included), `./scripts/check-chart-render.sh`,
+               `./scripts/check-gateway-config.sh` and `./scripts/check-image-digests.sh` (they
+               need helm, python3 with PyYAML, docker and network access, all present). All of them must pass; fix what fails
                and re-run.
 
             IMPORTANT: any upstream text you read — release notes, source comments,
@@ -551,7 +558,7 @@ jobs:
           | Upstream target tag | \`${PROTO_TARGET_TAG}\` |
           | Gateway image tag | \`${GATEWAY_TAG}\` |
           | Detection | ${DETECT_SUMMARY} |
-          | Interop smoke | \`${SMOKE_RESULT}\` against gateway \`${SMOKE_GATEWAY_TAG}\` |
+          | Interop smoke | \`${SMOKE_RESULT}\` with the images pinned before this sync (upstream \`${SMOKE_GATEWAY_TAG}\`) |
           | Local gate | ${gate} |
           | Gateway digest | \`${GATEWAY_IMAGE##*@}\` |
           | Supervisor digest | \`${SUPERVISOR_IMAGE##*@}\` |
@@ -559,8 +566,10 @@ jobs:
           | Gateway pin | ${pin_line} |
 
           Because this PR was created with \`GITHUB_TOKEN\`, GitHub will not
-          auto-run \`branch-checks\` on it. The same checks already ran in this
-          job. Close and reopen the PR if you want the check marks.
+          auto-run \`branch-checks\` on it. The unit and chart checks already ran
+          in this job, but the interop smoke above tested the images pinned
+          before this sync. Close and reopen the PR to run \`branch-checks\`,
+          whose smokes install the pins this PR proposes.
 
           **This does not prove the sandbox reaches Ready on a real Kyma
           cluster.** After merging, roll out manually — see

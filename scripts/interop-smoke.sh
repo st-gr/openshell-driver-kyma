@@ -8,8 +8,10 @@
 # real gateway image and exercising the handshake.
 #
 # Assumes: a working kubectl context (a throwaway kind cluster), helm, and uv.
-# Required env: GATEWAY_IMAGE, SUPERVISOR_IMAGE, SANDBOX_RUNTIME_IMAGE,
-#               CLI_VERSION, DRIVER_IMAGE
+# Required env: DRIVER_IMAGE. The upstream gateway, supervisor and sandbox
+# runtime images are the chart's own pins, and the openshell CLI is the one of
+# the chart's upstream.version, so this tests exactly the image set the chart
+# ships (scripts/check-image-digests.sh holds those pins to that release).
 #
 # Follows one sandbox through its whole life: CR created, supervisor and
 # workload pods Ready, bootstrap complete (the gateway reports Ready), the
@@ -44,9 +46,14 @@ dump_diagnostics() {
 	kubectl -n "$NS" get events --sort-by=.lastTimestamp 2>&1 | tail -30 >&2 || true
 }
 
-for v in GATEWAY_IMAGE SUPERVISOR_IMAGE SANDBOX_RUNTIME_IMAGE CLI_VERSION DRIVER_IMAGE; do
-	[[ -n ${!v:-} ]] || { echo "error: $v is required" >&2; exit 1; }
-done
+[[ -n ${DRIVER_IMAGE:-} ]] || { echo "error: DRIVER_IMAGE is required" >&2; exit 1; }
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/proto-lib.sh
+. "${SCRIPT_DIR}/proto-lib.sh"
+UPSTREAM_VERSION=$(chart_upstream_version) \
+	|| { echo "error: could not read upstream.version from the chart's values.yaml" >&2; exit 1; }
+# Upstream's release assets carry the tag's `v`; CLI_VERSION is the bare version.
+CLI_VERSION=${UPSTREAM_VERSION#v}
 
 # The agent-sandbox controller turns Sandbox CRs into pods. Without it no
 # sandbox ever starts, which is how v0.8.0 shipped with sandboxes that could
@@ -84,7 +91,7 @@ log "creating namespace with PSA privileged"
 kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f -
 kubectl label namespace "$NS" pod-security.kubernetes.io/enforce=privileged --overwrite
 
-log "installing the chart (gateway ${GATEWAY_IMAGE##*@})"
+log "installing the chart with its pinned upstream ${UPSTREAM_VERSION} images"
 # Install the REAL chart rather than hand-assembling gateway args: no second
 # copy of the configuration to drift from deployment.yaml, and it is the path
 # a third party would actually take — which is what we are safeguarding.
@@ -94,12 +101,8 @@ helm install "$RELEASE" deploy/helm/openshell-driver-kyma \
 	--set image.tag="${DRIVER_IMAGE##*:}" \
 	--set image.pullPolicy=Never \
 	--set gateway.enabled=true \
-	--set gateway.image.repository="${GATEWAY_IMAGE%%@*}" \
-	--set gateway.image.tag="${GATEWAY_IMAGE##*@}" \
 	--set gatewayService.enabled=true \
 	--set gateway.sandboxJwt.enabled=true \
-	--set driver.supervisorImage="$SUPERVISOR_IMAGE" \
-	--set driver.sandboxRuntimeImage="$SANDBOX_RUNTIME_IMAGE" \
 	--wait --timeout 5m \
 	|| fail "helm install failed"
 # gateway.sandboxJwt.enabled=true is required so supervisors can complete
@@ -429,4 +432,4 @@ for c in driver gateway; do
 	true
 done
 
-log "INTEROP SMOKE PASSED (gateway ${GATEWAY_IMAGE##*@})"
+log "INTEROP SMOKE PASSED (upstream ${UPSTREAM_VERSION}, the chart's pinned images)"

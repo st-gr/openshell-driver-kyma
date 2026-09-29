@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 #
-# Resolve the upstream references the compatibility jobs need, and print them
-# as KEY=VALUE lines suitable for `>> "$GITHUB_ENV"`.
+# Resolve the upstream references the weekly upstream-sync needs, and print
+# them as KEY=VALUE lines suitable for `>> "$GITHUB_ENV"`: its detect job
+# compares the chart's pins against them, and its sync job moves the pins to
+# them. The smokes do not use them; they install the chart's own pins.
 #
 # Reads GATEWAY_REF from .github/upstream-compat.env. `latest` means the
 # newest upstream semver release tag — never the mutable `:latest` container
@@ -54,5 +56,4 @@ printf 'GATEWAY_TAG=%s\n' "$tag"
 printf 'GATEWAY_IMAGE=%s\n' "$gateway_image"
 printf 'SUPERVISOR_IMAGE=%s\n' "$supervisor_image"
 printf 'SANDBOX_RUNTIME_IMAGE=%s\n' "$sandbox_runtime_image"
-printf 'CLI_VERSION=%s\n' "$image_tag"
 printf 'PINNED_PROTO_REF=%s\n' "$pinned_proto_ref"

@@ -39,8 +39,9 @@ decide, in a separate reviewable commit, whether to bump. The
 re-resolve command sits in a comment beside each pin.
 
 `scripts/check-pin-status.sh` is the sibling for the `GATEWAY_REF` knob in
-`.github/upstream-compat.env`, which governs which gateway the interop
-smoke tests against. That one is reported weekly by `upstream-sync.yml`.
+`.github/upstream-compat.env`, which governs which upstream release the
+weekly sync moves the image pins to. That one is reported weekly by
+`upstream-sync.yml`.
 
 ## Situations
 

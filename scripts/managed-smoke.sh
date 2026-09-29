@@ -18,8 +18,10 @@
 # interop-smoke.sh exercises the default `shared` mode instead.
 #
 # Assumes: a working kubectl context (a throwaway kind cluster), helm, and uv.
-# Required env: GATEWAY_IMAGE, SUPERVISOR_IMAGE, SANDBOX_RUNTIME_IMAGE,
-#               CLI_VERSION, DRIVER_IMAGE
+# Required env: DRIVER_IMAGE. The upstream gateway, supervisor and sandbox
+# runtime images are the chart's own pins, and the openshell CLI is the one of
+# the chart's upstream.version, so this tests exactly the image set the chart
+# ships (scripts/check-image-digests.sh holds those pins to that release).
 #
 # Like interop-smoke.sh, this runs the real agent-sandbox controller and
 # follows the first sandbox to Ready, through bootstrap and a stop/start
@@ -114,9 +116,14 @@ workspace_delete_when_ready() {
 	fail "workspace delete ${workspace} was refused for ${STORE_SETTLE_SECS}s because the gateway store still lists ${sandbox}, even though its CR is gone from ${namespace} -- the store never converged"
 }
 
-for v in GATEWAY_IMAGE SUPERVISOR_IMAGE SANDBOX_RUNTIME_IMAGE CLI_VERSION DRIVER_IMAGE; do
-	[[ -n ${!v:-} ]] || { echo "error: $v is required" >&2; exit 1; }
-done
+[[ -n ${DRIVER_IMAGE:-} ]] || { echo "error: DRIVER_IMAGE is required" >&2; exit 1; }
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/proto-lib.sh
+. "${SCRIPT_DIR}/proto-lib.sh"
+UPSTREAM_VERSION=$(chart_upstream_version) \
+	|| { echo "error: could not read upstream.version from the chart's values.yaml" >&2; exit 1; }
+# Upstream's release assets carry the tag's `v`; CLI_VERSION is the bare version.
+CLI_VERSION=${UPSTREAM_VERSION#v}
 
 # The agent-sandbox controller turns Sandbox CRs into pods. Without it no
 # sandbox ever starts, which is how v0.8.0 shipped with sandboxes that could
@@ -157,7 +164,7 @@ log "creating the driver/gateway namespace"
 # ASSERT M1 below.
 kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f -
 
-log "installing the chart in managed mode (gateway ${GATEWAY_IMAGE##*@})"
+log "installing the chart in managed mode with its pinned upstream ${UPSTREAM_VERSION} images"
 # The gateway id is gateway.sandboxJwt.gatewayId, shared by the gateway and the
 # driver; in managed mode it becomes part of every namespace name, so keep it
 # short (the chart refuses more than 33 characters).
@@ -170,12 +177,8 @@ helm install "$RELEASE" deploy/helm/openshell-driver-kyma \
 	--set image.tag="${DRIVER_IMAGE##*:}" \
 	--set image.pullPolicy=Never \
 	--set gateway.enabled=true \
-	--set gateway.image.repository="${GATEWAY_IMAGE%%@*}" \
-	--set gateway.image.tag="${GATEWAY_IMAGE##*@}" \
 	--set gatewayService.enabled=true \
 	--set gateway.sandboxJwt.enabled=true \
-	--set driver.supervisorImage="$SUPERVISOR_IMAGE" \
-	--set driver.sandboxRuntimeImage="$SANDBOX_RUNTIME_IMAGE" \
 	--set driver.workspaceMode=managed \
 	--set gateway.sandboxJwt.gatewayId="$GATEWAY_ID" \
 	--set driver.workspacePsaLevel=privileged \
@@ -623,4 +626,4 @@ for _ in $(seq 1 40); do
 done
 [[ $gone == 1 ]] || fail "owned namespace $NS_OWNED was not deleted"
 
-log "MANAGED SMOKE PASSED (gateway ${GATEWAY_IMAGE##*@})"
+log "MANAGED SMOKE PASSED (upstream ${UPSTREAM_VERSION}, the chart's pinned images)"

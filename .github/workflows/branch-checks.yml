@@ -75,6 +75,12 @@ jobs:
         shell: bash
         run: ./scripts/check-upstream-args.sh
 
+      # The smokes install the chart's pinned upstream images, so those pins
+      # must be the ones upstream published for the chart's upstream.version.
+      - name: Check the chart's image pins are upstream.version's
+        shell: bash
+        run: ./scripts/check-image-digests.sh
+
   # Guards the chart's gateway TOML. The gateway rejects an unknown schema
   # version or field at startup, which otherwise only shows on a cluster. The
   # script runs the exact gateway image the chart pins against the rendered
@@ -127,19 +133,15 @@ jobs:
       - name: cargo test (lib + Tier-2 integration)
         run: cargo test --workspace --lib --tests
 
-  # Proves a real upstream gateway still accepts this driver. Runs on every
-  # PR because a contract break should surface at review time, not on the weekly run.
-  #
-  # Uses GATEWAY_REF from .github/upstream-compat.env, which is `latest` by
-  # default. Consequence, accepted deliberately: a broken upstream release
-  # reddens unrelated PRs until GATEWAY_REF is pinned. That is the cost of
-  # tracking bleeding edge, and the knob is the one-commit remedy.
-  # See docs/internal/runbook-upstream-sync.md.
+  # Proves the upstream gateway the chart pins still accepts this driver. Runs on
+  # every PR because a contract break should surface at review time, not on the
+  # weekly run. It installs the chart's own pinned images and the CLI of its
+  # upstream.version, so it tests the image set the chart ships; the weekly
+  # upstream-sync is what moves those pins. See
+  # docs/internal/runbook-upstream-sync.md.
   interop:
     name: interop smoke
     uses: ./.github/workflows/interop-smoke.yml
-    with:
-      gateway_ref: ""
 
   # Proves the managed-mode ownership guardrail against a real API server:
   # DeleteWorkspace must decline a namespace it does not own, and must
@@ -157,13 +159,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-
-      - name: Resolve upstream references
-        # shell: bash is NOT decorative -- see interop-smoke.yml's identical
-        # step for why the default `bash -e {0}` would silently swallow a
-        # failure here via `tee`.
-        shell: bash
-        run: ./scripts/resolve-upstream-refs.sh | tee -a "$GITHUB_ENV"
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7

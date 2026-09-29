@@ -60,3 +60,24 @@ pinned_upstream_tag() {
 	sed -nE 's/^openshell-driver-kubernetes = \{ git = "[^"]+", tag = "([^"]+)" \}.*/\1/p' \
 		"${root}/Cargo.toml" | head -1 | grep .
 }
+
+# The upstream release the chart ships: `upstream.version` in the chart's
+# values.yaml (or in the values file given as $1), which check-chart-render.sh
+# holds equal to the Cargo.toml pin. The chart pins upstream's gateway,
+# supervisor and sandbox runtime images of this release, and the provider hook
+# uses its CLI; the smokes install that set and take the same CLI.
+chart_upstream_version() {
+	local values=${1:-}
+	[[ -n $values ]] || values="$(git rev-parse --show-toplevel)/deploy/helm/openshell-driver-kyma/values.yaml"
+	awk '
+		/^upstream:[[:space:]]*(#.*)?$/ { inside = 1; next }
+		inside && /^[^[:space:]#]/ { exit }
+		inside && /^[[:space:]]+version:/ {
+			sub(/^[[:space:]]+version:[[:space:]]*/, "")
+			sub(/[[:space:]]*(#.*)?$/, "")
+			gsub(/"/, "")
+			print
+			exit
+		}
+	' "$values" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$'
+}

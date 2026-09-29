@@ -15,15 +15,34 @@ who has no use for CI internals.
 | `upstream-sync` | **Mondays 09:30 UTC**; manual | `CLAUDE_CODE_OAUTH_TOKEN` |
 
 `upstream-sync` invokes Claude **only** when the upstream pin is behind the
-latest release, the pinned image digests are stale, or the interop smoke
-failed. Most weeks it is a green no-op costing no tokens.
+latest release, the pinned image digests (gateway, supervisor, sandbox
+runtime) are stale, or the interop smoke failed. Most weeks it is a green
+no-op costing no tokens.
+
+**What the smokes test.** `interop-smoke` and branch-checks' `managed-smoke`
+install the chart with its own pinned gateway, supervisor and sandbox runtime
+images and the `openshell` CLI of its `upstream.version`: the image set the
+chart ships. `scripts/check-image-digests.sh` (branch-checks'
+`upstream-parity` job) fails unless those three digests are the ones upstream
+published for `upstream.version`. So the weekly sync's own smoke re-tests the
+set `main` ships, and the pins a sync proposes are tested by its PR's
+`branch-checks` smokes. `GATEWAY_REF` (`.github/upstream-compat.env`) only
+decides which upstream release the sync resolves: the digests the detect job
+compares the pins against, and the ones the sync moves them to. When the
+sync's target tag and `GATEWAY_REF`'s differ, `check-image-digests.sh` fails
+on its PR and prints the digests it expects.
 
 ## Situations
 
 ### Weekly PR is green
 
 Review the diff as you would any PR — pay attention to whatever upstream
-added, since that is the part Claude wrote from scratch. Merge.
+added, since that is the part Claude wrote from scratch. If it changed
+`scripts/upstream-main-rs.sha256`, check that `crates/openshell-driver-kyma/src/main.rs`
+mirrors the upstream `main()` diff that `scripts/check-upstream-args.sh`
+prints: the hash records that review. The PR was opened with `GITHUB_TOKEN`,
+so `branch-checks` does not run on it by itself; close and reopen it so the
+smokes install the pins it proposes. Merge once they pass.
 
 Then **roll out to the cluster manually.** CI holds no cluster credentials, so
 this step is never automated:
@@ -62,12 +81,19 @@ attempt runs to the end of the prompt and then the separate "Run the full
 gate" step reports the failure. Finish it by hand or close it — do not merge
 a draft.
 
-### Interop smoke red, protos unchanged
+### Interop smoke red with no upstream movement
 
-The interesting case: a behavioural break upstream with no proto diff. Decide:
+The smoke installs the pinned image set, so a red weekly smoke with nothing
+moved upstream means something around it changed (kind, the agent-sandbox
+controller, a CLI asset) or `main` broke. Read the log, fix forward.
 
-- fix forward (usually a driver change), or
-- pin `GATEWAY_REF` to the last good version to unblock PRs while you work.
+### A sync PR's smokes are red
+
+The pins the sync proposes do not work with the driver. Decide:
+
+- fix forward on the sync branch (usually a driver change), or
+- pin `GATEWAY_REF` to the last good version, so the next sync proposes that
+  instead, and close the PR.
 
 **What a real incompatibility looks like** (exercised 2026-08-05 with a
 deliberately broken driver, not guessed):
@@ -95,15 +121,17 @@ Two traps this exposed:
   The gateway logs it *before* calling `GetGatewayListenerRequirements`
   (`openshell-server/src/compute/mod.rs:608` vs `:617`). A driver that breaks
   that RPC still emits the line, then kills the gateway moments later.
-- **`gateway_ref=v0.0.91` is NOT a negative test.** It passes: v0.0.97 only
-  *added* an RPC and an older gateway never calls it, so the driver is
-  genuinely backward compatible. Verified green against v0.0.91 and v0.0.99
-  alike. To exercise the failure path, break the driver on a scratch branch
-  and dispatch the smoke against that branch.
+- **An older gateway is NOT a negative test.** Pinning an older release passed:
+  v0.0.97 only *added* an RPC and an older gateway never calls it, so the
+  driver is genuinely backward compatible (verified against v0.0.91 and
+  v0.0.99 alike). To exercise the failure path, break the driver on a scratch
+  branch and dispatch the smoke against that branch.
 
-### Unrelated PRs suddenly red after an upstream release
+### An upstream release is broken
 
-Upstream is broken. Pin, and record why:
+Unrelated PRs no longer turn red when upstream ships: their smokes install
+the chart's pins. A broken release shows up on the sync PR that proposes it.
+Pin, and record why:
 
 ```bash
 # .github/upstream-compat.env
@@ -172,23 +200,12 @@ Note the gate no longer runs when Claude fails. It used to, and it passed —
 because an untouched tree naturally passes fmt/clippy/test. That "success" said
 nothing about the sync and made this failure harder to read.
 
-### The PR pins one version but the smoke tested another
+### The PR body's smoke tested the old pins
 
-Expected, not a bug. `GATEWAY_REF=latest` resolves **at run time**, so if
-upstream ships a release between the sync producing a PR and someone merging
-it, the PR's own `branch-checks` smoke runs against the newer one.
-
-Seen 2026-08-11: PR #18 pinned v0.0.102 (the sync's own smoke validated
-v0.0.102 at 09:52), while the merge-time smoke tested v0.0.103 at 16:03.
-
-Both results are useful — the driver works with the version being pinned *and*
-the one released after. The PR body now names the version the smoke actually
-ran against, so the claim is checkable instead of implied.
-
-The failure mode to watch for: if a newly-released gateway breaks the contract,
-the merge-time smoke goes red on a PR whose *content* is fine. Read the gateway
-tag in the smoke log before assuming the PR is at fault; pinning `GATEWAY_REF`
-is the remedy while upstream is broken.
+Expected, not a bug. The sync job's smoke runs before the sync and installs
+the pins on `main`; the PR body says so (upstream `<tag>` in its "Interop
+smoke" row is the release those pins belong to). The pins the PR proposes are
+tested when you close and reopen it and `branch-checks` runs.
 
 ### Job reports an infrastructure flake
 
