@@ -277,6 +277,9 @@ pub fn admission_acknowledgement(
 /// Upstream's default `required_labels`, which apply when the gateway config
 /// omits `resource_admission`. The workspace label's value is the literal
 /// placeholder upstream substitutes per workspace.
+///
+/// Reported unconditionally: a gateway that customises `required_labels`
+/// will fail the handshake against this value.
 #[must_use]
 pub fn default_required_labels() -> BTreeMap<String, String> {
     BTreeMap::from([
@@ -741,16 +744,27 @@ mod tests {
     }
 
     #[test]
-    fn acknowledgement_is_deterministic() {
+    fn acknowledgement_sorts_keys_regardless_of_insertion_order() {
         // The gateway re-reads capabilities and fails if the value changed, so
-        // key ordering must not depend on map iteration luck.
+        // key order must come from sorting, not from insertion order.
         let mut labels = BTreeMap::new();
-        labels.insert("b".to_string(), "2".to_string());
-        labels.insert("a".to_string(), "1".to_string());
+        for k in ["d", "c", "b", "a"] {
+            labels.insert(k.to_string(), k.to_uppercase());
+        }
         assert_eq!(
             admission_acknowledgement(false, true, &labels),
-            admission_acknowledgement(false, true, &labels)
+            r#"v1:{"allow_driver_config":false,"resource_admission":{"enabled":true,"required_labels":{"a":"A","b":"B","c":"C","d":"D"}}}"#
         );
-        assert!(admission_acknowledgement(false, true, &labels).contains(r#""a":"1","b":"2""#));
+    }
+
+    #[test]
+    fn production_acknowledgement_is_pinned_to_the_exact_wire_string() {
+        // Literal on purpose: the gateway compares this byte-for-byte with the
+        // policy it derives itself, so any drift must fail here, not at
+        // gateway startup.
+        assert_eq!(
+            admission_acknowledgement(true, true, &default_required_labels()),
+            r#"v1:{"allow_driver_config":true,"resource_admission":{"enabled":true,"required_labels":{"openshell.ai/sandbox-attachable":"true","openshell.ai/sandbox-attachable-workspace":"${workspace}"}}}"#
+        );
     }
 }

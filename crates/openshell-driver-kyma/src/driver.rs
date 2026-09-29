@@ -155,7 +155,10 @@ impl ComputeDriver for Driver {
             // new operator admission/policy negotiation system
             // (`DriverSandboxSpec.policy`, `WorkloadIdentityRequest`,
             // `DriverFenceEvidence`, `resolved_identity`, `fence_evidence`,
-            // etc. on compute_driver.proto).
+            // etc. on compute_driver.proto). This driver acknowledges the
+            // policy for the handshake but does not yet enforce admission
+            // negotiation.
+            //
             // Must equal the policy the gateway derives from
             // `[openshell.drivers.kyma]`, or it refuses the driver at
             // startup. Empty is accepted only when the gateway has admission
@@ -583,9 +586,10 @@ mod tests {
             "got {}",
             caps.resource_admission_policy
         );
-        assert!(caps
-            .resource_admission_policy
-            .contains(r#""allow_driver_config":true"#));
+        assert_eq!(
+            caps.resource_admission_policy,
+            r#"v1:{"allow_driver_config":true,"resource_admission":{"enabled":true,"required_labels":{"openshell.ai/sandbox-attachable":"true","openshell.ai/sandbox-attachable-workspace":"${workspace}"}}}"#
+        );
     }
 
     /// Capability names the gateway requires are matched against what this
