@@ -14,6 +14,12 @@
 # there silently arrives as an empty DIRECTORY and the gateway reports "is not
 # a regular file (directory)", which looks like a config error but is not. The
 # work dir is therefore staged under $HOME, which works locally and in CI.
+#
+# Requires: helm, docker, python3 with PyYAML (preinstalled on ubuntu-latest).
+#
+# Outcome rule: acceptance needs POSITIVE evidence. Anything unrecognised
+# (docker failure, pull failure, unexpected output) fails; it is never read as
+# success.
 set -euo pipefail
 
 CHART="deploy/helm/openshell-driver-kyma"
@@ -50,13 +56,32 @@ PY
 )}"
 echo "--- gateway image: $IMAGE ---"
 
+if [ ! -s "$WORK/gateway.toml" ] || ! grep -q '^version' "$WORK/gateway.toml"; then
+  echo "ERROR: rendered gateway.toml is empty or has no top-level version; nothing to test" >&2
+  exit 1
+fi
+
 echo "--- rendered gateway.toml ---"
 cat "$WORK/gateway.toml"
 
+if ! docker pull "$IMAGE" >/dev/null; then
+  echo "ERROR: could not pull $IMAGE; the config was not tested" >&2
+  exit 1
+fi
+
+rc=0
 out="$(docker run --rm -v "$WORK/gateway.toml:/etc/openshell/gateway.toml:ro" \
   --entrypoint openshell-gateway "$IMAGE" \
   --config /etc/openshell/gateway.toml --compute-driver kyma \
-  --compute-driver-socket /run/openshell/driver.sock 2>&1 || true)"
+  --compute-driver-socket /run/openshell/driver.sock 2>&1)" || rc=$?
+
+# 125/126/127 are docker's own failures (daemon, exec, command not found),
+# not the gateway's exit status.
+if [ "$rc" -ge 125 ] && [ "$rc" -le 127 ]; then
+  echo "ERROR: docker run failed at docker level (status $rc); the config was not tested" >&2
+  head -20 <<<"$out" >&2
+  exit 1
+fi
 
 if grep -qiE "failed to parse gateway config|unsupported gateway config version|unknown field" <<<"$out"; then
   echo "GATEWAY_CONFIG_REJECTED"
@@ -64,6 +89,15 @@ if grep -qiE "failed to parse gateway config|unsupported gateway config version|
   exit 1
 fi
 
-echo "--- gateway output (config accepted; any failure below is runtime) ---"
-head -20 <<<"$out"
-echo "GATEWAY_CONFIG_ACCEPTED"
+# Positive evidence: the gateway got past config parsing and failed on
+# something unrelated to config (running outside Kubernetes).
+if grep -q "failed to create /.local/state/openshell/gateway" <<<"$out"; then
+  echo "--- gateway output (config accepted; failure below is runtime) ---"
+  head -20 <<<"$out"
+  echo "GATEWAY_CONFIG_ACCEPTED"
+  exit 0
+fi
+
+echo "ERROR: could not determine whether the config was accepted (exit $rc); output:" >&2
+head -40 <<<"$out" >&2
+exit 1
