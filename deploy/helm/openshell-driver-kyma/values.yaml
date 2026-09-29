@@ -431,10 +431,11 @@ gatewayApirule:
 # and a post-install Job registers it with the in-pod gateway
 # (`openshell provider profile import`) and creates the provider from it
 # (`openshell provider create`), using the CLI of `upstream.version`. The
-# sandbox supervisor injects the API key into requests from those binaries to
-# that host. Sandboxes receive ANTHROPIC_BASE_URL (`baseUrl`) and
-# ANTHROPIC_MODEL (`modelId`) in their environment, and attach the provider
-# with `openshell sandbox create --provider <name>`.
+# sandbox supervisor injects the API key into requests to that host and port;
+# `binaries` only gates which processes may reach it. Sandboxes receive
+# ANTHROPIC_BASE_URL (`baseUrl`) and ANTHROPIC_MODEL (`modelId`) in their
+# environment, and attach the provider with
+# `openshell sandbox create --provider <name>`.
 #
 # The chart never sees the API key — supply it via a Secret you manage in
 # .Release.Namespace before install.
@@ -446,7 +447,7 @@ inferenceProvider:
   modelId: ""             # e.g. claude-opus-4-7
   # Provider profile id registered with the gateway. Empty = "kyma-<type>".
   profileId: ""
-  # Executable paths the profile's `binaries` list: the processes that may reach
+  # Executable paths for the profile's `binaries` list: the processes that may reach
   # the inference endpoint through the sandbox supervisor. The API key itself is
   # bound to the endpoint's host and port (upstream v0.1.2 does not yet restrict
   # it by calling binary); the path of `baseUrl` is not part of that binding.
