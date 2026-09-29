@@ -3,7 +3,10 @@
 # chart binds to the same driver in shared mode (deploy/helm/openshell/
 # templates/role.yaml at the pinned tag), plus the Kyma layer's APIRule
 # exposure when enabled. The other workspace modes get these rights, cluster-wide,
-# from clusterrole.yaml. scripts/check-chart-render.sh asserts both.
+# from clusterrole.yaml. scripts/check-chart-render.sh asserts both, rule for rule.
+# Upstream also gates its Role on workspaceResources.enabled, a toggle for a
+# gateway-only release; this chart has no such toggle, so the Role always renders
+# in shared mode.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -51,7 +54,7 @@ rules:
     verbs: ["patch"]
   - apiGroups: ["gateway.kyma-project.io"]
     resources: ["apirules"]
-    verbs: ["create", "get", "patch"]
+    verbs: ["create", "patch"]
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create"]

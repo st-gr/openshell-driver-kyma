@@ -26,9 +26,6 @@
 #   3. (Only if inferenceProvider.enabled below) Anthropic-key Secret pre-created:
 #        kubectl -n openshell-system create secret generic my-anthropic-creds \
 #          --from-literal=api-key=sk-ant-…
-#   4. (Only if gatewayUpstreamEgress.enabled below) Upstream LLM-gateway namespace
-#      labelled with kubernetes.io/metadata.name (Kyma/Gardener doesn't auto-apply):
-#        kubectl label namespace your-llm-ns kubernetes.io/metadata.name=your-llm-ns
 
 # ─── Sandbox namespace ────────────────────────────────────────────────────
 # Where the driver creates Sandbox CRs. Must carry PSA=privileged.
@@ -54,8 +51,10 @@ driver:
   # optional telemetry endpoints. Independent of inference routing.
   disableClaudeTelemetry: true
 
-# ─── Driver+gateway pod NetworkPolicy ─────────────────────────────────────
-# Default-on. Sandbox pods are fenced by upstream's own per-namespace policies.
+# ─── NetworkPolicies ──────────────────────────────────────────────────────
+# Default-on: the driver+gateway pod's policy and, in shared mode, upstream's
+# SSH-ingress restriction on sandbox pods. Sandbox pods are otherwise fenced by
+# upstream's own per-namespace policies; see values.yaml.
 networkPolicy:
   enabled: true
 
@@ -162,34 +161,6 @@ inferenceProvider:
   credentialSecret:
     name: my-anthropic-creds   # Secret you pre-created with the API key
     key: api-key
-
-# ─── NetworkPolicy egress for the sandbox pod → LLM upstream ─────────────
-# Required when inferenceProvider.baseUrl points at a *.svc.cluster.local
-# address. The sandbox-pod NetworkPolicy denies all in-cluster egress
-# except to the in-pod gateway (TCP/8080) and DNS — this rule punches a
-# hole for the supervisor's in-process inference router to reach the
-# operator's LLM upstream.
-#
-# Why the sandbox NP and not the driver+gateway NP: per NVIDIA's
-# architecture (docs.nvidia.com/openshell + issue #998), the supervisor
-# inside the sandbox pod is what dials the upstream — the gateway
-# sidecar mints the bundle but doesn't forward request bytes.
-#
-# Prerequisites:
-#   1. The upstream LLM gateway's namespace must carry
-#      `kubernetes.io/metadata.name=<value>` (Kyma/Gardener doesn't
-#      auto-apply this — see pre-flight checklist).
-#   2. If you set podSelector, it must match the upstream's actual
-#      labels. Many in-cluster gateways use `app: <name>` rather than
-#      `app.kubernetes.io/name: <name>`.
-gatewayUpstreamEgress:
-  enabled: true
-  namespace: your-llm-ns
-  port: 8080
-  # Optional: tighten the rule to specific pods within the namespace.
-  podSelector: {}
-  # podSelector:
-  #   app: gateway
 
 # ─── SAP AI Core translation bridge ──────────────────────────────────────
 # When you want sandboxes to reach Anthropic models that SAP AI Core has

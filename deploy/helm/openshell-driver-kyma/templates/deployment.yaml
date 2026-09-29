@@ -1,6 +1,5 @@
 {{/* Pre-flight validation: check required fields when opt-in features are enabled. */ -}}
 {{- include "openshell-driver-kyma.inferenceProviderGuards" . -}}
-{{- include "openshell-driver-kyma.gatewayUpstreamEgressGuards" . -}}
 {{- include "openshell-driver-kyma.gatewayTlsGuards" . -}}
 {{- include "openshell-driver-kyma.workspaceGuards" . -}}
 {{- include "openshell-driver-kyma.sandboxEnvGuards" . -}}

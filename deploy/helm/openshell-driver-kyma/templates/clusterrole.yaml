@@ -101,7 +101,7 @@ rules:
     verbs: ["patch"]
   - apiGroups: ["gateway.kyma-project.io"]
     resources: ["apirules"]
-    verbs: ["create", "get", "patch"]
+    verbs: ["create", "patch"]
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create"]
