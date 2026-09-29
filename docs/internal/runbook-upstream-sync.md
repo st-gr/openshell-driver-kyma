@@ -48,9 +48,11 @@ added, since that is the part Claude wrote from scratch. If it changed
 `scripts/upstream-main-rs.sha256`, check that `crates/openshell-driver-kyma/src/main.rs`
 mirrors the upstream `main()` diff that `scripts/check-upstream-args.sh`
 prints: the hash records that review. The PR was opened with `GITHUB_TOKEN`,
-so `branch-checks` does not run on it by itself: the sync job dispatches it on
-the sync branch (`gh workflow run branch-checks.yml --ref <branch>`, which
-needs `actions: write` and is why `branch-checks.yml` has `workflow_dispatch`),
+so `branch-checks` does not run on it by itself: the workflow's separate
+`dispatch-checks` job dispatches it on the sync branch
+(`gh workflow run branch-checks.yml --ref <branch>`, which needs
+`actions: write` — held only by that job — and is why `branch-checks.yml` has
+`workflow_dispatch`),
 and the PR body links its runs
 (`https://github.com/st-gr/openshell-driver-kyma/actions/workflows/branch-checks.yml`,
 filtered to the branch). They report on the PR and include both smokes, which
@@ -431,10 +433,9 @@ them afterwards. Do not flip the mode on a cluster with live sandboxes.
   but nothing structurally stops the `Bash` tool from running `git commit` or
   `git push` itself: `actions/checkout` leaves credentials for `GITHUB_TOKEN`
   configured in git, and the job's own token has write scope. This is a
-  prompt-level constraint, not a permissions-level one. The job also holds
-  `actions: write` (to dispatch `branch-checks` on the sync branch), which the
-  `Bash` tool could equally use to dispatch workflows; the same reasoning
-  applies.
+  prompt-level constraint, not a permissions-level one. `actions: write` (to
+  dispatch `branch-checks` on the sync branch) is deliberately NOT on this job:
+  it lives on the separate `dispatch-checks` job, which runs no model.
 
   That the workflow's own steps only ever commit and push to
   `upstream-sync/<tag>-<run-id>` is a property of the code as written, **not

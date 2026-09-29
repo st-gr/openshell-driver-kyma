@@ -243,13 +243,11 @@ jobs:
     if: "!cancelled() && (needs.detect.outputs.changed == 'true' || needs.smoke.result == 'failure')"
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    outputs:
+      branch: ${{ steps.pr.outputs.branch }}
     permissions:
       contents: write
       pull-requests: write
-      # `gh workflow run branch-checks.yml` on the sync branch, so the PR's
-      # smokes install the pins it proposes. A GITHUB_TOKEN push and PR trigger
-      # no checks; workflow_dispatch is the one event that does, and it needs this.
-      actions: write
       # Required by claude-code-action@v1, which fetches a GitHub OIDC token
       # as part of its auth flow. Without it the action fails before Claude
       # ever runs, with "Could not fetch an OIDC token".
@@ -499,6 +497,7 @@ jobs:
           ./scripts/check-chart-render.sh
 
       - name: Commit and open the pull request
+        id: pr
         if: ${{ !cancelled() }}
         shell: bash
         env:
@@ -534,23 +533,16 @@ jobs:
 
           Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
           git push origin "$branch"
+          echo "branch=${branch}" >> "$GITHUB_OUTPUT"
 
           # Smoke the pins this PR proposes. A PR opened with GITHUB_TOKEN
           # triggers no checks, and the interop smoke of this run installed the
-          # pins main ships, so dispatch branch-checks (whose smokes install the
-          # branch's own values.yaml) on the pushed branch. A dispatched run
-          # attaches to the branch's commit, so it reports on the PR once the PR
-          # exists. workflow_dispatch is the one event a GITHUB_TOKEN can trigger;
-          # it needs actions: write, and branch-checks.yml on the default branch
-          # must declare workflow_dispatch. A failed dispatch must not lose the
-          # PR: say so in its body instead.
+          # pins main ships, so the dispatch-checks job below runs branch-checks
+          # (whose smokes install the branch's own values.yaml) on the pushed
+          # branch. That job, not this one, holds actions: write, so the Claude
+          # session in this job never can dispatch or cancel workflows.
           runs_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/workflows/branch-checks.yml?query=branch%3A${branch//\//%2F}"
-          if gh workflow run branch-checks.yml --repo "$GITHUB_REPOSITORY" --ref "$branch"; then
-            checks_note="This job dispatched \`branch-checks\` on the sync branch (\`workflow_dispatch\`, because a PR opened with \`GITHUB_TOKEN\` triggers none): [its runs](${runs_url}). They report on this PR, and include the fmt/clippy/test build, the gateway config check and both smokes, which install the pins this PR proposes. Wait for them before merging."
-          else
-            echo "::warning::could not dispatch branch-checks on ${branch}; see the PR body"
-            checks_note="This job tried to dispatch \`branch-checks\` on the sync branch and FAILED (see the 'Commit and open the pull request' step's log; \`branch-checks.yml\` on the default branch needs \`workflow_dispatch\` and this job \`actions: write\`). Run \`gh workflow run branch-checks.yml --ref ${branch}\` or close and reopen the PR so the smokes install the pins it proposes. Do not merge before they pass."
-          fi
+          checks_note="This run's \`dispatch-checks\` job dispatches \`branch-checks\` on the sync branch (\`workflow_dispatch\`, because a PR opened with \`GITHUB_TOKEN\` triggers none): [its runs](${runs_url}). They report on this PR, and include the fmt/clippy/test build, the gateway config check and both smokes, which install the pins this PR proposes. If no run appears, the dispatch failed (see that job); run \`gh workflow run branch-checks.yml --ref ${branch}\` or close and reopen the PR. Wait for them before merging."
 
           # Draft when the gate is red, so a half-finished sync can never be
           # mistaken for one that is ready to merge.
@@ -644,3 +636,24 @@ jobs:
             echo "quota resets; nothing needs fixing in this repo." >&2
           fi
           exit 1
+
+  dispatch-checks:
+    name: dispatch branch-checks on the sync branch
+    needs: sync
+    # A PR opened with GITHUB_TOKEN triggers no pull_request run;
+    # workflow_dispatch is the one event a GITHUB_TOKEN can trigger, and it
+    # needs actions: write. That permission lives here, in a job that runs no
+    # model and reads no upstream content, rather than in `sync`, whose Claude
+    # session has a Bash tool. Runs even when `sync` failed after pushing its
+    # branch, so a draft PR still gets its checks.
+    if: "!cancelled() && needs.sync.outputs.branch != ''"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch branch-checks
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ needs.sync.outputs.branch }}
+        run: gh workflow run branch-checks.yml --repo "$GITHUB_REPOSITORY" --ref "$BRANCH"
