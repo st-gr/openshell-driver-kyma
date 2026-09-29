@@ -170,8 +170,10 @@ driver:
   sandboxRuntimeImage: ghcr.io/nvidia/openshell/sandbox@sha256:bf4797b6c511f2d8ba02955dbba4bf76c1f0dd6d83531420c5408d5f1fb9d72f
   sandboxRuntimeImagePullPolicy: ""
   supervisorImagePullPolicy: ""
-  # Default sandbox image when a create request names none.
-  sandboxImage: ""
+  # Default sandbox image when a create request names none
+  # (OPENSHELL_SANDBOX_IMAGE). Upstream's chart default, its sandbox.image
+  # repository and tag. Set "" to leave it to upstream's driver.
+  sandboxImage: nvcr.io/nvidia/base/ubuntu:24.04
   sandboxImagePullPolicy: ""
   sandboxImagePullSecrets: []
   sandboxRuntimeBoundaryPort: 5500
