@@ -27,6 +27,16 @@ use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status};
 
 const DRIVER_NAME: &str = "kyma";
+/// Baseline compute-extension contract capability. Upstream's
+/// `ExtensionFamily::Compute.contract_capability()` yields this literal; this
+/// driver vendors only the proto (no `openshell-core`), so it is spelled here.
+const COMPUTE_CONTRACT_CAPABILITY: &str = "openshell.compute.contract";
+
+/// Capabilities this driver actually supports, and so the only ones a gateway
+/// may require of it. Upstream's own Kubernetes driver advertises exactly the
+/// contract capability and no additional ones.
+const SUPPORTED_CAPABILITIES: &[&str] = &[COMPUTE_CONTRACT_CAPABILITY];
+
 const DEFAULT_SANDBOX_IMAGE: &str = "ghcr.io/nvidia/openshell-community/sandboxes/base:latest";
 
 pub type WatchStream = Pin<Box<dyn Stream<Item = Result<WatchSandboxesEvent, Status>> + Send>>;
@@ -65,20 +75,25 @@ impl ComputeDriver for Driver {
         &self,
         req: Request<GetCapabilitiesRequest>,
     ) -> Result<Response<GetCapabilitiesResponse>, Status> {
-        // Added upstream in v0.1.2: the gateway may declare protocol
-        // capabilities it requires the driver to support via
-        // `gateway.required_capabilities`. This driver advertises no
-        // optional extension capabilities of its own (see `extension` and
-        // `resource_admission_policy` below), so it cannot satisfy a
-        // nonempty requirement list. `GetCapabilitiesRequest.gateway`'s own
-        // field comment says drivers "must reject unmet requirements", so
-        // reject rather than silently proceed and let a real gap surface
-        // later as a confusing runtime failure.
+        // Added upstream in v0.1.2: the gateway declares protocol
+        // capabilities it requires via `gateway.required_capabilities`, and
+        // the field's own comment says drivers "must reject unmet
+        // requirements". A real v0.1.2 gateway always requires
+        // `openshell.compute.contract`, the baseline compute-extension
+        // contract every compute driver advertises (confirmed against a real
+        // v0.1.2 gateway by the interop smoke), so a blanket rejection of any
+        // nonempty list refuses a perfectly normal gateway. Reject only the
+        // requirements this driver does not support; unknown *additional*
+        // ones still fail here rather than as a confusing runtime failure.
         if let Some(gateway) = req.into_inner().gateway {
-            if !gateway.required_capabilities.is_empty() {
+            let unsupported: Vec<&String> = gateway
+                .required_capabilities
+                .iter()
+                .filter(|c| !SUPPORTED_CAPABILITIES.contains(&c.as_str()))
+                .collect();
+            if !unsupported.is_empty() {
                 return Err(Status::failed_precondition(format!(
-                    "kyma driver does not support required gateway capabilities: {:?}",
-                    gateway.required_capabilities
+                    "kyma driver does not support required gateway capabilities: {unsupported:?}"
                 )));
             }
         }
@@ -135,21 +150,18 @@ impl ComputeDriver for Driver {
             // field's own doc comment.
             rootfs_tar_staging_dir: String::new(),
             rootfs_tar_max_bytes: 0,
-            // TODO(upstream v0.1.2): `extension` is a new peer
-            // protocol-identity/version-negotiation scheme
-            // (openshell.extension.v1.PeerMetadata) with no precedent
-            // elsewhere in this driver and no upstream Kubernetes driver
-            // source vendored here to confirm conventions against. major/
-            // minor 1.0 and an empty capability list are a conservative
-            // self-identification (advertise nothing, require nothing), not
-            // a value verified against a real gateway — revisit if interop
-            // smoke against a v0.1.2+ gateway surfaces a mismatch.
+            // Mirrors upstream's `extension_metadata()` as used by its own
+            // Kubernetes driver: protocol 1.0, the compute contract both
+            // supported and required, no additional capabilities.
             extension: Some(PeerMetadata {
                 protocol_version: Some(ProtocolVersion { major: 1, minor: 0 }),
                 implementation_name: "openshell/kyma".to_string(),
                 implementation_version: env!("CARGO_PKG_VERSION").to_string(),
-                supported_capabilities: Vec::new(),
-                required_capabilities: Vec::new(),
+                supported_capabilities: SUPPORTED_CAPABILITIES
+                    .iter()
+                    .map(|c| c.to_string())
+                    .collect(),
+                required_capabilities: vec![COMPUTE_CONTRACT_CAPABILITY.to_string()],
             }),
             // TODO(upstream v0.1.2): this driver does not yet implement the
             // new operator admission/policy negotiation system
@@ -607,40 +619,67 @@ mod tests {
         );
     }
 
-    /// Capability names the gateway requires are matched against what this
-    /// driver actually implements — asserting the rejection keeps a future
-    /// change from silently claiming support this driver does not implement.
-    #[tokio::test]
-    async fn get_capabilities_rejects_unmet_gateway_required_capabilities() {
+    async fn caps_for(required: Option<Vec<&str>>) -> Result<GetCapabilitiesResponse, Status> {
         let d = make_driver_with_mocks(
             Config::default(),
             MockSandboxProvisioner::new(),
             MockDriverMetrics::new(),
         );
-        let s = d
-            .get_capabilities(Request::new(GetCapabilitiesRequest {
-                gateway: Some(PeerMetadata {
-                    required_capabilities: vec!["some.unsupported.capability".into()],
-                    ..Default::default()
-                }),
-            }))
+        let gateway = required.map(|r| PeerMetadata {
+            required_capabilities: r.into_iter().map(String::from).collect(),
+            ..Default::default()
+        });
+        d.get_capabilities(Request::new(GetCapabilitiesRequest { gateway }))
             .await
-            .unwrap_err();
-        assert_eq!(s.code(), tonic::Code::FailedPrecondition);
+            .map(Response::into_inner)
+    }
+
+    /// The exact case a real v0.1.2 gateway sends; rejecting it made the
+    /// gateway refuse to start.
+    #[tokio::test]
+    async fn get_capabilities_accepts_the_compute_contract_requirement() {
+        caps_for(Some(vec!["openshell.compute.contract"]))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
-    async fn get_capabilities_accepts_gateway_with_no_required_capabilities() {
-        let d = make_driver_with_mocks(
-            Config::default(),
-            MockSandboxProvisioner::new(),
-            MockDriverMetrics::new(),
-        );
-        d.get_capabilities(Request::new(GetCapabilitiesRequest {
-            gateway: Some(PeerMetadata::default()),
-        }))
+    async fn get_capabilities_rejects_unknown_required_capability() {
+        let s = caps_for(Some(vec!["openshell.compute.does-not-exist"]))
+            .await
+            .unwrap_err();
+        assert_eq!(s.code(), tonic::Code::FailedPrecondition);
+        assert!(s.message().contains("openshell.compute.does-not-exist"));
+    }
+
+    #[tokio::test]
+    async fn get_capabilities_rejects_mixed_requirement_naming_the_unknown_one() {
+        let s = caps_for(Some(vec![
+            "openshell.compute.contract",
+            "openshell.compute.does-not-exist",
+        ]))
         .await
-        .unwrap();
+        .unwrap_err();
+        assert_eq!(s.code(), tonic::Code::FailedPrecondition);
+        assert!(s.message().contains("openshell.compute.does-not-exist"));
+        assert!(!s.message().contains("openshell.compute.contract"));
+    }
+
+    #[tokio::test]
+    async fn get_capabilities_accepts_empty_or_absent_gateway_requirements() {
+        caps_for(Some(vec![])).await.unwrap();
+        caps_for(None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn get_capabilities_advertises_the_compute_contract() {
+        let ext = caps_for(None).await.unwrap().extension.expect("extension");
+        assert!(ext
+            .supported_capabilities
+            .contains(&"openshell.compute.contract".to_string()));
+        assert!(ext
+            .required_capabilities
+            .contains(&"openshell.compute.contract".to_string()));
     }
 
     #[tokio::test]
