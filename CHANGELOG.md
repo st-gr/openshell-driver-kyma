@@ -28,8 +28,11 @@ upgrade. To upgrade from 0.8.0 with only this section in front of you:
    again; do not use `--reuse-values`, which keeps the 0.8.0 chart's defaults
    and ignores the new ones. The chart refuses to render, naming the value,
    for the invalid settings listed in the "Managed mode" bullet under
-   "Changed"; any other invalid value is refused by the driver at startup with
-   upstream's message, so check the driver's log after the upgrade.
+   "Changed" (and for the checks it already had in 0.8.0, such as an unknown
+   `driver.workspaceMode` or incomplete `gateway.tls`, `bedrockBridge` or
+   `gatewayApirule` settings); other invalid values are refused by the driver
+   at startup with upstream's message, so check the driver's log after the
+   upgrade.
 4. If `inferenceProvider.enabled` is set, the post-upgrade hook registers a
    provider profile and creates the provider `<release>-<type>` (0.8.0 named
    it `<fullname>-<type>`). If it fails with "provider ... exists with type
@@ -82,7 +85,8 @@ upgrade. To upgrade from 0.8.0 with only this section in front of you:
   invalid `inferenceProvider` (a type other than `anthropic`; a `baseUrl` that
   is not an http(s) URL to a host name, that carries credentials or contains a
   comma; no `modelId`, `binaries` or credential Secret), and
-  `driver.enableApirule` without `driver.clusterDomain`. Other invalid values
+  `driver.enableApirule` without `driver.clusterDomain`. That list is the new
+  checks, not every check the chart makes. Other invalid values
   (for example a non-numeric `driver.saTokenTtlSecs`, an unknown pull policy, a
   bad `driver.workspacePsaLevel` or a port out of range) are refused by the
   driver at startup with upstream's message, so the pod crash-loops and the

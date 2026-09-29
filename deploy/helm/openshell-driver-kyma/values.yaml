@@ -455,9 +455,9 @@ inferenceProvider:
 #
 # When `enabled: true`, the chart deploys:
 #   - A standalone Deployment + Service for the bridge (POST /v1/messages).
-#   - A NetworkPolicy on the bridge pod: ingress only from OpenShell pods in
-#     this namespace, egress DNS + 0.0.0.0/0:443 with RFC1918 excluded (for
-#     the public SAP endpoints).
+#   - With `networkPolicy.enabled`, a NetworkPolicy on the bridge pod:
+#     ingress only from OpenShell pods in this namespace, egress DNS +
+#     0.0.0.0/0:443 with RFC1918 excluded (for the public SAP endpoints).
 #
 # The bridge speaks the Anthropic Messages API on the inside and
 # translates outbound to SAP AI Core's deployed Bedrock InvokeModel

@@ -64,7 +64,8 @@ spec:
 {{- end }}
 {{- if and .Values.networkPolicy.enabled .Values.bedrockBridge.enabled }}
 ---
-# NetworkPolicy for the bedrock-bridge pod.
+# NetworkPolicy for the bedrock-bridge pod (rendered only with
+# networkPolicy.enabled).
 #
 # Ingress: only from OpenShell pods (`openshell.ai/managed-by=openshell`) in
 # this namespace, on 8787. The bridge is the SAP-AI-Core translator and has no
