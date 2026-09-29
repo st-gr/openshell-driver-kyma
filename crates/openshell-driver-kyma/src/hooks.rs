@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The production [`KymaHooks`]: request enrichment and APIRule exposure now;
-//! namespace labelling joins in a later task.
+//! The production [`KymaHooks`]: request enrichment, APIRule exposure, and Managed-mode namespace labelling.
 
 use std::time::Duration;
 
@@ -10,6 +9,7 @@ use tonic::Status;
 
 use crate::enrich::{enrich, EnrichConfig};
 use crate::exposure::ExposureReconciler;
+use crate::namespaces::NamespaceLabeler;
 use crate::service::KymaHooks;
 
 /// Upstream's `KUBE_API_TIMEOUT` (`driver.rs`). `after_create` runs detached,
@@ -20,11 +20,22 @@ pub struct KymaHookSet {
     enrich: EnrichConfig,
     /// `None` unless `--kyma-enable-apirule` is set.
     exposure: Option<ExposureReconciler>,
+    /// `None` unless the driver creates namespaces (Managed mode) and a Pod
+    /// Security level is configured.
+    namespaces: Option<NamespaceLabeler>,
 }
 
 impl KymaHookSet {
-    pub fn new(enrich: EnrichConfig, exposure: Option<ExposureReconciler>) -> Self {
-        Self { enrich, exposure }
+    pub fn new(
+        enrich: EnrichConfig,
+        exposure: Option<ExposureReconciler>,
+        namespaces: Option<NamespaceLabeler>,
+    ) -> Self {
+        Self {
+            enrich,
+            exposure,
+            namespaces,
+        }
     }
 
     /// Exposes the sandbox, if enabled, giving up after `limit`. Failures are
@@ -55,8 +66,11 @@ impl KymaHooks for KymaHookSet {
         self.expose_within(&sandbox, EXPOSURE_TIMEOUT).await;
     }
 
-    async fn after_ensure_workspace(&self, _workspace: &str) -> Result<(), Status> {
-        Ok(())
+    async fn after_ensure_workspace(&self, workspace: &str) -> Result<(), Status> {
+        match &self.namespaces {
+            Some(labeler) => labeler.label(workspace).await,
+            None => Ok(()),
+        }
     }
 }
 
@@ -66,6 +80,7 @@ mod tests {
     use crate::enrich::{ISTIO_INJECT_LABEL, KAGENTI_TYPE_LABEL, KAGENTI_TYPE_VALUE};
     use crate::exposure::ExposureConfig;
     use crate::test_support::{hanging_client, mock_client};
+    use openshell_driver_kubernetes::{KubernetesComputeConfig, WorkspaceMode};
     use std::time::Duration;
 
     #[test]
@@ -75,6 +90,7 @@ mod tests {
                 istio_inject: true,
                 environment: vec![("KEY".to_string(), "value".to_string())],
             },
+            None,
             None,
         );
         let mut sandbox = DriverSandbox::default();
@@ -98,7 +114,7 @@ mod tests {
                 search_namespace: Some("sandboxes".to_string()),
             },
         );
-        let hooks = KymaHookSet::new(EnrichConfig::default(), Some(exposure));
+        let hooks = KymaHookSet::new(EnrichConfig::default(), Some(exposure), None);
 
         KymaHooks::after_create(
             &hooks,
@@ -125,7 +141,7 @@ mod tests {
                 search_namespace: Some("sandboxes".to_string()),
             },
         );
-        let hooks = KymaHookSet::new(EnrichConfig::default(), Some(exposure));
+        let hooks = KymaHookSet::new(EnrichConfig::default(), Some(exposure), None);
         let sandbox = DriverSandbox {
             id: "sb-1".to_string(),
             ..Default::default()
@@ -137,5 +153,63 @@ mod tests {
         )
         .await
         .expect("expose_within returns once its limit is reached");
+    }
+
+    fn labeler(client: kube::Client) -> NamespaceLabeler {
+        NamespaceLabeler::new(
+            client,
+            KubernetesComputeConfig {
+                workspace_mode: WorkspaceMode::Managed,
+                gateway_id: "gw".to_string(),
+                ..KubernetesComputeConfig::default()
+            },
+            "baseline".to_string(),
+        )
+        .expect("managed mode with a level")
+    }
+
+    #[tokio::test]
+    async fn ensure_workspace_without_a_labeler_touches_nothing() {
+        let hooks = KymaHookSet::new(EnrichConfig::default(), None, None);
+        KymaHooks::after_ensure_workspace(&hooks, "ws")
+            .await
+            .expect("no labeler, nothing to do");
+    }
+
+    #[tokio::test]
+    async fn ensure_workspace_labels_the_namespace() {
+        let (client, seen) = mock_client(|_| {
+            (
+                200,
+                r#"{"apiVersion":"v1","kind":"Namespace","metadata":{"name":"x"}}"#.to_string(),
+            )
+        });
+        let hooks = KymaHookSet::new(EnrichConfig::default(), None, Some(labeler(client)));
+
+        KymaHooks::after_ensure_workspace(&hooks, "ws")
+            .await
+            .expect("label succeeds");
+
+        let recorded = seen.lock().unwrap().clone();
+        assert_eq!(recorded.len(), 1);
+        assert!(
+            recorded[0].line.starts_with("PATCH "),
+            "{}",
+            recorded[0].line
+        );
+    }
+
+    // The gateway retries EnsureWorkspace on error, so a failed label must be
+    // returned, not swallowed.
+    #[tokio::test]
+    async fn ensure_workspace_returns_a_labelling_failure() {
+        let (client, _) = mock_client(|_| (500, "{}".to_string()));
+        let hooks = KymaHookSet::new(EnrichConfig::default(), None, Some(labeler(client)));
+
+        let status = KymaHooks::after_ensure_workspace(&hooks, "ws")
+            .await
+            .unwrap_err();
+
+        assert_eq!(status.code(), tonic::Code::Unavailable);
     }
 }

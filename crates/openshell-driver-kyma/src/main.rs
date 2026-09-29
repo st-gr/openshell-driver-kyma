@@ -18,6 +18,7 @@ use openshell_driver_kubernetes::{ComputeDriverService, KubernetesComputeDriver}
 use openshell_driver_kyma::exposure::{ExposureConfig, ExposureReconciler};
 use openshell_driver_kyma::hooks::KymaHookSet;
 use openshell_driver_kyma::kyma_args::KymaArgs;
+use openshell_driver_kyma::namespaces::NamespaceLabeler;
 use openshell_driver_kyma::service::KymaComputeDriver;
 use openshell_driver_kyma::upstream_args::{
     compute_config, parse_managed_ssh_gateway_pod_selector, UpstreamArgs,
@@ -115,12 +116,17 @@ async fn main() -> Result<()> {
             },
         )
     });
+    let namespaces = NamespaceLabeler::new(
+        hook_client.clone(),
+        config.clone(),
+        kyma.kyma_workspace_psa_level.clone(),
+    );
     let driver = KubernetesComputeDriver::new(config.clone(), shutdown_rx)
         .await
         .into_diagnostic()?;
     let service = ComputeDriverServer::new(KymaComputeDriver::new(
         ComputeDriverService::new(driver),
-        Arc::new(KymaHookSet::new(kyma.enrich_config(), exposure)),
+        Arc::new(KymaHookSet::new(kyma.enrich_config(), exposure, namespaces)),
     ));
     let shutdown = async move {
         shutdown_signal().await;

@@ -11,6 +11,7 @@ pub mod exposure;
 pub mod health;
 pub mod hooks;
 pub mod kyma_args;
+pub mod namespaces;
 pub mod service;
 #[cfg(test)]
 pub(crate) mod test_support;
