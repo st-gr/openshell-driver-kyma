@@ -6,6 +6,8 @@
 //! this crate mirrors its option surface and wraps its gRPC service with a
 //! small Kyma layer. See `docs/superpowers/specs/2026-09-29-upstream-driver-parity-design.md`.
 
+pub mod enrich;
+pub mod hooks;
 pub mod kyma_args;
 pub mod service;
 pub mod upstream_args;

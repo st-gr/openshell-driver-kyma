@@ -15,8 +15,9 @@ use miette::{IntoDiagnostic, Result};
 use openshell_core::proto::compute::v1::compute_driver_server::ComputeDriverServer;
 use openshell_core::VERSION;
 use openshell_driver_kubernetes::{ComputeDriverService, KubernetesComputeDriver};
+use openshell_driver_kyma::hooks::KymaHookSet;
 use openshell_driver_kyma::kyma_args::KymaArgs;
-use openshell_driver_kyma::service::{KymaComputeDriver, NoHooks};
+use openshell_driver_kyma::service::KymaComputeDriver;
 use openshell_driver_kyma::upstream_args::{
     compute_config, parse_managed_ssh_gateway_pod_selector, UpstreamArgs,
 };
@@ -59,10 +60,8 @@ async fn shutdown_signal() {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let Cli {
-        upstream,
-        kyma: _kyma,
-    } = Cli::parse();
+    let Cli { upstream, kyma } = Cli::parse();
+    kyma.validate().map_err(|err| miette::miette!("{err}"))?;
 
     // Owned copies: the tracing guard borrows these for the life of the
     // process, while `upstream` itself is consumed by compute_config below.
@@ -90,7 +89,7 @@ async fn main() -> Result<()> {
         .into_diagnostic()?;
     let service = ComputeDriverServer::new(KymaComputeDriver::new(
         ComputeDriverService::new(driver),
-        Arc::new(NoHooks),
+        Arc::new(KymaHookSet::new(kyma.enrich_config())),
     ));
     let shutdown = async move {
         shutdown_signal().await;
