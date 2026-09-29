@@ -17,14 +17,28 @@ upgrade. To upgrade from 0.8.0 with only this section in front of you:
 1. `openshell sandbox list`, then `openshell sandbox delete <name>` for every
    sandbox, before the upgrade. If one is left behind, remove its Sandbox CR
    with `kubectl delete sandbox` afterwards.
-2. Edit your values file with the "Values migration" table below. Helm does
+2. Run the `kubernetes-sigs/agent-sandbox` controller v0.5.2, the release CI
+   tests against: `kubectl apply -f
+   https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.5.2/sandbox.yaml`
+   installs its CRD and controller. Without the controller no sandbox pod is
+   ever created.
+3. Edit your values file with the "Values migration" table below. Helm does
    not reject unknown keys, so a removed key that you leave in place is
    silently ignored (for example `driver.enableNetworkPolicy: false` no longer
    turns the driver NetworkPolicy off; set `networkPolicy.enabled: false`).
    If your values file overrides `driver.supervisorImage` or
    `gateway.image.tag`, drop the override or re-pin it to upstream v0.1.2: the
    driver, gateway, supervisor and sandbox runtime images must be one release.
-3. `helm upgrade <release> <chart> -f my-values.yaml`. Pass the values file
+   Three defaults changed to upstream's (see "Changed"): set
+   `driver.allowDriverConfig: true` to keep 0.8.0's behaviour, where callers
+   could pass `driver_config`; set `driver.workspacePsaLevel: privileged` to
+   keep 0.8.0's `privileged` label on managed-mode namespaces; and set
+   `driver.managedSshIngress.enabled: false` if managed mode must not get the
+   SSH ingress policy. With `gateway.enabled`, also set
+   `gatewayService.enabled` and `gateway.sandboxJwt.enabled`, and leave
+   `inferenceProvider.enabled` off when `gateway.oidc.issuer` is set: the
+   chart now refuses those settings.
+4. `helm upgrade <release> <chart> -f my-values.yaml`. Pass the values file
    again; do not use `--reuse-values`, which keeps the 0.8.0 chart's defaults
    and ignores the new ones. The chart refuses to render, naming the value,
    for the invalid settings listed in the "Managed mode" bullet under
@@ -33,14 +47,14 @@ upgrade. To upgrade from 0.8.0 with only this section in front of you:
    `gatewayApirule` settings); other invalid values are refused by the driver
    at startup with upstream's message, so check the driver's log after the
    upgrade.
-4. If `inferenceProvider.enabled` is set, the post-upgrade hook registers a
+5. If `inferenceProvider.enabled` is set, the post-upgrade hook registers a
    provider profile and creates the provider `<release>-<type>` (0.8.0 named
    it `<fullname>-<type>`). If it fails with "provider ... exists with type
    ...", the provider name is already taken by a 0.8.0 provider: delete it
    (`openshell provider delete <name>`) or set `inferenceProvider.name`. A
    0.8.0 provider under the old default name stays in the gateway database,
    unused; delete it when you no longer need it.
-5. Use an `openshell` CLI of v0.1.2, and create sandboxes with
+6. Use an `openshell` CLI of v0.1.2, and create sandboxes with
    `--provider <name>` (see "Changed").
 
 ### Changed
@@ -81,7 +95,9 @@ upgrade. To upgrade from 0.8.0 with only this section in front of you:
   too long, managed SSH ingress without a gateway namespace or pod selector,
   operator mode without exactly one of the namespace label and the ConfigMap),
   a sandbox UID or GID outside 1 to 4294967294, a non-boolean
-  `driver.allowDriverConfig`, a malformed `driver.sandboxEnv` entry, an
+  `driver.allowDriverConfig` or `driver.resourceAdmission.enabled`, a
+  `driver.resourceAdmission.requiredLabels` that is not a map, a malformed
+  `driver.sandboxEnv` entry, an
   invalid `inferenceProvider` (a type other than `anthropic`; a `baseUrl` that
   is not an http(s) URL to a host name, that carries credentials or contains a
   comma; no `modelId`, `binaries` or credential Secret), and
@@ -93,11 +109,39 @@ upgrade. To upgrade from 0.8.0 with only this section in front of you:
   driver's log names the option.
   The Pod Security label from `driver.workspacePsaLevel` is applied before
   each `CreateSandbox` and on `EnsureWorkspace`, because upstream's create
-  path creates the namespace itself.
+  path creates the namespace itself. The namespace is then ensured by the
+  step upstream's create path runs, with its status codes: a namespace
+  another gateway owns is `FAILED_PRECONDITION`.
+- **Managed-mode namespaces are no longer labelled `privileged`.** 0.8.0
+  labelled every namespace it created
+  `pod-security.kubernetes.io/enforce=privileged`; they now stay unlabelled
+  (the cluster default applies) unless `driver.workspacePsaLevel` is set.
+- **Defaults follow upstream's chart.** `driver.allowDriverConfig` defaults to
+  `false` (0.8.0: `true`), so a caller's `driver_config` is refused until an
+  operator opts in; set it to `true` to keep 0.8.0's behaviour.
+  `driver.sandboxImage` defaults to upstream's sandbox image,
+  `nvcr.io/nvidia/base/ubuntu:24.04`. In managed mode with the in-pod gateway
+  and `networkPolicy.enabled`, the driver's managed SSH ingress is on by
+  default, naming the release namespace and this chart's pod as the gateway,
+  as upstream derives it from its `networkPolicy.enabled`; the
+  `driver.managedSshIngress.*` values override each part (`enabled: false`
+  turns it off), and the driver's ClusterRole gains the NetworkPolicy rights
+  it needs only while it is on.
+- **The chart refuses gateway settings that cannot work**, each confirmed
+  against upstream v0.1.2: `gateway.enabled` without `gatewayService.enabled`
+  (sandboxes dial the release's Service; set `driver.gatewayEndpoint` to use
+  another address) or without `gateway.sandboxJwt.enabled` (supervisors cannot
+  bootstrap without the gateway's sandbox-JWT keys), and `inferenceProvider.enabled`
+  without the gateway's Service or together with `gateway.oidc.issuer` (the
+  provider hook calls the gateway without a token, which an OIDC gateway
+  refuses; register the provider from an authenticated CLI instead, see
+  `docs/production-deployment.md`).
 - **APIRule host is `<workspace>--<name>.<clusterDomain>` in every workspace
   mode.** It was the Sandbox CR name, which collided across workspaces in
   managed mode. Exposure also works with agent-sandbox controllers that serve
-  only `v1alpha1`.
+  only `v1alpha1`, finds the Sandbox by its id and the gateway id, as
+  upstream's own lookup does, and bounds each API call at 30 seconds
+  (upstream's limit), so a hung call still records the Warning Event.
 - **RBAC mirrors upstream's chart exactly, per workspace mode:** a Role in the
   shared namespace, a ClusterRole for the cluster-scoped and multi-namespace
   rights, and upstream's workspace-secret-source Role (`get` on exactly the
@@ -158,6 +202,14 @@ upgrade. To upgrade from 0.8.0 with only this section in front of you:
   provider hook's CLI comes from. CI requires it to equal the tag in
   `Cargo.toml`.
 - **`networkPolicy.enabled`** (was `driver.enableNetworkPolicy`).
+- **`driver.resourceAdmission.enabled`** (default `true`) and
+  **`driver.resourceAdmission.requiredLabels`** (default: upstream's built-in
+  labels): upstream's resource admission policy for the PVCs a sandbox
+  attaches, rendered like `allowDriverConfig` into both the gateway's
+  `[openshell.drivers.kyma]` tables and the driver's admission JSON.
+- **OTLP egress:** with `driver.otlpEndpoint` and `networkPolicy.enabled`, the
+  driver+gateway pod's NetworkPolicy allows the collector's port (80 or 443
+  when the URL names none), to any address.
 
 ### Security
 
@@ -170,8 +222,8 @@ upgrade. To upgrade from 0.8.0 with only this section in front of you:
   (shared mode, `networkPolicy.enabled`, in-pod gateway only): SSH (TCP 2222)
   to sandbox pods only from the gateway pod. With an external gateway
   (`gateway.enabled=false`) the gateway's own deployment owns that policy.
-  In managed mode the driver applies the equivalent policy itself when
-  `driver.managedSshIngress.enabled`.
+  In managed mode the driver applies the equivalent policy itself
+  (`driver.managedSshIngress`, on by default with the in-pod gateway).
 - **APIRule exposure is an explicit, documented exception to upstream's
   fence, off by default (`driver.enableApirule`).** Upstream's workload pods
   accept ingress only from their supervisor pod, so exposing port 8080
@@ -197,6 +249,11 @@ upgrade. To upgrade from 0.8.0 with only this section in front of you:
   `--backend-descriptor-file is required`.
 - **The inference hook no longer uses a hard-coded v0.0.91 CLI.** It uses the
   CLI of `upstream.version`, so the CLI always matches the gateway.
+- **With `gateway.tls.enabled`, sandboxes dial `https://`.** The default
+  gateway endpoint was always `http://`; it now takes its scheme from
+  `gateway.tls.enabled`, as upstream's takes it from `disableTls`, and the
+  driver mounts the client TLS Secret the chart's PKI hook creates unless
+  `driver.clientTlsSecretName` names one.
 
 ### CI
 
@@ -210,6 +267,15 @@ upgrade. To upgrade from 0.8.0 with only this section in front of you:
   run because the smokes installed only the CRD).
 - The weekly upstream sync moves the pin (`make upstream-bump`) and Dependabot
   leaves `kube`, `k8s-openapi` and `openshell-*` to follow upstream.
+- The smokes install the chart's pinned gateway, supervisor and sandbox
+  runtime images and the CLI of `upstream.version`, the set the chart ships
+  (they installed the latest upstream release before), and
+  `scripts/check-image-digests.sh` fails when those pins are not the digests
+  upstream published for `upstream.version`. The weekly sync's staleness
+  check also compares the sandbox runtime image.
+- `scripts/check-upstream-args.sh` also holds the rest of upstream's driver
+  `main.rs` (its `main()`) to a reviewed hash, `scripts/upstream-main-rs.sha256`,
+  and prints the upstream diff when it changes.
 
 ### Removed
 
@@ -220,6 +286,9 @@ upgrade. To upgrade from 0.8.0 with only this section in front of you:
   `inference.local`, which has landed), the `make test-integration` target
   with `tests/live_cluster.rs`, and `docs/why-init-container.md` (the init
   container it explains is gone).
+- The `make e2e-cli` target and `scripts/e2e-cli.sh`, which drove a v0.0.50 CLI
+  against the old single-pod topology and ran nowhere; the kind smokes cover
+  that path.
 
 ### Known limitations
 

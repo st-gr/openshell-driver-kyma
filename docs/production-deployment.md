@@ -306,6 +306,9 @@ the objects never fails the sandbox: it is logged and recorded as a
 `Warning` Event with reason `ExposureFailed` on the `Sandbox`
 (`kubectl describe sandbox <cr>`). The driver's RBAC gains the matching
 Service, NetworkPolicy, APIRule and Event rights only when the option is on.
+In managed and operator mode those rights are cluster-wide, because sandboxes
+live in many namespaces: the driver may then create and patch APIRules, and
+patch Services and NetworkPolicies, in every namespace.
 This is separate from `gatewayApirule`, which publishes the gateway, with
 OIDC, and is documented above.
 

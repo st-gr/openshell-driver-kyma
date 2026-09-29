@@ -145,8 +145,8 @@ jobs:
 
   # Proves the managed-mode ownership guardrail against a real API server:
   # DeleteWorkspace must decline a namespace it does not own, and must
-  # delete one it does. Unit tests cover the same decision against a
-  # stubbed API server; this closes the gap the interop job does not --
+  # delete one it does. That decision is upstream's driver code, which this
+  # repo does not unit-test; this closes the gap the interop job does not --
   # interop only ever exercises the default `shared` workspace mode.
   #
   # Roughly doubles smoke runtime relative to interop alone, accepted

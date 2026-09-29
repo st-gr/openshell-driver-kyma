@@ -137,7 +137,7 @@ Then run your language's protoc plugin:
 | Python | `python -m grpc_tools.protoc -I proto --python_out=gen --grpc_python_out=gen proto/openshell-v1/*.proto` |
 | TypeScript | `buf generate --template buf.gen.yaml proto/openshell-v1` (with `@bufbuild/protoc-gen-es` + `@connectrpc/protoc-gen-connect-es`) |
 | Go | `protoc -I proto --go_out=gen --go-grpc_out=gen proto/openshell-v1/*.proto` |
-| Rust | add `tonic-prost-build = "0.14"` to `build.rs` and call `compile_protos` (mirrors what `crates/computev1` does in this repo) |
+| Rust | add `tonic-prost-build = "0.14"` to `build.rs` and call `compile_protos` (as upstream's `openshell-core` crate does; this repo uses its generated types) |
 
 ## Authentication
 

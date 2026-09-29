@@ -42,9 +42,10 @@ sandboxServiceAccount:
 # upstream's own OPENSHELL_* names; the Kyma layer's use OPENSHELL_KYMA_*.
 driver:
   socket: /var/run/openshell-driver.sock
-  # Supervisor OCI image, PINNED BY DIGEST. The supervisor runs as root
-  # with SYS_ADMIN inside every sandbox, so a rolling `:latest` would let
-  # every new sandbox pick up an unreviewed privileged binary. The driver
+  # Supervisor OCI image, PINNED BY DIGEST. Upstream runs it in each sandbox's
+  # supervisor pod (non-root, all capabilities dropped), where it holds the
+  # provider credentials and the sandbox's egress, so a rolling `:latest` would
+  # let every new sandbox pick up an unreviewed binary in that seat. The driver
   # hands it to upstream's driver as OPENSHELL_SUPERVISOR_IMAGE, so any
   # reference (`:tag` or `@sha256:...`) the kubelet accepts works here.
   # To re-resolve after a deliberate upstream bump:
@@ -86,8 +87,8 @@ driver:
   # Run sandbox pods in Linux user namespaces (Kubernetes `hostUsers: false`),
   # so the pod's UID 0 is remapped to a non-root host UID by the kubelet.
   #
-  # Requires K8s 1.30+ with the `UserNamespacesSupport` feature gate
-  # enabled (default-on in 1.33+; alpha in 1.30-1.32). Confirm with
+  # Requires K8s 1.33+ with user namespace support available (beta through
+  # 1.35, GA in 1.36+), as upstream's chart states, plus Linux 5.12+. Confirm with
   # `kubectl get nodes -o jsonpath='{.items[*].status.nodeInfo.kubeletVersion}'`
   # and that your CRI (containerd >= 1.7, cri-o >= 1.30) has user-ns
   # support enabled.

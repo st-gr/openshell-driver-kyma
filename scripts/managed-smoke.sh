@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 #
 # Prove the managed-mode namespace-per-workspace lifecycle against a real API
-# server, not just the unit-tested stub.
+# server.
 #
-# Unit tests cover `bootstrap_managed_namespace` and `delete_managed_namespace`
-# in isolation with a fake API server. What they cannot cover is the thing
-# that matters most: does the real gRPC path -- gateway -> driver ->
-# kube-apiserver -- actually create the namespace it claims to, and does the
-# ownership guardrail actually decline a real DeleteWorkspace call for a
-# namespace it does not own? A wrong answer to either question means either a
-# tenant never gets a working namespace, or DeleteWorkspace destroys someone
-# else's. This script closes that gap.
+# Upstream's driver creates and deletes the managed namespaces
+# (`ensure_namespace` and `delete_namespace`); this repo's unit tests do not
+# exercise them. What matters most is the whole path: does the real gRPC path
+# -- gateway -> driver -> kube-apiserver -- actually create the namespace it
+# claims to, and does the ownership guardrail actually decline a real
+# DeleteWorkspace call for a namespace it does not own? A wrong answer to
+# either question means either a tenant never gets a working namespace, or
+# DeleteWorkspace destroys someone else's. This script closes that gap.
 #
 # Modeled on scripts/interop-smoke.sh: same log/fail helpers, same kind
 # cluster assumptions, same pinned agent-sandbox controller install, same
@@ -433,8 +433,8 @@ level=$(kubectl get namespace "$NS_DEFAULT" -o jsonpath='{.metadata.labels.pod-s
 #
 # A second, subtler trap: `openshell workspace create` alone does not
 # bootstrap the namespace either. It only registers the workspace name with
-# the gateway -- ensure_workspace is never called from that path (see the
-# bootstrap comment on KymaProvisioner::create in provisioner.rs), so a
+# the gateway -- ensure_workspace is never called from that path (upstream's
+# driver creates a managed namespace inside CreateSandbox), so a
 # decoy built from `workspace create` alone would never see $NS_DECOY come
 # into existence, and this assertion would fail before it ever reached the
 # guardrail -- the same misconception ASSERT M1 had before its fix, one
