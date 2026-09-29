@@ -141,13 +141,14 @@ pub fn admit_namespace(namespace: &str, served: &[String]) -> Result<(), DriverE
     ))
 }
 
-/// Confirm the Sandbox CR resolved from a Pod's label really owns that Pod.
+/// Confirm the Sandbox CR resolved from a Pod's label lives in the Pod's
+/// namespace and carries the same sandbox-id label.
 ///
-/// The Pod's sandbox-id label is caller-visible metadata and is not a trust
-/// boundary on its own: it only becomes trustworthy once the CR it names agrees
-/// that it owns that id *and* lives in the Pod's namespace. Without the second
-/// check a Pod could name a sandbox in another namespace and borrow its
-/// identity.
+/// This is a consistency check, not the trust binding: the CR is looked up *by*
+/// that label, so on its own it cannot detect a Pod that lies about its label.
+/// It still matters in the cluster-wide modes, where it stops a Pod from
+/// borrowing a same-id CR in another namespace. The binding itself is
+/// `admit_pod_owner`.
 pub fn admit_owner(
     pod_namespace: &str,
     pod_sandbox_id: &str,
@@ -165,6 +166,40 @@ pub fn admit_owner(
             "authenticated pod is not owned by this sandbox".to_string(),
         )),
     }
+}
+
+/// Bind a Pod to the Sandbox CR its label nominated, via ownerReferences.
+///
+/// The Pod's sandbox-id label only identifies a *candidate* CR; it is
+/// caller-visible metadata and proves nothing. The controller-set
+/// ownerReference (kind `Sandbox`, UID of the CR) is what binds, because
+/// sandbox code cannot write it. `owner_refs` holds `(kind, uid)` pairs.
+pub fn admit_pod_owner(cr_uid: &str, owner_refs: &[(String, String)]) -> Result<(), DriverError> {
+    if owner_refs
+        .iter()
+        .any(|(kind, uid)| kind == "Sandbox" && uid == cr_uid)
+    {
+        return Ok(());
+    }
+    Err(DriverError::PermissionDenied(
+        "authenticated pod is not owned by the sandbox it names".to_string(),
+    ))
+}
+
+/// Map a failed Pod lookup. A 403 means the driver's ServiceAccount lacks the
+/// `pods` get grant, a deployment fault rather than a bad credential.
+#[must_use]
+pub fn map_pod_lookup_error(error: kube::Error) -> DriverError {
+    if let kube::Error::Api(response) = &error {
+        if response.code == 403 {
+            return DriverError::Unavailable(
+                "Kubernetes rejected the Pod lookup (403); the driver ServiceAccount \
+                 needs get on pods"
+                    .to_string(),
+            );
+        }
+    }
+    DriverError::Kube(error)
 }
 
 /// A sandbox that disappears between authentication and lookup is a race a
@@ -559,5 +594,78 @@ mod tests {
             mapped.to_string().contains("tokenreviews"),
             "the message must point an operator at the RBAC grant: {mapped}"
         );
+    }
+
+    // Finding 1: the pod's sandbox-id label only nominates a candidate CR; the
+    // controller-set ownerReference UID is what binds the pod to it.
+    fn refs(items: &[(&str, &str)]) -> Vec<(String, String)> {
+        items
+            .iter()
+            .map(|(k, u)| ((*k).to_string(), (*u).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn an_owner_reference_with_the_right_kind_and_uid_is_admitted() {
+        assert!(admit_pod_owner("cr-uid", &refs(&[("Sandbox", "cr-uid")])).is_ok());
+    }
+
+    #[test]
+    fn an_owner_reference_with_a_different_uid_is_rejected() {
+        let err = admit_pod_owner("cr-uid", &refs(&[("Sandbox", "other")])).unwrap_err();
+        assert!(
+            matches!(err, DriverError::PermissionDenied(_)),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn an_owner_reference_of_a_different_kind_is_rejected() {
+        let err = admit_pod_owner("cr-uid", &refs(&[("ReplicaSet", "cr-uid")])).unwrap_err();
+        assert!(
+            matches!(err, DriverError::PermissionDenied(_)),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn no_owner_references_is_rejected() {
+        let err = admit_pod_owner("cr-uid", &[]).unwrap_err();
+        assert!(
+            matches!(err, DriverError::PermissionDenied(_)),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn one_matching_reference_among_several_is_admitted() {
+        let owners = refs(&[("ReplicaSet", "x"), ("Sandbox", "cr-uid"), ("Sandbox", "y")]);
+        assert!(admit_pod_owner("cr-uid", &owners).is_ok());
+    }
+
+    // Finding 2: a missing pods RBAC grant is a deployment fault.
+    #[test]
+    fn a_forbidden_pod_lookup_is_unavailable_and_names_pods() {
+        let forbidden = kube::Error::Api(Box::new(kube::core::Status {
+            code: 403,
+            message: "forbidden".to_string(),
+            reason: "Forbidden".to_string(),
+            ..Default::default()
+        }));
+        let mapped = map_pod_lookup_error(forbidden);
+        assert!(
+            matches!(mapped, DriverError::Unavailable(_)),
+            "got {mapped:?}"
+        );
+        assert!(mapped.to_string().contains("pods"), "{mapped}");
+    }
+
+    #[test]
+    fn other_pod_lookup_failures_keep_their_kube_mapping() {
+        let mapped = map_pod_lookup_error(kube::Error::Api(Box::new(kube::core::Status {
+            code: 500,
+            ..Default::default()
+        })));
+        assert!(matches!(mapped, DriverError::Kube(_)), "got {mapped:?}");
     }
 }

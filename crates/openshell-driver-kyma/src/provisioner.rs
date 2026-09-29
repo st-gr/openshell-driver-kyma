@@ -1611,6 +1611,22 @@ async fn forward_sandbox_watch<S>(
     }
 }
 
+/// Namespace and UID of a Sandbox CR. Shared by `runtime_identity` and
+/// `authenticate_sandbox` so the identity the gateway records at create time
+/// and the one it compares at bootstrap are built from the same fields.
+fn cr_namespace_and_uid<'a>(
+    cr: &'a DynamicObject,
+    sandbox_id: &str,
+) -> Result<(&'a str, &'a str), DriverError> {
+    let namespace = cr.metadata.namespace.as_deref().ok_or_else(|| {
+        DriverError::FailedPrecondition(format!("sandbox {sandbox_id} resource has no namespace"))
+    })?;
+    let uid = cr.metadata.uid.as_deref().ok_or_else(|| {
+        DriverError::FailedPrecondition(format!("sandbox {sandbox_id} resource has no UID"))
+    })?;
+    Ok((namespace, uid))
+}
+
 #[async_trait]
 impl SandboxProvisioner for KymaProvisioner {
     async fn create(&self, sb: &DriverSandbox) -> Result<(), DriverError> {
@@ -1734,14 +1750,7 @@ impl SandboxProvisioner for KymaProvisioner {
 
     async fn runtime_identity(&self, sandbox_id: &str) -> Result<String, DriverError> {
         let cr = self.find_by_sandbox_id(sandbox_id).await?;
-        let namespace = cr.metadata.namespace.as_deref().ok_or_else(|| {
-            DriverError::FailedPrecondition(format!(
-                "sandbox {sandbox_id} resource has no namespace"
-            ))
-        })?;
-        let uid = cr.metadata.uid.as_deref().ok_or_else(|| {
-            DriverError::FailedPrecondition(format!("sandbox {sandbox_id} resource has no UID"))
-        })?;
+        let (namespace, uid) = cr_namespace_and_uid(&cr, sandbox_id)?;
         Ok(crate::sandbox_auth::runtime_identity(namespace, uid))
     }
 
@@ -1750,8 +1759,9 @@ impl SandboxProvisioner for KymaProvisioner {
         credential: &str,
     ) -> Result<(String, String), DriverError> {
         use crate::sandbox_auth::{
-            admit_namespace, admit_owner, map_sandbox_lookup_error, map_token_review_error,
-            reject_blank_credential, runtime_identity, token_review_identity,
+            admit_namespace, admit_owner, admit_pod_owner, map_pod_lookup_error,
+            map_sandbox_lookup_error, map_token_review_error, reject_blank_credential,
+            runtime_identity, token_review_identity,
         };
 
         reject_blank_credential(credential)?;
@@ -1787,11 +1797,23 @@ impl SandboxProvisioner for KymaProvisioner {
         admit_namespace(&identity.namespace, self.served_namespaces())?;
 
         let pods: Api<Pod> = Api::namespaced(self.client.clone(), &identity.namespace);
-        let pod = pods.get_opt(&identity.pod_name).await?.ok_or_else(|| {
-            DriverError::PermissionDenied("authenticated pod no longer exists".to_string())
-        })?;
+        let pod = pods
+            .get_opt(&identity.pod_name)
+            .await
+            .map_err(|error| {
+                tracing::warn!(%error, "Kubernetes Pod lookup failed during sandbox authentication");
+                map_pod_lookup_error(error)
+            })?
+            .ok_or_else(|| {
+                DriverError::PermissionDenied("authenticated pod no longer exists".to_string())
+            })?;
 
         if pod.metadata.uid.as_deref() != Some(identity.pod_uid.as_str()) {
+            tracing::warn!(
+                namespace = %identity.namespace,
+                pod = %identity.pod_name,
+                "sandbox authentication rejected: pod UID does not match the credential"
+            );
             return Err(DriverError::PermissionDenied(
                 "authenticated pod UID does not match the credential".to_string(),
             ));
@@ -1807,18 +1829,13 @@ impl SandboxProvisioner for KymaProvisioner {
                 DriverError::PermissionDenied("authenticated pod carries no sandbox id".to_string())
             })?;
 
+        // The label only nominates a candidate CR; it is not trusted yet.
         let cr = self
             .find_by_sandbox_id(&sandbox_id)
             .await
             .map_err(map_sandbox_lookup_error)?;
-        let namespace = cr.metadata.namespace.as_deref().ok_or_else(|| {
-            DriverError::FailedPrecondition(format!(
-                "sandbox {sandbox_id} resource has no namespace"
-            ))
-        })?;
+        let (namespace, uid) = cr_namespace_and_uid(&cr, &sandbox_id)?;
 
-        // The Pod's label named this CR; confirm the CR agrees it owns that id
-        // and shares the Pod's namespace before trusting either.
         admit_owner(
             &identity.namespace,
             &sandbox_id,
@@ -1830,11 +1847,23 @@ impl SandboxProvisioner for KymaProvisioner {
                 .map(String::as_str),
         )?;
 
-        let uid = cr.metadata.uid.as_deref().ok_or_else(|| {
-            DriverError::FailedPrecondition(format!("sandbox {sandbox_id} resource has no UID"))
+        // The controller-set ownerReference is what binds the pod to the CR.
+        let owner_refs: Vec<(String, String)> = pod
+            .metadata
+            .owner_references
+            .iter()
+            .flatten()
+            .map(|owner| (owner.kind.clone(), owner.uid.clone()))
+            .collect();
+        admit_pod_owner(uid, &owner_refs).inspect_err(|_| {
+            tracing::warn!(
+                namespace = %identity.namespace,
+                pod = %identity.pod_name,
+                "sandbox authentication rejected: pod is not owned by the sandbox it names"
+            );
         })?;
 
-        Ok((sandbox_id.clone(), runtime_identity(namespace, uid)))
+        Ok((sandbox_id, runtime_identity(namespace, uid)))
     }
 
     async fn get(&self, sandbox_id: &str) -> Result<DriverSandbox, DriverError> {
