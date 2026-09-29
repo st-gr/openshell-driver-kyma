@@ -93,6 +93,7 @@ done
 # and off with an explicitly empty map, which must reach both sides as empty, not as
 # upstream's built-in labels.
 render_as t --set driver.resourceAdmission.enabled=false >"$WORK/render-admission-off.yaml"
+# shellcheck disable=SC2016 # ${workspace} is upstream's literal placeholder, not a shell variable
 render_as t --set-json 'driver.resourceAdmission.requiredLabels={"example.com/approved":"yes","example.com/team":"${workspace}"}' \
 	>"$WORK/render-admission-labels.yaml"
 render_as t --set driver.resourceAdmission.enabled=false --set-json 'driver.resourceAdmission.requiredLabels={}' \
