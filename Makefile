@@ -37,8 +37,6 @@ help:
 	@echo "  clippy               cargo clippy with pedantic warnings as errors"
 	@echo "  build                cargo build --release --workspace"
 	@echo "  test                 fmt-check + clippy + cargo test --workspace"
-	@echo "  test-integration     Tier-3 live cluster (requires INTEGRATION_TEST_NAMESPACE)"
-	@echo "  test-all             test + test-integration"
 	@echo "  coverage             cargo llvm-cov over the workspace"
 	@echo ""
 	@echo "  image                build the production container ($(IMAGE_NAME):$(IMAGE_TAG))"
@@ -110,9 +108,6 @@ build:
 .PHONY: test
 test: fmt-check clippy
 	$(DOCKER_RUN) $(DEV_IMAGE) cargo test --workspace --lib --tests
-
-.PHONY: test-all
-test-all: test test-integration
 
 # End-to-end test: drives the upstream openshell CLI against a deployed
 # driver+gateway pod and asserts a sandbox reaches Ready. Requires the

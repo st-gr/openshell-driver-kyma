@@ -167,7 +167,6 @@ impl<S: ComputeDriver> ComputeDriver for KymaComputeDriver<S> {
 mod tests {
     use super::*;
     use std::pin::Pin;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
     use std::time::Duration;
 
@@ -211,10 +210,14 @@ mod tests {
 
         async fn authenticate_sandbox(
             &self,
-            _request: Request<AuthenticateSandboxRequest>,
+            request: Request<AuthenticateSandboxRequest>,
         ) -> Result<Response<AuthenticateSandboxResponse>, Status> {
             self.record("authenticate_sandbox");
-            Ok(Response::new(AuthenticateSandboxResponse::default()))
+            // Echo: the credential comes back as the sandbox id.
+            Ok(Response::new(AuthenticateSandboxResponse {
+                sandbox_id: request.into_inner().credential,
+                ..Default::default()
+            }))
         }
         async fn get_capabilities(
             &self,
@@ -232,10 +235,18 @@ mod tests {
         }
         async fn get_sandbox(
             &self,
-            _request: Request<GetSandboxRequest>,
+            request: Request<GetSandboxRequest>,
         ) -> Result<Response<GetSandboxResponse>, Status> {
             self.record("get_sandbox");
-            Ok(Response::new(GetSandboxResponse::default()))
+            // Echo: the requested id and name come back as the sandbox.
+            let request = request.into_inner();
+            Ok(Response::new(GetSandboxResponse {
+                sandbox: Some(DriverSandbox {
+                    id: request.sandbox_id,
+                    name: request.name,
+                    ..Default::default()
+                }),
+            }))
         }
         async fn list_sandboxes(
             &self,
@@ -273,10 +284,14 @@ mod tests {
         }
         async fn delete_sandbox(
             &self,
-            _request: Request<DeleteSandboxRequest>,
+            request: Request<DeleteSandboxRequest>,
         ) -> Result<Response<DeleteSandboxResponse>, Status> {
             self.record("delete_sandbox");
-            Ok(Response::new(DeleteSandboxResponse::default()))
+            // The response is only a bool: report a deletion exactly when a
+            // sandbox id arrived.
+            Ok(Response::new(DeleteSandboxResponse {
+                deleted: !request.into_inner().sandbox_id.is_empty(),
+            }))
         }
         async fn watch_sandboxes(
             &self,
@@ -305,10 +320,11 @@ mod tests {
     }
 
     /// Hooks that label the sandbox on enrich, report after_create through a
-    /// channel, and optionally fail after_ensure_workspace.
+    /// channel, record each workspace after_ensure_workspace receives, and
+    /// optionally fail after_ensure_workspace.
     struct RecordingHooks {
         created: mpsc::UnboundedSender<String>,
-        ensure_calls: AtomicUsize,
+        ensured: Mutex<Vec<String>>,
         fail_ensure: bool,
     }
 
@@ -317,7 +333,7 @@ mod tests {
             let (created, rx) = mpsc::unbounded_channel();
             let hooks = Self {
                 created,
-                ensure_calls: AtomicUsize::new(0),
+                ensured: Mutex::new(Vec::new()),
                 fail_ensure,
             };
             (Arc::new(hooks), rx)
@@ -338,8 +354,8 @@ mod tests {
         async fn after_create(&self, sandbox: DriverSandbox) {
             let _ = self.created.send(sandbox.id);
         }
-        async fn after_ensure_workspace(&self, _workspace: &str) -> Result<(), Status> {
-            self.ensure_calls.fetch_add(1, Ordering::SeqCst);
+        async fn after_ensure_workspace(&self, workspace: &str) -> Result<(), Status> {
+            self.ensured.lock().unwrap().push(workspace.to_string());
             if self.fail_ensure {
                 return Err(Status::unavailable("could not label namespace"));
             }
@@ -443,6 +459,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn other_rpcs_pass_payloads_through_and_return_inner_responses_unchanged() {
+        let (inner, _state) = FakeInner::new(FakeState::default());
+        let driver = KymaComputeDriver::new(inner, Arc::new(NoHooks));
+
+        let got = driver
+            .get_sandbox(Request::new(GetSandboxRequest {
+                sandbox_id: "sb-get".to_string(),
+                name: "get-me".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .sandbox
+            .expect("inner echoed a sandbox");
+        assert_eq!((got.id.as_str(), got.name.as_str()), ("sb-get", "get-me"));
+
+        let deleted = driver
+            .delete_sandbox(Request::new(DeleteSandboxRequest {
+                sandbox_id: "sb-del".to_string(),
+                name: "del-me".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(deleted.deleted);
+
+        let auth = driver
+            .authenticate_sandbox(Request::new(AuthenticateSandboxRequest {
+                credential: "sb-auth".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(auth.sandbox_id, "sb-auth");
+    }
+
+    #[tokio::test]
     async fn create_enriches_before_upstream_sees_the_request() {
         let (inner, state) = FakeInner::new(FakeState::default());
         let (hooks, _rx) = RecordingHooks::new(false);
@@ -530,6 +583,22 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::Internal);
-        assert_eq!(hooks_probe.ensure_calls.load(Ordering::SeqCst), 0);
+        assert!(hooks_probe.ensured.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn after_ensure_workspace_receives_the_requested_workspace() {
+        let (inner, _state) = FakeInner::new(FakeState::default());
+        let (hooks, _rx) = RecordingHooks::new(false);
+        let hooks_probe = Arc::clone(&hooks);
+        let driver = KymaComputeDriver::new(inner, hooks);
+
+        driver
+            .ensure_workspace(Request::new(EnsureWorkspaceRequest {
+                workspace: "team-a".to_string(),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(*hooks_probe.ensured.lock().unwrap(), vec!["team-a"]);
     }
 }

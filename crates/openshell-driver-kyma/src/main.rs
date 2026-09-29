@@ -22,8 +22,11 @@ use openshell_driver_kyma::upstream_args::{
 };
 use tracing::info;
 
+// `about`/`long_about = None` keep `--help` without a description line, like
+// upstream's: clap would otherwise show a flattened struct's doc comment
+// (`KymaArgs`'s) as the command's about text.
 #[derive(Parser, Debug)]
-#[command(name = "openshell-driver-kyma", version)]
+#[command(name = "openshell-driver-kyma", version, about = None, long_about = None)]
 struct Cli {
     #[command(flatten)]
     upstream: UpstreamArgs,
