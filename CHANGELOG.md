@@ -4,6 +4,221 @@ All notable changes to openshell-driver-kyma are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.9.0] — 2026-09-29
+
+**UPGRADE NOTE: delete all existing sandboxes before upgrading to this
+release, and remove the values listed under "Values migration" from your
+values file before `helm upgrade`.** The pod topology changes (every sandbox
+now gets a separate supervisor pod next to its workload pod) and upstream's
+runtime identity replaces ours, so a sandbox created by 0.8.0 cannot
+bootstrap and there is no back-fill path. Recreate your sandboxes after the
+upgrade. To upgrade from 0.8.0 with only this section in front of you:
+
+1. `openshell sandbox list`, then `openshell sandbox delete <name>` for every
+   sandbox, before the upgrade. If one is left behind, remove its Sandbox CR
+   with `kubectl delete sandbox` afterwards.
+2. Edit your values file with the "Values migration" table below. Helm does
+   not reject unknown keys, so a removed key that you leave in place is
+   silently ignored (for example `driver.enableNetworkPolicy: false` no longer
+   turns the driver NetworkPolicy off; set `networkPolicy.enabled: false`).
+   If your values file overrides `driver.supervisorImage` or
+   `gateway.image.tag`, drop the override or re-pin it to upstream v0.1.2: the
+   driver, gateway, supervisor and sandbox runtime images must be one release.
+3. `helm upgrade <release> <chart> -f my-values.yaml`. Pass the values file
+   again; do not use `--reuse-values`, which keeps the 0.8.0 chart's defaults
+   and ignores the new ones. The chart refuses to render (naming the value)
+   when a setting is one that upstream's driver would refuse at startup.
+4. If `inferenceProvider.enabled` is set, the post-upgrade hook registers a
+   provider profile and creates the provider `<release>-<type>` (0.8.0 named
+   it `<fullname>-<type>`). If it fails with "provider ... exists with type
+   ...", the provider name is already taken by a 0.8.0 provider: delete it
+   (`openshell provider delete <name>`) or set `inferenceProvider.name`. A
+   0.8.0 provider under the old default name stays in the gateway database,
+   unused; delete it when you no longer need it.
+5. Use an `openshell` CLI of v0.1.2, and create sandboxes with
+   `--provider <name>` (see "Changed").
+
+### Changed
+
+- **Architecture: the driver is upstream's Kubernetes driver behind a thin
+  Kyma layer.** It links NVIDIA OpenShell v0.1.2's
+  `openshell-driver-kubernetes` as a library (git dependencies pinned to one
+  tag) and forwards every `ComputeDriver` RPC to upstream's own service, so
+  capability negotiation, resource admission, sandbox authentication, runtime
+  identity, workspace modes, stop/start and the sandbox lifecycle are
+  upstream's. Configuration mirrors upstream's options 1:1: the same long
+  names and the same `OPENSHELL_*` environment variables (the chart sets
+  environment variables; the driver container takes no command-line
+  arguments). Sandboxes run upstream's hardened supervisor pod
+  (`os-supervisor-<sandbox id>`) beside the workload pod, inside upstream's
+  isolation fence. The Kyma layer adds eight `--kyma-*` options
+  (`OPENSHELL_KYMA_*`) and three hooks: request enrichment (the
+  `sidecar.istio.io/inject` and `kagenti.io/type` labels and any configured
+  sandbox environment), APIRule exposure, and Pod Security labels on the
+  namespaces the driver creates in managed mode. The vendored proto, the
+  provisioner, the sandbox-authentication code and the driver's own
+  admission and capability logic are gone.
+- **Inference is configured through upstream's provider profiles.**
+  `openshell inference set`, `inference.local` and the L7 router bundle do not
+  exist in upstream v0.1.2. The chart now renders a provider profile (the
+  endpoint `host:port` from `inferenceProvider.baseUrl`, plus `binaries`); the
+  post-install hook imports it with the CLI of `upstream.version` and creates
+  the provider from it; sandboxes are created with `--provider <name>` and
+  receive `ANTHROPIC_BASE_URL` and `ANTHROPIC_MODEL` in their environment.
+  The API key is bound to the endpoint's host and port. `binaries` gates which
+  processes may reach the endpoint; upstream v0.1.2 does not yet restrict the
+  key by calling binary.
+- **Managed mode.** The gateway id (default: the release fullname) must be at
+  most 33 characters, upstream's limit; a longer release name must set
+  `gateway.sandboxJwt.gatewayId`. The chart now fails at render time for every
+  configuration upstream's driver refuses at startup: the workspace-mode
+  checks, a sandbox UID or GID outside 1 to 4294967294, a non-boolean
+  `driver.allowDriverConfig`, and a malformed `driver.sandboxEnv` entry.
+  The Pod Security label from `driver.workspacePsaLevel` is applied before
+  each `CreateSandbox` and on `EnsureWorkspace`, because upstream's create
+  path creates the namespace itself.
+- **APIRule host is `<workspace>--<name>.<clusterDomain>` in every workspace
+  mode.** It was the Sandbox CR name, which collided across workspaces in
+  managed mode. Exposure also works with agent-sandbox controllers that serve
+  only `v1alpha1`.
+- **RBAC mirrors upstream's chart exactly, per workspace mode:** a Role in the
+  shared namespace, a ClusterRole for the cluster-scoped and multi-namespace
+  rights, and upstream's workspace-secret-source Role (`get` on exactly the
+  client TLS and image-pull Secrets the driver stages). The Kyma layer adds
+  only what it calls: APIRule, Service, NetworkPolicy and Event writes when
+  exposure is on, and namespace `patch` when a PSA level is set. The three
+  0.8.0 ClusterRoles (nodes, tokenreview, workspaces) are replaced by one.
+- **The driver pod's `/healthz` and `/readyz` are Kyma-owned** (upstream's
+  driver serves only gRPC) on `driver.healthPort`; `/readyz` turns ready once
+  the compute-driver socket is bound.
+- **The sandbox runtime image is always passed, digest-pinned**
+  (`driver.sandboxRuntimeImage`), as is the supervisor image: upstream's
+  compiled-in defaults depend on build variables that a git-dependency build
+  does not set.
+
+### Values migration
+
+| Removed / renamed | Now |
+|---|---|
+| `driver.supervisorBinaryPath`, `driver.supervisorMountPath` | removed — upstream's runtime owns the supervisor |
+| `driver.gpuSupport`, `driver.telemetryEnabled`, `driver.stopTimeoutSecs` | removed — upstream behaviour |
+| `driver.enableNetworkPolicy` | `networkPolicy.enabled` (driver+gateway pod only; sandboxes are fenced by upstream) |
+| `driver.operatorNamespaceAllowlist` | `driver.operatorNamespaceLabel` or `driver.operatorNamespaceConfigMap` |
+| `driver.driverConfigAllowVolumes` | `driver.allowDriverConfig` — caller volumes are now checked by upstream's resource admission |
+| `driver.gatewayId` | `gateway.sandboxJwt.gatewayId` — the gateway and driver now always share one id, as upstream's chart does |
+| `gatewayUpstreamEgress.*` | removed — upstream's supervisor pods carry their own egress policy (allow-all); workloads have none |
+| `inferenceProvider` via `openshell inference set` | provider profiles; create sandboxes with `--provider <name>`. The default provider name is `<release>-<type>` (was `<fullname>-<type>`) |
+
+### Added
+
+- **Every upstream driver option is reachable from values**, under upstream's
+  own names in `values.yaml`: `driver.bindAddress`, `driver.gatewayName`,
+  `driver.otlpEndpoint`, `driver.runtimeClassName`, `driver.saTokenTtlSecs`,
+  `driver.clientTlsSecretName`, `driver.hostGatewayIp`,
+  `driver.sandboxSshSocketPath`, `driver.providerSpiffeWorkloadApiSocket`,
+  `driver.sandboxImage`, `driver.sandboxImagePullPolicy`,
+  `driver.sandboxImagePullSecrets`, `driver.sandboxRuntimeImage`,
+  `driver.sandboxRuntimeImagePullPolicy`, `driver.sandboxRuntimeBoundaryPort`,
+  `driver.supervisorImagePullPolicy`, `driver.operatorNamespaceLabel`,
+  `driver.operatorNamespaceConfigMap.{name,key}`,
+  `driver.managedSshIngress.{enabled,gatewayNamespace,gatewayPodSelector}` and
+  the `driver.upstreamProxy.*` family (`url`, `noProxy`, `authSecretName`,
+  `authSecretKey`, `allowInsecure`, `connectByHostname`,
+  `caBundleConfigMap.{name,key}`). `scripts/testdata/chart-all-options.yaml`
+  sets every option, and CI proves each reaches the driver container.
+- **`driver.sandboxEnv`**: `KEY=VALUE` entries added to every sandbox
+  (`--kyma-sandbox-env`). An explicit entry beats
+  `driver.disableClaudeTelemetry`, and the first duplicate wins.
+- **`driver.workspacePsaLevel`**: the Pod Security level applied to managed-mode
+  namespaces (`privileged`, `baseline`, `restricted`, or empty for none).
+- **`driver.ingressNamespace`**: the namespace of the Istio ingress gateway
+  that APIRule traffic arrives from (default `istio-system`).
+- **`inferenceProvider.profileId`** and **`inferenceProvider.binaries`**: the
+  provider profile's id (default `kyma-<type>`) and the executables allowed
+  to reach the endpoint (default: `node` and `claude` under `/usr/bin` and
+  `/usr/local/bin`; it must not be empty).
+- **`upstream.version`**: the upstream release the driver links and the
+  provider hook's CLI comes from. CI requires it to equal the tag in
+  `Cargo.toml`.
+- **`networkPolicy.enabled`** (was `driver.enableNetworkPolicy`).
+
+### Security
+
+- **The chart's own sandbox NetworkPolicy is removed.** It selected
+  `openshell.ai/managed-by: openshell`, which upstream puts on both the
+  workload and the supervisor pod; NetworkPolicies are additive, so it
+  widened upstream's workload fence. CI now fails on any chart NetworkPolicy
+  that selects sandbox pods, apart from the SSH-ingress policy below.
+- **The chart mirrors upstream's `<fullname>-sandbox-ssh` ingress policy**
+  (shared mode, `networkPolicy.enabled`, in-pod gateway only): SSH (TCP 2222)
+  to sandbox pods only from the gateway pod. With an external gateway
+  (`gateway.enabled=false`) the gateway's own deployment owns that policy.
+  In managed mode the driver applies the equivalent policy itself when
+  `driver.managedSshIngress.enabled`.
+- **APIRule exposure is an explicit, documented exception to upstream's
+  fence, off by default (`driver.enableApirule`).** Upstream's workload pods
+  accept ingress only from their supervisor pod, so exposing port 8080
+  needs a Kyma-owned Service, a NetworkPolicy admitting only the Istio
+  ingress gateway (`istio: ingressgateway` in `driver.ingressNamespace`) to
+  port 8080 of that sandbox's workload pod, and the APIRule. All three are
+  owner-referenced to the Sandbox CR and never carry upstream's labels. The
+  APIRule is `noAuth`: enabling exposure publishes the sandbox's port 8080,
+  and inbound traffic bypasses the supervisor.
+- **The provider hook verifies the CLI it downloads** against the release's
+  `openshell-checksums-sha256.txt` before running it, picks the asset by the
+  node's architecture (x86_64 or aarch64), and receives the API key only as an
+  environment variable read from a Secret (`secretKeyRef`), never from the
+  chart or the command line.
+
+### Fixed
+
+- **Sandboxes run on upstream v0.1.2 again.** 0.8.0's driver could not start
+  them: upstream renamed the supervisor and moved it to a separate,
+  bootstrapped pod, and our init container failed with
+  `--backend-descriptor-file is required`.
+- **The inference hook no longer uses a hard-coded v0.0.91 CLI.** It uses the
+  CLI of `upstream.version`, so the CLI always matches the gateway.
+
+### CI
+
+- `scripts/check-upstream-args.sh` and `scripts/check-chart-render.sh` keep the
+  driver and chart at parity with upstream: the first fails when the driver
+  does not accept every option upstream's driver does at the pinned tag, the
+  second renders the chart and asserts every option, the exact RBAC per mode,
+  the NetworkPolicies and the provider hook.
+- The smokes now run the agent-sandbox controller and follow sandboxes to
+  Ready, bootstrap and stop/start (0.8.0 shipped with sandboxes that could not
+  run because the smokes installed only the CRD).
+- The weekly upstream sync moves the pin (`make upstream-bump`) and Dependabot
+  leaves `kube`, `k8s-openapi` and `openshell-*` to follow upstream.
+
+### Removed
+
+- **`/metrics` on the driver health port.** Nothing scraped it; upstream traces
+  over OTLP. Set `driver.otlpEndpoint`.
+- The vendored `ComputeDriver` proto and `crates/computev1`, the proto-drift
+  check, `scripts/check-inference-local.sh` (it detected the removal of
+  `inference.local`, which has landed), the `make test-integration` target
+  with `tests/live_cluster.rs`, and `docs/why-init-container.md` (the init
+  container it explains is gone).
+
+### Known limitations
+
+- **Operator mode:** the namespace owner must grant the driver `create` and
+  `delete` on Secrets in each operator namespace. Upstream ships that Role in
+  its separate `openshell-workspace` chart; this chart does not.
+- **The SAP AI Core bridge** (`bedrockBridge`) is reachable only from the
+  release namespace. Sandboxes in other namespaces (managed mode) cannot
+  reach it.
+- **`driver.otlpEndpoint` must be plain `http://`.** Upstream v0.1.2 builds its
+  OTLP exporter without TLS, so an `https://` endpoint logs an error and
+  exports nothing.
+- **With `gateway.dbPersistence.enabled=false`,** a gateway restart loses the
+  provider and profile until the next `helm upgrade` re-runs the hook.
+- **`driver.sandboxEnv` values (and `inferenceProvider.baseUrl` and `modelId`)
+  cannot contain a comma:** the driver splits the list on commas. Set such a
+  variable per sandbox instead.
+
 ## [0.8.0] — 2026-09-28
 
 ### Added
