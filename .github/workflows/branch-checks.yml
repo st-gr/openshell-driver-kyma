@@ -73,6 +73,22 @@ jobs:
       - name: Check vendored driver source drift
         run: ./scripts/check-vendor-drift.sh
 
+  # Guards the chart's gateway TOML. The gateway rejects an unknown schema
+  # version or field at startup, which otherwise only shows on a cluster. The
+  # script runs the exact gateway image the chart pins against the rendered
+  # config. docker and helm are pre-installed on ubuntu-latest.
+  gateway-config:
+    name: rendered gateway config accepted upstream
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Check gateway config against the pinned gateway image
+        shell: bash
+        run: ./scripts/check-gateway-config.sh
+
   fmt-clippy-test-build:
     name: fmt + clippy + test + build
     runs-on: ubuntu-latest
