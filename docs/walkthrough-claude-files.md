@@ -4,7 +4,7 @@ This is the canonical hands-on guide. It takes a clean Kyma cluster
 through:
 
 1. Cluster prerequisites + namespace bootstrap.
-2. Installing the chart (`v0.1.2`) from OCI.
+2. Installing the chart (`0.9.0`) from OCI.
 3. Installing the `openshell` CLI on your host.
 4. Creating a Claude-equipped sandbox.
 5. Uploading a file to the sandbox.
@@ -19,28 +19,22 @@ sequenceDiagram
     participant GW as gateway :8080
     participant DRV as kyma driver
     participant CTRL as agent-sandbox controller
-    participant SBX as sandbox pod<br/>(supervisor + claude)
+    participant SBX as sandbox pods<br/>(supervisor pod + workload pod running claude)
     participant UP as upstream<br/>(Anthropic API or bedrock-bridge to SAP AI Core)
 
     Note over Op,CTRL: one-time setup: controller + PSA namespace + Secret + helm install (OCI chart)
     Op->>GW: gateway add --local (via kubectl port-forward)
-    Op->>GW: sandbox create --policy claude-policy.yaml
+    Op->>GW: sandbox create --provider ods-anthropic
     GW->>DRV: CreateSandbox over Unix socket
-    DRV->>CTRL: create Sandbox CR
-    CTRL-->>SBX: schedule pod, sideload supervisor, phase Ready
+    DRV->>CTRL: create Sandbox CR and supervisor pod
+    CTRL-->>SBX: start workload pod; supervisor bootstraps; phase Ready
     Op->>SBX: sandbox upload draft.md (rsync over ssh)
     Op->>SBX: sandbox exec claude -p "read draft.md, write summary.md"
-    SBX->>SBX: L7 router strips placeholder x-api-key
-    SBX->>GW: GetInferenceBundle (real key + upstream URL)
-    SBX->>UP: POST /v1/messages with real credentials
+    SBX->>UP: supervisor substitutes the real key, POST /v1/messages
     UP-->>SBX: completion - claude writes /sandbox/summary.md
     Op->>SBX: sandbox download summary.md
     Op->>GW: sandbox delete + helm uninstall
 ```
-
-All steps verified end-to-end against a real Kyma cluster on
-2026-05-31. Total time: ~10 minutes once the prerequisites are in
-place.
 
 ## A note on running the CLI in a container
 
@@ -87,13 +81,15 @@ gRPC-Web, a Go/Python/JS gRPC library), see
 ## 2. Bootstrap the cluster (one-time)
 
 ```bash
-# CRD prereq — kubernetes-sigs/agent-sandbox controller, cluster-wide.
-kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.4.6/manifest.yaml
+# CRD prereq — kubernetes-sigs/agent-sandbox controller, cluster-wide
+# (v0.5.2 is the release the chart's CI runs against).
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.5.2/sandbox.yaml
 kubectl -n agent-sandbox-system rollout status deployment/agent-sandbox-controller --timeout=120s
 
 # Sandbox namespace + Pod Security Admission (PSA) labels. PSA is
-# Kubernetes' namespace-level pod security enforcement; the supervisor
-# needs the `privileged` level for Landlock + netns + capabilities.
+# Kubernetes' namespace-level pod security enforcement. `privileged` is the
+# level the chart's CI runs at; upstream's sandbox pods run unprivileged, so a
+# stricter level may admit them, but only `privileged` is verified here.
 NS=openshell-system
 kubectl create namespace "$NS"
 kubectl label namespace "$NS" \
@@ -105,12 +101,6 @@ kubectl label namespace "$NS" \
 # Anthropic key Secret. The chart never sees this Secret's value.
 kubectl -n "$NS" create secret generic my-anthropic-creds \
   --from-literal=api-key='sk-ant-…'
-
-# If your upstream LLM gateway is in another namespace, label that
-# namespace so the chart's NetworkPolicy can match it. Kyma/Gardener
-# does NOT auto-apply this label.
-kubectl label namespace your-llm-ns \
-  kubernetes.io/metadata.name=your-llm-ns
 ```
 
 ## 3. Build a values overlay
@@ -125,14 +115,13 @@ curl -fsSL https://raw.githubusercontent.com/st-gr/openshell-driver-kyma/main/de
 #   inferenceProvider.baseUrl:  http://gateway.your-llm-ns.svc.cluster.local:8080/anthropic
 #   inferenceProvider.modelId:  claude-opus-4-7   (or whatever the upstream serves)
 #   inferenceProvider.credentialSecret.{name,key}:  my-anthropic-creds / api-key
-#   gatewayUpstreamEgress.{namespace,podSelector,port}:  match your upstream
 ```
 
 ## 4. Install the chart from OCI
 
 ```bash
 helm install ods oci://ghcr.io/st-gr/charts/openshell-driver-kyma \
-  --version 0.1.2 \
+  --version 0.9.0 \
   --namespace "$NS" \
   -f my-values.yaml \
   --wait --timeout=300s
@@ -154,84 +143,39 @@ subsequent `openshell` commands don't need `--gateway-endpoint`.
 
 ## 6. Create the Claude-equipped sandbox
 
-The policy below is a minimal template that lets the agent reach
-`inference.local:443` (where the supervisor's L7 router intercepts) and
-nothing else. For the field-by-field schema and how to iterate on it,
-see the upstream docs:
-
-- [Customize Sandbox Policies](https://docs.nvidia.com/openshell/sandboxes/policies)
-  — what each section does, hot-reload semantics, debugging denied
-  requests.
-- [Policy Schema Reference](https://docs.nvidia.com/openshell/reference/policy-schema)
-  — every field, every accepted value.
+The chart's post-install Job created a provider on the gateway (named
+`<release>-<type>`, so `ods-anthropic` here) from a provider profile that
+names your upstream's host and port. Attach it with `--provider`: that gives
+the sandbox a placeholder key and the network rule that admits the endpoint.
+For what a sandbox policy is and how to iterate on one, see NVIDIA's
+[Policies](https://docs.nvidia.com/openshell/how-it-works/policies/overview)
+and [Policy schema](https://docs.nvidia.com/openshell/how-it-works/policies/schema).
 
 ```bash
-# A format-valid placeholder is enough. The supervisor's L7 router
-# strips this and injects the real key from the gateway bundle.
-export ANTHROPIC_API_KEY=sk-ant-placeholder000000000000000000000000000000000000000000000000
-
-cat > claude-policy.yaml <<'YAML'
-version: 1
-filesystem_policy:
-  include_workdir: true
-  read_only:  ["/usr","/lib","/lib64","/proc","/etc","/opt","/home","/etc/openshell-tls"]
-  read_write: ["/sandbox","/tmp"]
-landlock:
-  compatibility: best_effort
-process:
-  run_as_user: sandbox
-  run_as_group: sandbox
-network_policies:
-  claude:
-    name: claude
-    endpoints:
-      - { host: inference.local, port: 443 }
-    binaries:
-      - { path: /usr/bin/claude }
-      - { path: /usr/bin/node }
-YAML
+openshell provider list          # ods-anthropic
 
 openshell sandbox create \
   --name claude-files \
+  --provider ods-anthropic \
   --from ghcr.io/st-gr/sandbox-claude:latest \
-  --provider claude-code \
-  --auto-providers \
-  --policy ./claude-policy.yaml
+  --detach \
+  -- sleep infinity
 
-# Wait for the sandbox to become Ready (typically ~10–15 s on Kyma).
-# `openshell sandbox create` returns as soon as the CR is accepted, well
-# before the pod reaches Running, so a bare follow-up `list` would just
-# show Pending.
-until openshell sandbox list 2>/dev/null | grep -q "claude-files.*Ready"; do
-  sleep 1
-done
-openshell sandbox list
+openshell sandbox list           # claude-files ... Ready
 ```
 
 What's happening:
 
 - `--from ghcr.io/st-gr/sandbox-claude:latest` — public image with
   Node 22 + the `claude` CLI baked in (sibling of `e2e-sandbox`).
-- `--provider claude-code` + `--auto-providers` — registers a
-  `claude-code` provider on the gateway from your local
-  `ANTHROPIC_API_KEY` env. Required so the supervisor's L7 router
-  treats claude-code's request shape correctly.
-- `--policy ./claude-policy.yaml` — locks the sandbox's network egress
-  to `inference.local:443` only. The agent process cannot dial
-  api.anthropic.com or anywhere else.
-- **No trailing `-- <COMMAND>` clause needed.** The pod's PID 1 is the
-  OpenShell supervisor binary (`/opt/openshell/bin/openshell-sandbox`),
-  set by the base image — it runs unconditionally and is what keeps
-  the pod alive. The `--` clause sets the *initial command*, which only
-  matters in combination with `--no-keep` (which auto-deletes the
-  sandbox when that command exits). Earlier docs in this repo and
-  upstream told you to add `-- sleep infinity`; that's a no-op without
-  `--no-keep` and has been removed here.
-
-You'll see the harmless CLI message
-`Error: × No such file or directory (os error 2)` after the sandbox is
-created — that's the CLI returning before the sandbox reaches Ready.
-The `until` loop above is what blocks until the supervisor is up.
+- `--provider ods-anthropic` — attaches the chart-created provider. The
+  sandbox gets a placeholder for `ANTHROPIC_API_KEY`; the supervisor
+  substitutes the real key only in requests to the profile's host and port.
+  The driver gives every sandbox `ANTHROPIC_BASE_URL` and `ANTHROPIC_MODEL`
+  from `inferenceProvider.baseUrl` and `.modelId`.
+- `--detach -- sleep infinity` — `--detach` returns once the gateway reports
+  the sandbox `Ready`; the trailing command is the sandbox's main process,
+  kept alive with `sleep`.
 
 ## 7. Upload a file
 
@@ -243,7 +187,7 @@ cat > /tmp/draft.md <<'EOF'
 
 Three things shipped this week:
 - Helm chart published as OCI artifact.
-- Driver release with the inference.local URL fix.
+- Driver release on upstream OpenShell v0.1.2.
 - E2E live-cluster smoke succeeded.
 
 Two things outstanding:
@@ -268,44 +212,36 @@ apk add --no-cache rsync openssh-client          # Alpine
 ```bash
 openshell sandbox exec --name claude-files -- sh -c '
   cd /sandbox
-  export HOME=/sandbox \
-         ANTHROPIC_BASE_URL=https://inference.local \
-         ANTHROPIC_API_KEY=sk-ant-placeholder000000000000000000000000000000000000000000000000 \
-         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
-  claude -p \
+  export HOME=/sandbox
+  /usr/bin/claude -p \
+    --bare \
     --allow-dangerously-skip-permissions \
     --allowed-tools Write,Read \
     --add-dir /sandbox \
-    --model claude-opus-4-7 \
     "Read /sandbox/draft.md. Write /sandbox/summary.md containing exactly two single-line bullet points: one for shipped, one for outstanding. After writing, print only the word DONE."
 '
 ```
 
 The flags that matter:
 
-- `HOME=/sandbox` — `/home/sandbox` is Landlock-restricted in exec
-  sessions. Setting `HOME` to a writable dir lets claude write its
-  state cache.
-- `ANTHROPIC_BASE_URL=https://inference.local` — **no `/v1` suffix**.
-  Anthropic SDKs append `/v1/messages` themselves. Earlier chart
-  versions injected `…/v1` and produced `/v1/v1/messages`, which the
-  supervisor's L7 router rejected. Current charts inject the
-  correct value into the pod spec, but exec sessions don't inherit
-  pod-spec env, so set it inline.
-- `ANTHROPIC_API_KEY=sk-ant-…` — placeholder. The supervisor's L7
-  router strips it and injects the real one from the gateway bundle.
-  Must look like an Anthropic key (`sk-ant-` prefix and length) or
-  claude-code rejects it client-side.
+- `/usr/bin/claude` — the real binary. The `claude` wrapper in the
+  `sandbox-claude` image predates provider profiles and unsets
+  `ANTHROPIC_API_KEY`, which would stop the supervisor from substituting the
+  real key.
+- `HOME=/sandbox` — a writable directory for claude's state cache.
+- **No `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY` or `--model`.** The driver
+  already gave the sandbox `ANTHROPIC_BASE_URL` and `ANTHROPIC_MODEL`, and
+  `--provider` gave it the placeholder key. Do not export a key of your own:
+  the supervisor substitutes the real key only for the placeholder, in requests
+  to the profile's host and port. Confirm with
+  `openshell sandbox exec --name claude-files -- env | grep ANTHROPIC`.
 - `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` — silences statsig +
-  sentry + other auxiliary endpoints. The chart can also inject this
-  for the agent's main process via `driver.disableClaudeTelemetry: true`.
+  sentry + other auxiliary endpoints. `driver.disableClaudeTelemetry: true`
+  adds it to every sandbox.
 - `--allowed-tools Write,Read` — claude-code's `-p` print mode disables
   tools by default. You have to opt in to Write to let it create files.
 - `--add-dir /sandbox` — claude-code only writes inside directories
   passed via `--add-dir` (or the cwd at startup).
-- `--model claude-opus-4-7` — must match the model configured on the
-  gateway via `inferenceProvider.modelId`. The supervisor refuses
-  swaps; that's a credential boundary.
 
 You should see Claude print `DONE` and exit 0. Confirm the file:
 
@@ -348,28 +284,25 @@ kubectl delete namespace "$NS"
 When `claude` ran, the path was:
 
 ```
-agent (claude-code, sandbox UID 1000660000)
-  │  POST https://inference.local/v1/messages
+agent (claude-code, in the workload pod)
+  │  POST <ANTHROPIC_BASE_URL>/v1/messages  with the placeholder key
   ▼
-supervisor's L7 inference router (same pod, separate process namespace, root)
-  │  strips agent's placeholder x-api-key
-  │  injects real key from GetInferenceBundle
-  │  rewrites Host: header to your upstream
-  ▼
-gateway sidecar (driver+gateway pod) ──── bundle/config plane only
-                                          NEVER forwards request bytes
-
-(supervisor dials directly from sandbox-pod's eth0)
+its supervisor pod (os-supervisor-<sandbox id>)
+  │  checks the request against the profile-derived network policy
+  │  substitutes the real key, only at the profile's host:port
   ▼
 your in-cluster LLM upstream
   ▼
 (real Anthropic / Bedrock / etc.)
 ```
 
-What the agent sees in its env: `ANTHROPIC_BASE_URL=https://inference.local`,
-nothing else. No real upstream URL. No real key. The supervisor process
-in the same pod holds the bundle, but as a separate process namespace
-the agent cannot inspect it.
+The gateway sidecar (driver+gateway pod) holds the provider record and hands
+it to the supervisor, but never forwards request bytes.
+
+What the agent sees in its env: `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL` and a
+placeholder for the key. No real key. The workload pod has no network of its
+own: upstream's NetworkPolicy gives it no egress and admits ingress only from
+its supervisor pod, so it cannot dial the upstream directly.
 
 This is **stronger isolation than NVIDIA's tutorial pattern**, which
 allows the agent to call `api.anthropic.com:443` directly with the
@@ -383,11 +316,13 @@ schema (XSUAA service key, no SigV4), the chart ships an in-cluster
 translation bridge. **The bridge speaks the Anthropic Messages API on
 the inside** (`POST /v1/messages`) and converts outbound to SAP's
 Bedrock InvokeModel format. From the agent's perspective the wiring
-is identical to the Anthropic-mode flow above — same `inference.local`
-endpoint, same `claude` invocation, no Bedrock env, no AWS creds, no
-per-pod policy carve-out. The only operator-facing changes are the
-Secret pre-flight, the values overlay, and pointing
-`inferenceProvider.baseUrl` at the bridge.
+is identical to the Anthropic-mode flow above — same `--provider`
+attachment, same `claude` invocation, no Bedrock env, no AWS creds. The only
+operator-facing changes are the Secret pre-flight, the values overlay, and
+pointing `inferenceProvider.baseUrl` at the bridge. Only sandboxes in the
+release namespace (shared workspace mode) can reach the bridge: its
+NetworkPolicy admits only OpenShell pods of that namespace, so sandboxes in
+managed-mode namespaces cannot.
 
 ### Pre-flight (one-time)
 
@@ -428,24 +363,26 @@ inferenceProvider:
 
 `helm upgrade -f my-values.yaml` deploys the bridge alongside the
 driver+gateway pod. The chart's existing inference-provider Job then
-registers `claude-opus-4.7` (or whichever `inferenceProvider.modelId`
-is) as a normal Anthropic provider whose upstream is the bridge.
+registers a provider profile whose endpoint is the bridge (host and port 8787)
+and updates the provider. Create a new sandbox with `--provider` as in
+step 6; `ANTHROPIC_MODEL` is `inferenceProvider.modelId`
+(`claude-opus-4.7`).
 
 ### Sandbox env
 
 Section 8's `claude` invocation works **unchanged**. `ANTHROPIC_MODEL`
-selects which key from `bedrockBridge.modelMap` to use, and
-`ANTHROPIC_SMALL_FAST_MODEL` selects the model for sub-agents (Task
-tool, etc.):
+(already set from `inferenceProvider.modelId`) selects which key from
+`bedrockBridge.modelMap` to use, and `ANTHROPIC_SMALL_FAST_MODEL` selects the
+model for sub-agents (Task tool, etc.):
 
 ```bash
 openshell sandbox exec --name claude-files -- sh -c '
   cd /sandbox
   export HOME=/sandbox \
-         ANTHROPIC_MODEL=claude-opus-4.7 \
          ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-4.5 \
          ANTHROPIC_SMALL_FAST_MODEL=claude-haiku-4.5
-  claude -p \
+  /usr/bin/claude -p \
+    --bare \
     --allow-dangerously-skip-permissions \
     --allowed-tools Write,Read \
     --add-dir /sandbox \
@@ -454,6 +391,8 @@ openshell sandbox exec --name claude-files -- sh -c '
 ```
 
 Notes:
+- To set the sub-agent models for every sandbox instead, add
+  `driver.sandboxEnv: ["ANTHROPIC_SMALL_FAST_MODEL=claude-haiku-4.5"]`.
 - Both `ANTHROPIC_MODEL` and `ANTHROPIC_SMALL_FAST_MODEL` strings must
   appear as keys in `bedrockBridge.modelMap`. Operator picks the
   naming; Claude Code passes them through verbatim.
@@ -501,7 +440,7 @@ kubectl -n "$NS" run cli --restart=Never --image=alpine:3.20 --command -- sleep 
 # Inside the pod (one-time setup):
 kubectl -n "$NS" exec cli -- sh -c '
   apk add --no-cache curl rsync openssh-client &&
-  curl -fsSL https://github.com/NVIDIA/OpenShell/releases/download/v0.0.91/openshell-x86_64-unknown-linux-musl.tar.gz \
+  curl -fsSL https://github.com/NVIDIA/OpenShell/releases/download/v0.1.2/openshell-x86_64-unknown-linux-musl.tar.gz \
     | tar -xz -C /usr/local/bin &&
   /usr/local/bin/openshell gateway add --local http://ods-openshell-driver-kyma:8080
 '

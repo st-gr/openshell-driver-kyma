@@ -4,26 +4,28 @@
 [![helm-lint](https://github.com/st-gr/openshell-driver-kyma/actions/workflows/helm-lint.yml/badge.svg)](https://github.com/st-gr/openshell-driver-kyma/actions/workflows/helm-lint.yml)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-A Rust implementation of the [OpenShell](https://github.com/NVIDIA/OpenShell)
-`ComputeDriver` gRPC contract, targeting **SAP BTP Kyma** clusters.
-Wire-compatible with the upstream OpenShell gateway; provisions agent
-sandboxes as `agents.x-k8s.io/v1alpha1/Sandbox` CRDs with Kyma-specific
-adaptations (Pod Security Admission instead of OpenShift SCC, configurable
-Istio sidecar injection, optional Kyma `APIRule` for external access).
+A compute driver that runs [OpenShell](https://github.com/NVIDIA/OpenShell)
+agent sandboxes on **SAP BTP Kyma** clusters. The driver runs upstream
+OpenShell's Kubernetes driver (`openshell-driver-kubernetes`, release v0.1.2)
+unchanged, so every `ComputeDriver` RPC, the sandbox lifecycle and the
+isolation are upstream's. It adds only request enrichment (the Istio opt-out
+and Kagenti labels, plus configured sandbox environment), optional Kyma
+`APIRule` exposure and Pod Security labels on managed-mode workspace
+namespaces. Wire-compatible with the upstream OpenShell gateway.
 
 ```text
 openshell-gateway ── Unix domain socket ── openshell-driver-kyma (Rust, Tonic gRPC)
                                                   │
-                                                  ├── KymaProvisioner   (Sandbox CR lifecycle)
-                                                  ├── KymaEnricher      (Istio toggle, PSA, APIRule)
-                                                  └── PrometheusMetrics (axum /healthz /readyz /metrics)
+                                                  ├── upstream openshell-driver-kubernetes
+                                                  │     (every RPC: Sandbox CRs, supervisor pods,
+                                                  │      isolation, admission, workspace modes)
+                                                  └── Kyma layer
+                                                        (request labels and env, APIRule exposure,
+                                                         namespace PSA labels, /healthz /readyz)
 ```
 
-**Status:** Phase 1 — see
-[docs/superpowers/specs/2026-05-26-openshell-driver-kyma-design.md](docs/superpowers/specs/2026-05-26-openshell-driver-kyma-design.md)
-for the full design and
-[docs/superpowers/plans/2026-05-27-openshell-driver-kyma.md](docs/superpowers/plans/2026-05-27-openshell-driver-kyma.md)
-for the implementation plan.
+**Version 0.9.0.** Upgrading from 0.8.0 needs every sandbox deleted first and
+some values removed; see the [CHANGELOG](CHANGELOG.md).
 
 ## Quick start
 
@@ -33,12 +35,11 @@ endpoint + API key, follow
 a linear ~15 minute end-to-end from an empty cluster to Claude running
 inside an isolated sandbox, using the upstream NVIDIA gateway image.
 
-For the more comprehensive walkthrough (including uploading files,
-running inference, downloading results, plus SAP AI Core and
-private-in-cluster-upstream variants) start at
-[`docs/getting-started.md`](docs/getting-started.md). It mirrors what
-`make e2e-cli` does in CI, so it's guaranteed to track the
-implementation.
+For the more comprehensive walkthrough (install, creating sandboxes,
+private-in-cluster-upstream variants and troubleshooting) start at
+[`docs/getting-started.md`](docs/getting-started.md). The upload, inference
+and download flow, plus the SAP AI Core variant, is in
+[`docs/walkthrough-claude-files.md`](docs/walkthrough-claude-files.md).
 
 For production deploys (OIDC user auth, public Kyma APIRule, image
 digests pinned), see [`docs/production-deployment.md`](docs/production-deployment.md).
@@ -54,23 +55,40 @@ For programmatic gRPC access without the CLI, see
 
 ## Configuration reference
 
-All flags also work as `values.yaml` keys in the Helm chart.
+The driver container takes no command-line arguments: the Helm chart turns
+`values.yaml` keys into environment variables (`driver.*` and `namespace`).
+The driver accepts every option of upstream's `openshell-driver-kubernetes`
+under upstream's own names (long flag and `OPENSHELL_*` variable, as in
+`openshell-driver-kyma --help`), and adds eight Kyma options that always
+start with `--kyma-` / `OPENSHELL_KYMA_`:
 
-| Flag | Default | Purpose |
-|------|---------|---------|
-| `--socket` | `/var/run/openshell-driver.sock` | UDS path for the gRPC server |
-| `--namespace` | `openshell-system` | Namespace where Sandbox CRs are created |
-| `--supervisor-image` | `ghcr.io/nvidia/openshell/supervisor:latest` | Init-container image carrying the supervisor binary (distroless; binary self-copies via `copy-self`) |
-| `--supervisor-binary-path` | `/openshell-sandbox` | Path to the supervisor inside the image (matches the distroless image's layout) |
-| `--supervisor-mount-path` | `/opt/openshell/bin` | Mount point in the agent container |
-| `--gateway-endpoint` | `""` | Optional `OPENSHELL_ENDPOINT` env var injected into sandboxes |
-| `--istio-inject-sandboxes` | `false` | When false, stamps `sidecar.istio.io/inject: "false"` on sandbox pods |
-| `--enable-apirule` | `false` | Create one `gateway.kyma-project.io/v2/APIRule` per sandbox |
-| `--cluster-domain` | `""` (auto-discover) | Kyma cluster domain suffix; only used with `--enable-apirule` |
-| `--gpu-support` | `true` | Validate `nvidia.com/gpu` capacity at create time (cluster-scope node read) |
-| `--enable-network-policy` | `true` | Render the driver+gateway and sandbox `NetworkPolicy` (default-on as of 2026-05-28) |
-| `--health-port` | `9090` | TCP port for `/healthz`, `/readyz`, `/metrics` |
-| `--log-level` | `info` | Tracing level (`RUST_LOG` overrides) |
+| Flag | Values key | Default | Purpose |
+|------|------------|---------|---------|
+| `--kyma-istio-inject-sandboxes` | `driver.istioInjectSandboxes` | `false` | Value of the `sidecar.istio.io/inject` label on sandbox workloads. False means no sidecar. |
+| `--kyma-disable-claude-telemetry` | `driver.disableClaudeTelemetry` | `false` | Adds `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` to every sandbox. |
+| `--kyma-sandbox-env` | `driver.sandboxEnv` | none | `KEY=VALUE` added to every sandbox. Comma-separated, so a value cannot contain a comma; `OPENSHELL_*` keys other than `OPENSHELL_LOG_LEVEL` are rejected. |
+| `--kyma-enable-apirule` | `driver.enableApirule` | `false` | Expose each sandbox's port 8080 through a Kyma `APIRule` (`gateway.kyma-project.io/v2`). An explicit exception to upstream's isolation; see [`docs/production-deployment.md`](docs/production-deployment.md). |
+| `--kyma-cluster-domain` | `driver.clusterDomain` | `""` | Domain of the APIRule hosts (`<workspace>--<name>.<domain>`). Required with `--kyma-enable-apirule`. |
+| `--kyma-ingress-namespace` | `driver.ingressNamespace` | `istio-system` | Namespace of the Istio ingress gateway that APIRule traffic arrives from. |
+| `--kyma-workspace-psa-level` | `driver.workspacePsaLevel` | `""` | Pod Security level for namespaces the driver creates in managed mode (`privileged`, `baseline`, `restricted`; empty leaves them unlabelled). |
+| `--kyma-health-port` | `driver.healthPort` | `9090` | Port for `/healthz` and `/readyz`. |
+
+The upstream options most deployments touch:
+
+| Values key | Upstream variable | Purpose |
+|------------|-------------------|---------|
+| `namespace` | `OPENSHELL_SANDBOX_NAMESPACE` | Namespace where Sandbox CRs are created (shared mode) |
+| `driver.workspaceMode` | `OPENSHELL_WORKSPACE_MODE` | `shared`, `managed` or `operator` |
+| `driver.socket` | `OPENSHELL_COMPUTE_DRIVER_SOCKET` | Unix socket the gateway connects to |
+| `driver.gatewayEndpoint` | `OPENSHELL_GRPC_ENDPOINT` | Gateway endpoint that sandboxes dial |
+| `driver.supervisorImage` | `OPENSHELL_SUPERVISOR_IMAGE` | Supervisor image, pinned by digest |
+| `driver.sandboxRuntimeImage` | `OPENSHELL_SANDBOX_RUNTIME_IMAGE` | Sandbox runtime image, pinned by digest |
+| `driver.allowDriverConfig` | `OPENSHELL_DRIVER_ADMISSION_CONFIG_JSON` | Whether callers may pass `driver_config` (also rendered into the gateway's config) |
+| `driver.logLevel` | `OPENSHELL_LOG_LEVEL` | Log level |
+
+Every other option is a `driver.*` key in `values.yaml`, named after the
+upstream option. The driver's health port serves only `/healthz` and
+`/readyz`; upstream traces over OTLP (`driver.otlpEndpoint`).
 
 ## Development
 
@@ -79,8 +97,11 @@ installed on the host. Get started in two commands:
 
 ```bash
 make dev-image    # build openshell-driver-kyma-dev:latest (one-off, ~6 min)
-make test         # cargo fmt --check + clippy + tests (~30 s warm cache)
+make test         # cargo fmt --check + clippy + tests
 ```
+
+The first `make test` fetches upstream's crates (git dependencies) into named
+Docker volumes; later runs reuse them.
 
 Other useful targets:
 
@@ -88,7 +109,6 @@ Other useful targets:
 make dev-shell                                          # interactive bash
 make image                                              # production image
 make helm-lint                                          # helm lint
-make test-integration INTEGRATION_TEST_NAMESPACE=openshell-driver-test
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow, including DCO
@@ -104,12 +124,14 @@ sign-off requirements (`git commit -s` on every commit).
 
 ## Reference and credits
 
-- The reference Go implementation for OpenShift is
+- The driver is built on [NVIDIA/OpenShell](https://github.com/NVIDIA/OpenShell)
+  (Apache-2.0): its `openshell-driver-kubernetes`, `openshell-core` and
+  `openshell-otel` crates are git dependencies pinned to one release tag.
+  Nothing from upstream is vendored.
+- The earlier reference Go implementation for OpenShift is
   [zanetworker/openshell-driver-openshift](https://github.com/zanetworker/openshell-driver-openshift)
-  (Apache-2.0). Architectural parallels are documented inline in the source.
-- The proto contract `proto/compute_driver.proto` is vendored from
-  [NVIDIA/OpenShell](https://github.com/NVIDIA/OpenShell) (Apache-2.0); the
-  SPDX header is preserved.
+  (Apache-2.0); see [`docs/kyma-vs-openshift.md`](docs/kyma-vs-openshift.md)
+  for how the platforms differ.
 
 ## License
 

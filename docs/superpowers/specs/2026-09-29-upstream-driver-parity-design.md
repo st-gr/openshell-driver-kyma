@@ -1,6 +1,6 @@
 # Upstream Kubernetes driver parity — design
 
-Status: approved (design), not yet implemented
+Status: implemented in v0.9.0
 Target release: v0.9.0
 Upstream reference: NVIDIA/OpenShell v0.1.2, `crates/openshell-driver-kubernetes`
 

@@ -14,9 +14,9 @@ who has no use for CI internals.
 | `interop-smoke` | called by `branch-checks` on every PR; manual | **no** |
 | `upstream-sync` | **Mondays 09:30 UTC**; manual | `CLAUDE_CODE_OAUTH_TOKEN` |
 
-`upstream-sync` invokes Claude **only** when the protos are behind, the
-pinned image digests are stale, or the interop smoke failed. Most weeks it
-is a green no-op costing no tokens.
+`upstream-sync` invokes Claude **only** when the upstream pin is behind the
+latest release, the pinned image digests are stale, or the interop smoke
+failed. Most weeks it is a green no-op costing no tokens.
 
 ## Situations
 
@@ -33,10 +33,12 @@ helm -n openshell-system upgrade ods deploy/helm/openshell-driver-kyma \
   --reuse-values \
   --set image.tag=sha256:<new driver digest> \
   --set gateway.image.tag=sha256:<new gateway digest> \
-  --set driver.supervisorImage=ghcr.io/nvidia/openshell/supervisor@sha256:<new supervisor digest>
+  --set driver.supervisorImage=ghcr.io/nvidia/openshell/supervisor@sha256:<new supervisor digest> \
+  --set driver.sandboxRuntimeImage=ghcr.io/nvidia/openshell/sandbox@sha256:<new runtime digest> \
+  --set upstream.version=<new upstream tag>
 ```
 
-Pass all three explicitly. `--reuse-values` carries forward the **old chart's**
+Pass all five explicitly. `--reuse-values` carries forward the **old chart's**
 defaults, so a changed default in `values.yaml` is silently ignored — this has
 already happened once, where the driver kept injecting `supervisor:latest`
 after an upgrade that appeared to succeed.
@@ -210,78 +212,47 @@ for two months.
 
 Maintainer notes for `driver.workspaceMode`. `Shared` is the default and what
 the live cluster runs; `Managed` and `Operator` are documented here for
-whoever flips them.
+whoever flips them. Upstream's driver implements all three modes. The chart
+only maps values to upstream's options and refuses at render time what
+upstream would refuse at startup (`templates/_workspace-guards.tpl`).
 
-### Operator mode prerequisite
+### Operator mode prerequisites
 
-Upstream's Operator mode only checks the allowlist; it does not bootstrap.
-This driver pins `openshell-sandbox` into every sandbox pod spec, so an
-operator-managed namespace lacking that ServiceAccount produces pods that
-never start — and `verify_psa_label` hard-fails without the PSA label.
+Upstream's Operator mode uses the namespaces you select with
+`driver.operatorNamespaceLabel` (a namespace label) or
+`driver.operatorNamespaceConfigMap` (a file of names mounted from a
+ConfigMap), exactly one of the two. It does not bootstrap them: the
+namespace's owner does, with upstream's `openshell-workspace` chart or an
+equivalent (the sandbox ServiceAccount, upstream's NetworkPolicy, and a Role
+granting the driver Secret `create` and `delete` for the bootstrap and
+image-pull Secrets). This chart does not ship that Role, and the driver's
+ClusterRole grants Operator mode `namespaces` `get`, `list` and `watch`, never
+`create` or `delete`, and no Secret rights: that is deliberate, because the
+platform team owns the namespace's contents.
 
-Before adding a namespace to `driver.operatorNamespaceAllowlist`, the
-platform team must prepare it:
+Pod Security labels on those namespaces are the owner's too: the Kyma layer
+labels only the namespaces the driver creates in Managed mode
+(`driver.workspacePsaLevel`). `privileged` is what CI runs at.
 
-```bash
-kubectl label namespace tenant-a pod-security.kubernetes.io/enforce=privileged
-kubectl -n tenant-a create serviceaccount openshell-sandbox
-kubectl -n tenant-a patch serviceaccount openshell-sandbox \
-  -p '{"automountServiceAccountToken": false}'
-```
+### `driver_config` volumes go through upstream's resource admission
 
-(`tenant-a` above is an example namespace name — substitute the real one.)
-
-This is deliberate. Granting the driver cluster-wide `serviceaccounts: create`
-would contradict the entire premise of a mode where the platform team owns
-namespace contents; the ClusterRole for `operator` grants `namespaces: ["get"]`
-only, never `create` or `delete`.
-
-The allowlist is read **once at startup**. Adding a namespace requires a
-driver restart, not just a `helm upgrade --reuse-values` — and, as noted
-above, `--reuse-values` carries forward the *old* chart's defaults, so pass
-`driver.operatorNamespaceAllowlist` explicitly on every upgrade rather than
-relying on it being reused.
-
-### `driver_config` volumes are gated off by default
-
-`driver_config.volumes[].persistent_volume_claim.claim_name`
-(`DriverSandboxTemplate.driver_config`, proto field 12) is **not**
-sandboxed against other sandboxes' PVCs. `driver_config.rs`'s validation
-constrains it to a DNS-1123 subdomain and nothing more — no ownership
-check, no allowlist.
-
-The concrete exposure in `Shared` mode (the default): every sandbox's
-workspace PVC lives in one namespace under the predictable name
-`{workspace}--{name}-workspace`. A template author who can set
-`driver_config` can name another sandbox's workspace PVC directly in
-`driver_config.volumes[].persistent_volume_claim.claim_name` and mount it
-read-write via `driver_config.containers.agent.volume_mounts`, reading or
-overwriting that sandbox's workspace. `Managed` and `Operator` modes don't
-remove the underlying gap — the claim name is still unchecked — but they
-at least put each workspace in its own namespace, which is what Kubernetes
-RBAC actually scopes.
-
-Upstream's own Kubernetes driver has the identical validation shape (same
-DNS-1123-subdomain-only check, no ownership check either), so this is
-inherited contract behavior, not a defect introduced by this branch. It is
-still worth flagging here: `driver_config` support is new on this branch,
-and `Shared`'s single-namespace default makes the exposure easier to reach
-than it may be for upstream's own callers.
-
-**Gated.** `--driver-config-allow-volumes` / `driver.driverConfigAllowVolumes`
-defaults to `false`. With it off, `driver_config.rs` rejects any
-`driver_config` that declares `volumes[]` or
-`containers.agent.volume_mounts[]` — with `DriverError::PermissionDenied`
-naming the flag, distinct from the `InvalidArgument` a malformed
-`driver_config` gets — from both `CreateSandbox` and
-`ValidateSandboxCreate`. The gate covers only those two fields;
-`driver_config.pod.*` (node selector, runtime class, tolerations, priority
-class) and `containers.agent.resources` are not the exposure and keep
-working regardless. Set the flag to `true` to allow `driver_config`
-volumes on a driver instance — there is still no ownership check behind
-it, so only enable it where every `driver_config` author is already
-trusted with arbitrary PVC access in the target namespace (e.g. a single
-trusted gateway, not multi-tenant callers).
+`driver_config.volumes[].persistent_volume_claim` (in
+`DriverSandboxTemplate.driver_config`) is admitted by upstream's resource
+admission, not by a chart flag. `driver.allowDriverConfig` (default `true`) is
+the one switch for whether callers may pass `driver_config` at all, volumes
+included. The chart renders it into the gateway's `[openshell.drivers.kyma]
+allow_driver_config` and into the driver's
+`OPENSHELL_DRIVER_ADMISSION_CONFIG_JSON`, and leaves `resource_admission` out
+on both sides, so upstream's defaults apply: the operator must label each PVC
+`openshell.ai/sandbox-attachable: "true"` and
+`openshell.ai/sandbox-attachable-workspace: "<workspace>"` before a sandbox
+of that workspace can mount it, and labels on the sandbox itself approve
+nothing. The driver reads the PVC's metadata for that check, which is why its
+Role and ClusterRole grant `persistentvolumeclaims` `get` when
+`allowDriverConfig` is true. This replaces the 0.8.0 chart-level gate on
+`driver_config` volumes, under which the claim name was checked only as a
+DNS-1123 subdomain. Set `driver.allowDriverConfig=false` to refuse
+`driver_config` entirely.
 
 ### Switching workspace modes is breaking
 

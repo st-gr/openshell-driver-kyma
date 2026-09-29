@@ -188,27 +188,16 @@ SCC are entirely independent — they only need unique local ports.
    openshell sandbox create -- claude
    ```
 
-## Open prerequisite: the OpenShell gateway
+## Prerequisite: the OpenShell gateway
 
-The companion deployment of `openshell-driver-kyma` only handles the
-gateway's compute-driver gRPC contract. Without the OpenShell gateway
-running in the same pod, there is no `svc/openshell-gateway` to
-`port-forward` against.
+The chart deploys the upstream NVIDIA gateway image, unmodified, as a sidecar
+of the driver (`gateway.enabled=true`). They share an `emptyDir` for the Unix
+socket the gateway reaches the driver over (the chart passes
+`--compute-driver kyma --compute-driver-socket <path>` and renders
+`[openshell.drivers.kyma]` in the gateway's config). Without `gateway.enabled=true` and `gatewayService.enabled=true`
+there is no `svc/<release>-openshell-driver-kyma` to `port-forward` against.
 
-The upstream NVIDIA gateway needs a small fork (~20 lines of Rust) to
-add a `--compute-driver-socket` flag — see the design spec at
-`docs/superpowers/specs/2026-05-26-openshell-driver-kyma-design.md`
-section 6. Two paths:
-
-1. **Wait for upstream**: open an issue at NVIDIA/OpenShell asking for
-   first-class external compute-driver socket support.
-2. **Fork now**: add the flag to the gateway, build a custom image,
-   deploy it as a sidecar in the same pod as `openshell-driver-kyma`
-   sharing an `emptyDir` for the UDS. The reference deployment is
-   sketched in `deploy/gateway-with-driver.yaml` of the upstream
-   OpenShift driver repo.
-
-Once the gateway is in place, the runbook above completes the private
+With the gateway in place, the runbook above completes the private
 routing path: VPN → SCC Service Channel → Kyma API server →
 port-forward → OpenShell gateway.
 

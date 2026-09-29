@@ -3,20 +3,19 @@
 This file lists third-party components incorporated into or distributed with
 this project.
 
-## Vendored
+## Git dependencies
 
-- `proto/compute_driver.proto`
-  Source: NVIDIA/OpenShell (https://github.com/NVIDIA/OpenShell)
-  License: Apache-2.0
-  The SPDX header in the file is preserved verbatim.
+Nothing from another project is vendored into this repository. The driver links
+these crates from NVIDIA/OpenShell (https://github.com/NVIDIA/OpenShell) as git
+dependencies, pinned to one release tag in the workspace `Cargo.toml`
+(currently `v0.1.2`; `Cargo.lock` records the exact commit):
 
-- `crates/openshell-driver-kyma/src/vendor/driver_mounts.rs`
-  Source: NVIDIA/OpenShell (https://github.com/NVIDIA/OpenShell),
-  `crates/openshell-core/src/driver_mounts.rs`
-  License: Apache-2.0
-  The SPDX header in the file is preserved verbatim. One line is replaced
-  with a documented, mechanically-reversed local patch; see the file's
-  header comment and `crates/openshell-driver-kyma/src/vendor/UPSTREAM.lock`.
+- `openshell-driver-kubernetes`
+- `openshell-core`
+- `openshell-otel`
+
+License: Apache-2.0. Their transitive crates come from the same repository at
+that tag and are recorded in `Cargo.lock` with the rest.
 
 ## Generated at release time
 

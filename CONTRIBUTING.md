@@ -52,19 +52,6 @@ The `target/` directory is mounted as a named Docker volume
   1. `make test` passes locally (or in CI).
   2. `cargo clippy ... -W clippy::pedantic` is clean.
   3. Any plan deviation is documented in the commit body.
-  4. Live-cluster behavior, if changed, was verified with
-     `make test-integration INTEGRATION_TEST_NAMESPACE=...`.
-
-## Tier-3 live cluster tests
-
-The Tier-3 suite (`tests/live_cluster.rs`) runs against a real
-Kubernetes cluster with the agent-sandbox CRD installed. It is gated
-behind the `integration` Cargo feature and the
-`INTEGRATION_TEST_NAMESPACE` env var. The harness refuses to run in any
-of the well-known system namespaces (`default`, `kube-system`,
-`kube-public`, `kube-node-lease`, `istio-system`, `kyma-system`,
-`agent-sandbox-system`) and you can extend that deny-list at runtime via
-`INTEGRATION_TEST_NAMESPACE_DENYLIST`.
 
 ## Reporting security issues
 

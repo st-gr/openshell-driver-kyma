@@ -24,9 +24,9 @@ file (untracked).
 
 **Validation note (2026-07-02):** Prompt A produced
 `openshell-kyma-direct-anthropic-endpoint.png` (kept untracked in this
-directory) with 100% label fidelity on the first pass — every node,
-color, and arrow style correct, including `gatewayUpstreamEgress` and
-the dashed retry loop. The verbatim-spec + prose-containment pattern
+directory) with 100% label fidelity on the first pass, for the diagram as
+it stood on that date — every node, color, and arrow style correct. The
+verbatim-spec + prose-containment pattern
 works; expect iteration mainly on smaller/denser diagrams.
 
 Universal rules, both diagrams:
@@ -36,8 +36,8 @@ Universal rules, both diagrams:
    instruction. Copy the fenced `mermaid` block verbatim from the top
    of the target doc.
 2. **Proofread every label after generation.** Image models silently
-   typo long tokens like `gatewayUpstreamEgress` and
-   `inference.local`. Ask for a targeted regeneration naming only the
+   typo long tokens like `os-supervisor-<sandbox id>` and
+   `inferenceProvider.baseUrl`. Ask for a targeted regeneration naming only the
    wrong labels ("regenerate; fix ONLY these labels: …"), not a fresh
    prompt. Expect 2–3 rounds.
 3. **Bail out early.** If more than ~5 labels are wrong per round,
@@ -60,20 +60,16 @@ Universal rules, both diagrams:
 >
 > Layout: top-to-bottom, a single main spine of seven numbered stages.
 > Four grouped containers along the spine: "1 — Cluster bootstrap"
-> (three side-by-side boxes), "2 — Values overlay" (contains a decision
-> diamond with two outcomes), "3 — helm install chart 0.1.2" (two
-> boxes), and "6 — run Claude in a sandbox" (contains the probe
-> decision diamond, its two outcomes, the run box, and the data-path
+> (three side-by-side boxes), "2 — Values overlay" (one box), "3 — helm
+> install chart 0.9.0" (two boxes), and "6 — run Claude in a sandbox"
+> (contains the sandbox-create box, the run box, and the data-path
 > box).
 >
 > Visual semantics: solid arrows are the setup flow; the dashed arrow
-> from the 503 box back to the probe diamond is a retry loop labelled
-> "fix values, retest"; the dashed arrow from the hook Job to the
-> Secret is labelled "reads key"; the double-line connection from the
-> run box to the data-path box marks the runtime inference path. Color
-> coding: red fill for the two failure/trap boxes ("in-cluster /
-> RFC1918…" and "HTTP 503…"), green fill for "HTTP 200 — pipeline
-> works", blue fill for the data-path box. Everything else neutral.
+> from the hook Job to the Secret is labelled "reads key"; the
+> double-line connection from the run box to the data-path box marks the
+> runtime inference path. Color coding: blue fill for the data-path box.
+> Everything else neutral.
 >
 > Style: flat vector, white background, sans-serif labels, high
 > contrast, generous whitespace, portrait orientation, no gradients,
@@ -89,7 +85,7 @@ Universal rules, both diagrams:
 > swimlane interaction diagram. The Mermaid source is the authoritative
 > specification: keep all six participants in the given left-to-right
 > order, keep every message arrow in the given top-to-bottom order with
-> its EXACT label text and its autonumber (1–13), and keep the
+> its EXACT label text and its autonumber (1–11), and keep the
 > wide note spanning the first four lanes. Do not invent, merge, drop,
 > or reorder anything.
 >
@@ -99,25 +95,24 @@ Universal rules, both diagrams:
 >
 > Layout: six vertical lifelines, left to right: "Operator host"
 > (drawn as a person/actor), "gateway :8080", "kyma driver",
-> "agent-sandbox controller", "sandbox pod (supervisor + claude)",
+> "agent-sandbox controller", "sandbox pods (supervisor pod + workload
+> pod running claude)",
 > "upstream (Anthropic API or bedrock-bridge to SAP AI Core)". A
 > horizontal note bar under the participant headers spanning lanes 1–4
-> with the one-time-setup text. Then thirteen numbered horizontal
+> with the one-time-setup text. Then eleven numbered horizontal
 > message arrows in source order.
 >
 > Visual semantics: solid arrowheads for requests, open/dashed arrows
-> for the two reply messages ("schedule pod, sideload supervisor,
-> phase Ready" and "completion - claude writes /sandbox/summary.md").
-> The self-arrow on the sandbox-pod lane ("L7 router strips
-> placeholder x-api-key") must loop back to its own lifeline. Highlight
-> the three-message inference core (GetInferenceBundle, POST
-> /v1/messages, completion) with a subtle background band across the
-> lanes.
+> for the two reply messages ("start workload pod; supervisor
+> bootstraps; phase Ready" and "completion - claude writes
+> /sandbox/summary.md"). Highlight the two-message inference core
+> ("supervisor substitutes the real key, POST /v1/messages" and
+> "completion") with a subtle background band across the lanes.
 >
 > Style: flat vector, white background, sans-serif labels, high
 > contrast, 16:9 landscape, no gradients, no 3D, no photorealism, no
 > watermark. Message labels must be sharply legible at 100% zoom;
 > number badges on every arrow.
 >
-> Before drawing, list the six participants and the thirteen messages
+> Before drawing, list the six participants and the eleven messages
 > in order, so mismatches can be caught early.
