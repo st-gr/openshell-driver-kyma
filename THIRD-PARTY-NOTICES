@@ -14,8 +14,9 @@ dependencies, pinned to one release tag in the workspace `Cargo.toml`
 - `openshell-core`
 - `openshell-otel`
 
-License: Apache-2.0. Their transitive crates come from the same repository at
-that tag and are recorded in `Cargo.lock` with the rest.
+License: Apache-2.0. The further `openshell-*` crates these depend on come
+from the same repository at that tag; every other dependency comes from
+crates.io. All of them are recorded in `Cargo.lock`.
 
 ## Generated at release time
 

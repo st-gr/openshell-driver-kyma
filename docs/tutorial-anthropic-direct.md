@@ -293,6 +293,10 @@ to end.
 
 ## 6. Run Claude in a sandbox
 
+> **Not yet verified end to end on v0.9.0.** This step follows upstream's
+> provider model but has not been run against a v0.9.0 cluster yet; see
+> "Versions" at the end.
+
 The sandbox image `ghcr.io/st-gr/sandbox-claude:latest` bundles Node 22
 and the `claude` CLI. You attach the provider from step 3 with
 `--provider`: that gives the sandbox the placeholder key and the network
@@ -307,11 +311,11 @@ Create the sandbox:
 ```bash
 openshell provider list        # shows ods-anthropic, created by the chart's Job
 
-openshell sandbox create \\
-  --name hello \\
-  --provider ods-anthropic \\
-  --from ghcr.io/st-gr/sandbox-claude:latest \\
-  --detach \\
+openshell sandbox create \
+  --name hello \
+  --provider ods-anthropic \
+  --from ghcr.io/st-gr/sandbox-claude:latest \
+  --detach \
   -- sleep infinity
 
 openshell sandbox list         # hello ... Ready
@@ -349,7 +353,7 @@ openshell sandbox exec --name hello -- sh -c '
   /usr/bin/claude -p --bare --allow-dangerously-skip-permissions "Reply with exactly OK"'
 ```
 
-Expected output: `OK`. `ANTHROPIC_MODEL` already names the model; if you pass
+If the flow works, this prints `OK`. `ANTHROPIC_MODEL` should already name the model; if you pass
 `--model`, it must be one your endpoint serves.
 
 Interactive TUI (allocates a PTY automatically when your terminal is

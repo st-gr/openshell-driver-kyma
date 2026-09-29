@@ -39,9 +39,10 @@ sequenceDiagram
 ## A note on running the CLI in a container
 
 The walkthrough below shows the CLI running on your host. NVIDIA
-publishes the `openshell` CLI for Linux (musl + RPM), macOS (Apple
-Silicon tarball), and Linux/macOS Python wheels — but **not for
-Windows**. If your host is Windows, three options:
+publishes the `openshell` CLI as static Linux binaries (x86_64 and
+aarch64), a macOS Apple Silicon tarball and distro packages — but **not for
+Windows** (see [`install-cli.md`](install-cli.md); the PyPI package no longer
+contains the CLI). If your host is Windows, three options:
 
 - **WSL2** (recommended for repeated use). One-time install:
   `wsl --install -d Ubuntu`, then run all of the walkthrough's `bash`
@@ -209,6 +210,12 @@ apk add --no-cache rsync openssh-client          # Alpine
 
 ## 8. Run inference: ask Claude to read + write a new file
 
+> **Not yet verified end to end on v0.9.0.** Steps 6 and 8 follow upstream's
+> provider model, but this flow has not been run against a v0.9.0 cluster yet.
+> Call `/usr/bin/claude` directly (as below): the `claude` wrapper in the
+> `sandbox-claude` image predates provider profiles and unsets
+> `ANTHROPIC_API_KEY`.
+
 ```bash
 openshell sandbox exec --name claude-files -- sh -c '
   cd /sandbox
@@ -243,13 +250,13 @@ The flags that matter:
 - `--add-dir /sandbox` — claude-code only writes inside directories
   passed via `--add-dir` (or the cwd at startup).
 
-You should see Claude print `DONE` and exit 0. Confirm the file:
+If the flow works, Claude prints `DONE` and exits 0. Confirm the file:
 
 ```bash
 openshell sandbox exec --name claude-files -- cat /sandbox/summary.md
 ```
 
-Expected: a two-line bullet summary derived from `draft.md`.
+If it worked, that is a two-line bullet summary derived from `draft.md`.
 
 ## 9. Download the file
 
@@ -304,11 +311,6 @@ placeholder for the key. No real key. The workload pod has no network of its
 own: upstream's NetworkPolicy gives it no egress and admits ingress only from
 its supervisor pod, so it cannot dial the upstream directly.
 
-This is **stronger isolation than NVIDIA's tutorial pattern**, which
-allows the agent to call `api.anthropic.com:443` directly with the
-user's OAuth-fronted Anthropic creds. Their pattern is process
-containment, not credential containment.
-
 ## Variant: SAP AI Core via the in-cluster translation bridge
 
 If your Anthropic models live behind SAP AI Core's deployed-Bedrock
@@ -319,10 +321,11 @@ Bedrock InvokeModel format. From the agent's perspective the wiring
 is identical to the Anthropic-mode flow above — same `--provider`
 attachment, same `claude` invocation, no Bedrock env, no AWS creds. The only
 operator-facing changes are the Secret pre-flight, the values overlay, and
-pointing `inferenceProvider.baseUrl` at the bridge. Only sandboxes in the
-release namespace (shared workspace mode) can reach the bridge: its
-NetworkPolicy admits only OpenShell pods of that namespace, so sandboxes in
-managed-mode namespaces cannot.
+pointing `inferenceProvider.baseUrl` at the bridge. With
+`networkPolicy.enabled`, the bridge's NetworkPolicy admits only OpenShell pods
+in the release namespace. A sandbox reaches the bridge only if it runs there
+(shared mode, with `namespace` equal to the release namespace); sandboxes in
+managed or operator mode, or in another `namespace`, cannot.
 
 ### Pre-flight (one-time)
 
@@ -370,7 +373,7 @@ step 6; `ANTHROPIC_MODEL` is `inferenceProvider.modelId`
 
 ### Sandbox env
 
-Section 8's `claude` invocation works **unchanged**. `ANTHROPIC_MODEL`
+Section 8's `claude` invocation should apply **unchanged**. `ANTHROPIC_MODEL`
 (already set from `inferenceProvider.modelId`) selects which key from
 `bedrockBridge.modelMap` to use, and `ANTHROPIC_SMALL_FAST_MODEL` selects the
 model for sub-agents (Task tool, etc.):

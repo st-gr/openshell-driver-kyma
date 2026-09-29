@@ -2,8 +2,8 @@
 # NetworkPolicy for the driver+gateway pod.
 #
 # Default-deny ingress except:
-#   - the driver's /metrics + /healthz port (any pod can scrape; tighten
-#     to a specific Prometheus namespace via your own overlay if needed)
+#   - the driver's /healthz + /readyz port (the kubelet's probes; any pod
+#     can reach it, tighten via your own overlay if needed)
 #   - the gateway's gRPC + health + metrics ports when gateway.enabled
 #     (so port-forward, sidecar mesh, or APIRule reverse proxy can
 #     reach them)

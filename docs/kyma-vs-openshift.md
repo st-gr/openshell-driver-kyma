@@ -79,8 +79,11 @@ GPU opt-out of earlier versions is gone.
 | Out-of-cluster | OpenShift OAuth tokens or kubeconfig users | OIDC kubeconfig with `exec` plugin (`kubectl oidc-login`) provided by SAP BTP |
 
 Upstream's driver uses `kube::Config::incluster()` first, falling back to
-`kube::Config::infer()`, and the Kyma layer's client is built the same way.
-`kube-rs` honors `exec` credential plugins, so the SAP BTP OIDC kubeconfig
+`kube::Config::infer()`. The Kyma layer's own client uses
+`kube::Client::try_default()`, which tries a kubeconfig first (`KUBECONFIG` or
+`~/.kube/config`) and then the in-cluster configuration; inside a pod, where
+there is no kubeconfig, the effect is the same. `kube-rs` honors `exec`
+credential plugins, so the SAP BTP OIDC kubeconfig
 works out of the box for local development; the driver never sees the OIDC
 tokens directly.
 

@@ -13,6 +13,13 @@ and three practical patterns for uploading and downloading files.
 > `openshell-driver-kyma` serves it by running upstream's Kubernetes
 > driver.
 
+> **The Python and TypeScript samples predate upstream v0.1.2's request
+> shapes.** For example, workspace-scoped RPCs now require `workspace_scope`,
+> and `CreateProviderRequest` nests a `provider` message. Treat the samples
+> as the outline of the flow, and take the current field names from
+> [`grpc-without-cli.md`](grpc-without-cli.md) (worked `grpcurl` calls for
+> v0.1.2) and upstream's `openshell.proto` at the tag your gateway runs.
+
 ## Table of contents
 
 1. [API surface](#api-surface)
@@ -154,6 +161,9 @@ projection (`automountServiceAccountToken: true` plus a TokenRequest
 volume) is enough — the gateway accepts the SA token.
 
 ## Sandbox lifecycle
+
+> Sample predates the v0.1.2 request shapes (`workspace_scope`, the nested
+> `provider`); see [`grpc-without-cli.md`](grpc-without-cli.md).
 
 ### 1. Create the provider once
 
@@ -472,6 +482,9 @@ deletes any leftover entries — defensive against process crashes.
 
 ## Complete worked example: Python
 
+> Sample predates the v0.1.2 request shapes (`workspace_scope`, the nested
+> `provider`); see [`grpc-without-cli.md`](grpc-without-cli.md).
+
 A self-contained script that creates a Claude Code sandbox, uploads a
 prompt file, runs a one-shot prompt against it, downloads the result,
 and tears down. Save as `examples/claude_oneshot.py`:
@@ -579,6 +592,9 @@ python examples/claude_oneshot.py prompt.txt
 ```
 
 ## Complete worked example: TypeScript
+
+> Sample predates the v0.1.2 request shapes (`workspace_scope`, the nested
+> `provider`); see [`grpc-without-cli.md`](grpc-without-cli.md).
 
 Equivalent flow using `@connectrpc/connect` for browser/Node:
 

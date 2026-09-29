@@ -276,11 +276,14 @@ OIDC, and is documented above.
   grant the driver `create` and `delete` on Secrets in each operator namespace.
   Upstream ships that Role in its separate `openshell-workspace` chart; this
   chart does not.
-- **Managed mode**: sandboxes live in namespaces other than the release
-  namespace, so they cannot reach the SAP AI Core bridge (`bedrockBridge`),
-  whose NetworkPolicy admits only pods of the release namespace. The gateway
-  id (default: the release fullname) must be at most 33 characters; a longer
-  release name must set `gateway.sandboxJwt.gatewayId`.
+- **Managed mode**: the gateway id (default: the release fullname) must be at
+  most 33 characters; a longer release name must set
+  `gateway.sandboxJwt.gatewayId`.
+- **SAP AI Core bridge** (`bedrockBridge`): with `networkPolicy.enabled`, its
+  NetworkPolicy admits only OpenShell pods in the release namespace
+  (`.Release.Namespace`). A sandbox reaches it only if it runs there: shared
+  mode with `namespace` equal to the release namespace. Sandboxes in managed or
+  operator mode, or in a different `namespace`, cannot.
 - **`driver.otlpEndpoint` must be plain `http://`.** Upstream v0.1.2 builds its
   OTLP exporter without TLS, so an `https://` endpoint logs an error and exports
   nothing.

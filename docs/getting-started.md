@@ -93,8 +93,8 @@ What this lands in your cluster:
   import` + `openshell provider create`; when `inferenceProvider.enabled`).
 - The driver+gateway pod's NetworkPolicy (default-deny ingress except the
   probe and gateway ports, egress to DNS and 443) and, in shared mode with
-  the in-pod gateway, `<release>-openshell-driver-kyma-sandbox-ssh`, which
-  admits SSH to sandbox pods only from the gateway pod. The sandbox pods
+  the in-pod gateway, `<fullname>-sandbox-ssh`, which admits SSH to sandbox
+  pods only from the gateway pod. The sandbox pods
   themselves are fenced by upstream's own per-namespace policies,
   `openshell-sandbox-workloads` and `openshell-sandbox-supervisors`, which
   the driver creates; the chart adds nothing to them.
@@ -149,6 +149,12 @@ sandbox JWT via `IssueSandboxToken` (the driver authenticates the token) →
 the gateway reports `Ready`.
 
 ### Run Claude with an inference provider
+
+> **Not yet verified end to end on v0.9.0.** This flow follows upstream's
+> provider model, but it has not been run against a v0.9.0 cluster yet. Call
+> `/usr/bin/claude` directly (as below): the `claude` wrapper in the
+> `sandbox-claude` image predates provider profiles and unsets
+> `ANTHROPIC_API_KEY`.
 
 If your overlay has `inferenceProvider.enabled`, the chart's post-install
 Job has created a provider on the gateway. Its name is
@@ -229,8 +235,8 @@ openshell sandbox exec --name claude-demo -- sh -c '
   /usr/bin/claude -p --bare --allow-dangerously-skip-permissions "say hi"'
 ```
 
-`ANTHROPIC_MODEL` already names the configured model, so no `--model` is
-needed; if you pass one, it must be the model you set in
+`ANTHROPIC_MODEL` should already name the configured model, so `--model` is
+not needed; if you pass one, it must be the model you set in
 `inferenceProvider.modelId`.
 
 ## Inspect

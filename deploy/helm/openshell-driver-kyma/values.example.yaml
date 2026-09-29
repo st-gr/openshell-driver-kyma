@@ -174,7 +174,9 @@ inferenceProvider:
 #      The provider profile names the bridge as the credential's endpoint.
 #   3. Sandbox env stays IDENTICAL to the standard Anthropic walkthrough
 #      (`ANTHROPIC_BASE_URL` is the bridge's URL). No Bedrock env, no AWS
-#      creds. Only sandboxes in this release's namespace can reach the bridge.
+#      creds. With networkPolicy.enabled, the bridge admits only OpenShell pods
+#      in the release namespace: sandboxes elsewhere (managed or operator mode,
+#      or a `namespace` other than the release namespace) cannot reach it.
 #
 # Pre-flight (one-time):
 #   kubectl -n openshell-system create secret generic my-sap-aicore-key \

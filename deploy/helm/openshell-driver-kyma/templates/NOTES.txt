@@ -30,8 +30,10 @@ deployed Bedrock InvokeModel endpoints. Sandbox pods do NOT need
 Bedrock-mode env or AWS creds: the bridge is a normal Anthropic
 endpoint. The provider profile names its host and port, sandboxes are
 created with `--provider <name>`, and the sandbox's supervisor injects
-the provider's credential into requests to it. Only sandboxes in this
-release's namespace can reach the bridge.
+the provider's credential into requests to it. With networkPolicy.enabled,
+the bridge admits only OpenShell pods in the release namespace, so sandboxes
+elsewhere (managed or operator mode, or a `namespace` other than the release
+namespace) cannot reach it.
 
 In-cluster bridge URL:
   http://{{ include "openshell-driver-kyma.bedrockBridgeFullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:8787

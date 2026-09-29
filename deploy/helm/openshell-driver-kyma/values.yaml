@@ -111,8 +111,9 @@ driver:
   healthPort: 9090
   logLevel: info
   # Workspace tenancy model (upstream's OPENSHELL_WORKSPACE_MODE). Leave at
-  # "shared" unless you have read
-  # docs/superpowers/specs/2026-08-18-workspace-modes-design.md.
+  # "shared" unless you need a namespace per workspace or namespaces that a
+  # platform team owns; the two other modes change where sandboxes live and
+  # what RBAC the driver needs (see the modes below).
   #
   #   shared   - every sandbox in .Values.namespace.
   #   managed  - one driver-created namespace per workspace, named
@@ -465,8 +466,11 @@ inferenceProvider:
 # (with `inferenceProvider.type: anthropic`). The provider profile then
 # names the bridge's host and port as the credential's endpoint, and sandboxes
 # reach it like any other Anthropic upstream — no Bedrock env, no AWS creds,
-# no per-pod policy carve-out. Only sandboxes in this release's namespace can
-# reach it (the shared workspace mode); managed-mode namespaces cannot.
+# no per-pod policy carve-out. With `networkPolicy.enabled`, the bridge's
+# policy admits only OpenShell pods in the release namespace, so a sandbox
+# reaches it only when it runs there (shared mode, with `namespace` equal to the
+# release namespace). Sandboxes elsewhere (managed or operator mode, or another
+# `namespace`) cannot.
 #
 # Operator pre-creates a Secret holding the SAP service-key JSON:
 #   kubectl -n <release-ns> create secret generic my-sap-aicore-key \

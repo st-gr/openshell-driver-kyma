@@ -26,8 +26,10 @@ upgrade. To upgrade from 0.8.0 with only this section in front of you:
    driver, gateway, supervisor and sandbox runtime images must be one release.
 3. `helm upgrade <release> <chart> -f my-values.yaml`. Pass the values file
    again; do not use `--reuse-values`, which keeps the 0.8.0 chart's defaults
-   and ignores the new ones. The chart refuses to render (naming the value)
-   when a setting is one that upstream's driver would refuse at startup.
+   and ignores the new ones. The chart refuses to render, naming the value,
+   for the invalid settings listed in the "Managed mode" bullet under
+   "Changed"; any other invalid value is refused by the driver at startup with
+   upstream's message, so check the driver's log after the upgrade.
 4. If `inferenceProvider.enabled` is set, the post-upgrade hook registers a
    provider profile and creates the provider `<release>-<type>` (0.8.0 named
    it `<fullname>-<type>`). If it fails with "provider ... exists with type
@@ -70,10 +72,21 @@ upgrade. To upgrade from 0.8.0 with only this section in front of you:
   key by calling binary.
 - **Managed mode.** The gateway id (default: the release fullname) must be at
   most 33 characters, upstream's limit; a longer release name must set
-  `gateway.sandboxJwt.gatewayId`. The chart now fails at render time for every
-  configuration upstream's driver refuses at startup: the workspace-mode
-  checks, a sandbox UID or GID outside 1 to 4294967294, a non-boolean
-  `driver.allowDriverConfig`, and a malformed `driver.sandboxEnv` entry.
+  `gateway.sandboxJwt.gatewayId`. The chart now fails at render time, naming
+  the value, for these invalid settings: the workspace-mode rules upstream
+  refuses at startup (a managed gateway id that is not a DNS-1123 label or is
+  too long, managed SSH ingress without a gateway namespace or pod selector,
+  operator mode without exactly one of the namespace label and the ConfigMap),
+  a sandbox UID or GID outside 1 to 4294967294, a non-boolean
+  `driver.allowDriverConfig`, a malformed `driver.sandboxEnv` entry, an
+  invalid `inferenceProvider` (a type other than `anthropic`; a `baseUrl` that
+  is not an http(s) URL to a host name, that carries credentials or contains a
+  comma; no `modelId`, `binaries` or credential Secret), and
+  `driver.enableApirule` without `driver.clusterDomain`. Other invalid values
+  (for example a non-numeric `driver.saTokenTtlSecs`, an unknown pull policy, a
+  bad `driver.workspacePsaLevel` or a port out of range) are refused by the
+  driver at startup with upstream's message, so the pod crash-loops and the
+  driver's log names the option.
   The Pod Security label from `driver.workspacePsaLevel` is applied before
   each `CreateSandbox` and on `EnsureWorkspace`, because upstream's create
   path creates the namespace itself.
@@ -161,7 +174,9 @@ upgrade. To upgrade from 0.8.0 with only this section in front of you:
   needs a Kyma-owned Service, a NetworkPolicy admitting only the Istio
   ingress gateway (`istio: ingressgateway` in `driver.ingressNamespace`) to
   port 8080 of that sandbox's workload pod, and the APIRule. All three are
-  owner-referenced to the Sandbox CR and never carry upstream's labels. The
+  owner-referenced to the Sandbox CR and lack upstream's
+  `openshell.ai/managed-by` label (they carry
+  `app.kubernetes.io/managed-by: openshell-driver-kyma`). The
   APIRule is `noAuth`: enabling exposure publishes the sandbox's port 8080,
   and inbound traffic bypasses the supervisor.
 - **The provider hook verifies the CLI it downloads** against the release's
@@ -207,9 +222,11 @@ upgrade. To upgrade from 0.8.0 with only this section in front of you:
 - **Operator mode:** the namespace owner must grant the driver `create` and
   `delete` on Secrets in each operator namespace. Upstream ships that Role in
   its separate `openshell-workspace` chart; this chart does not.
-- **The SAP AI Core bridge** (`bedrockBridge`) is reachable only from the
-  release namespace. Sandboxes in other namespaces (managed mode) cannot
-  reach it.
+- **The SAP AI Core bridge** (`bedrockBridge`): with `networkPolicy.enabled`,
+  its NetworkPolicy admits only OpenShell pods in the release namespace
+  (`.Release.Namespace`). A sandbox reaches it only if it runs there: shared
+  mode with `namespace` equal to the release namespace. Sandboxes in managed or
+  operator mode, or in a different `namespace`, cannot.
 - **`driver.otlpEndpoint` must be plain `http://`.** Upstream v0.1.2 builds its
   OTLP exporter without TLS, so an `https://` endpoint logs an error and
   exports nothing.
