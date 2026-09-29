@@ -15,9 +15,9 @@ who has no use for CI internals.
 | `upstream-sync` | **Mondays 09:30 UTC**; manual | `CLAUDE_CODE_OAUTH_TOKEN` |
 
 `upstream-sync` invokes Claude **only** when the upstream pin is behind the
-latest release, the pinned image digests (gateway, supervisor, sandbox
-runtime) are stale, or the interop smoke failed. Most weeks it is a green
-no-op costing no tokens.
+target release (`latest`, or the release `GATEWAY_REF` names), the pinned image
+digests (gateway, supervisor, sandbox runtime) are stale, or the interop smoke
+failed. Most weeks it is a green no-op costing no tokens.
 
 **What the smokes test.** `interop-smoke` and branch-checks' `managed-smoke`
 install the chart with its own pinned gateway, supervisor and sandbox runtime
@@ -26,11 +26,18 @@ chart ships. `scripts/check-image-digests.sh` (branch-checks'
 `upstream-parity` job) fails unless those three digests are the ones upstream
 published for `upstream.version`. So the weekly sync's own smoke re-tests the
 set `main` ships, and the pins a sync proposes are tested by its PR's
-`branch-checks` smokes. `GATEWAY_REF` (`.github/upstream-compat.env`) only
-decides which upstream release the sync resolves: the digests the detect job
-compares the pins against, and the ones the sync moves them to. When the
-sync's target tag and `GATEWAY_REF`'s differ, `check-image-digests.sh` fails
-on its PR and prints the digests it expects.
+`branch-checks` smokes (the sync job dispatches them, see below).
+
+**One release.** The driver links upstream's crates, so the crates
+(`Cargo.toml`), the chart's `upstream.version` and its three image digests are
+always one upstream release, and a sync moves all of them to one target tag.
+`GATEWAY_REF` (`.github/upstream-compat.env`) decides which release that is:
+"which upstream release the next sync moves the whole pin set (crates + images)
+to". `latest` means the newest upstream release; a `vX.Y.Z` pins it. It is
+never older than the tag `Cargo.toml` already pins, so a sync does not move
+backwards. The detect job prints it as `VENDOR_TARGET_TAG`, compares the
+crates and the chart's digests against it, and hands it to the sync job, which
+resolves the digests for that same tag.
 
 ## Situations
 
@@ -41,8 +48,14 @@ added, since that is the part Claude wrote from scratch. If it changed
 `scripts/upstream-main-rs.sha256`, check that `crates/openshell-driver-kyma/src/main.rs`
 mirrors the upstream `main()` diff that `scripts/check-upstream-args.sh`
 prints: the hash records that review. The PR was opened with `GITHUB_TOKEN`,
-so `branch-checks` does not run on it by itself; close and reopen it so the
-smokes install the pins it proposes. Merge once they pass.
+so `branch-checks` does not run on it by itself: the sync job dispatches it on
+the sync branch (`gh workflow run branch-checks.yml --ref <branch>`, which
+needs `actions: write` and is why `branch-checks.yml` has `workflow_dispatch`),
+and the PR body links its runs
+(`https://github.com/st-gr/openshell-driver-kyma/actions/workflows/branch-checks.yml`,
+filtered to the branch). They report on the PR and include both smokes, which
+install the pins it proposes. If the PR body says the dispatch failed, run the
+command above yourself. Merge once they pass.
 
 Then **roll out to the cluster manually.** CI holds no cluster credentials, so
 this step is never automated:
@@ -74,7 +87,9 @@ openshell sandbox exec --name <sandbox> -- claude -p --model claude-opus-4-7 "Re
 
 The PR body's "Local gate" row tells you the gate failed (it only ever renders
 `passed` or `FAILED — see the 'Run the full gate' step`; it cannot tell you
-*why*). To find out whether Claude hit `--max-turns` mid-task or finished but
+*why*). The gate is `cargo fmt --check`, clippy with `-D warnings`,
+`cargo test --workspace`, `scripts/check-image-digests.sh` and
+`scripts/check-chart-render.sh`, in that order; the first red one stops it. To find out whether Claude hit `--max-turns` mid-task or finished but
 left the gate red, read the "Let Claude perform the sync" step's log in the
 run — a turn-cap cutoff ends abruptly mid-transcript, a completed-but-failing
 attempt runs to the end of the prompt and then the separate "Run the full
@@ -92,8 +107,10 @@ controller, a CLI asset) or `main` broke. Read the log, fix forward.
 The pins the sync proposes do not work with the driver. Decide:
 
 - fix forward on the sync branch (usually a driver change), or
-- pin `GATEWAY_REF` to the last good version, so the next sync proposes that
-  instead, and close the PR.
+- pin `GATEWAY_REF` to the last good release, so the next sync moves the whole
+  pin set (crates, `upstream.version` and all three image digests) to that
+  release instead, and close the PR. Pinned to the release `main` already
+  ships, the next sync moves nothing.
 
 **What a real incompatibility looks like** (exercised 2026-08-05 with a
 deliberately broken driver, not guessed):
@@ -131,16 +148,39 @@ Two traps this exposed:
 
 Unrelated PRs no longer turn red when upstream ships: their smokes install
 the chart's pins. A broken release shows up on the sync PR that proposes it.
-Pin, and record why:
+Pinning is the remedy: it holds the release the next sync moves the whole pin
+set (crates and images) to. Pin, and record why:
 
 ```bash
 # .github/upstream-compat.env
 GATEWAY_REF=v0.0.NN   # last known good
+PIN_REASON=<what upstream broke>
+PIN_REVIEW_AFTER=<YYYY-MM-DD>
 ```
 
 Commit with a message saying what upstream broke. **Revert as soon as upstream
 is fixed** — leaving the pin in place silently reintroduces the two-month
 drift this automation exists to prevent.
+
+### `check-image-digests.sh` is red on a PR that touched no pins
+
+`scripts/check-image-digests.sh` (branch-checks' `upstream-parity` job) compares
+the chart's three digests with what `ghcr.io` serves today for the tag of
+`upstream.version`. It exits **1** with `MISMATCH` lines, or **2** when it could
+not resolve a digest at all.
+
+- **Exit 2, "could not resolve ... to a digest"**: `ghcr.io` (or the network)
+  was unavailable. Nothing in the PR is wrong; re-run the job.
+- **Exit 1, `MISMATCH`, on a PR that did not change the pins or
+  `upstream.version`**: upstream re-pushed that release's tag, so the tag now
+  points at different bytes than the chart pinned. Every open PR goes red at
+  once. Decide whether the new image is acceptable (check upstream's release
+  and the tag's provenance; do not re-pin blind: a re-pushed tag is exactly how
+  an unreviewed supervisor binary reached sandboxes before). If it is, re-pin
+  the three digests to the ones the script prints, in a small PR of their own,
+  and let its smokes pass; the weekly detect job would also flag it as "pinned
+  image digests stale" and the next sync would propose it. If it is not, raise
+  it upstream; the check stays red until the pins and the tag agree, on purpose.
 
 ### Job fails with an authentication error
 
@@ -205,7 +245,8 @@ nothing about the sync and made this failure harder to read.
 Expected, not a bug. The sync job's smoke runs before the sync and installs
 the pins on `main`; the PR body says so (upstream `<tag>` in its "Interop
 smoke" row is the release those pins belong to). The pins the PR proposes are
-tested when you close and reopen it and `branch-checks` runs.
+tested by the `branch-checks` run the sync job dispatches on its branch, which
+the PR body links; a PR opened with `GITHUB_TOKEN` triggers no checks by itself.
 
 ### Job reports an infrastructure flake
 
@@ -390,7 +431,10 @@ them afterwards. Do not flip the mode on a cluster with live sandboxes.
   but nothing structurally stops the `Bash` tool from running `git commit` or
   `git push` itself: `actions/checkout` leaves credentials for `GITHUB_TOKEN`
   configured in git, and the job's own token has write scope. This is a
-  prompt-level constraint, not a permissions-level one.
+  prompt-level constraint, not a permissions-level one. The job also holds
+  `actions: write` (to dispatch `branch-checks` on the sync branch), which the
+  `Bash` tool could equally use to dispatch workflows; the same reasoning
+  applies.
 
   That the workflow's own steps only ever commit and push to
   `upstream-sync/<tag>-<run-id>` is a property of the code as written, **not

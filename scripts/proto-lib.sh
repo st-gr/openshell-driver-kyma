@@ -61,6 +61,32 @@ pinned_upstream_tag() {
 		"${root}/Cargo.toml" | head -1 | grep .
 }
 
+# The ONE upstream release a sync moves everything to: the crates (Cargo.toml),
+# the chart's upstream.version and its three image digests are one upstream
+# release, because the driver links that release's crates and check-image-digests.sh
+# holds the images to upstream.version. It is what GATEWAY_REF in
+# .github/upstream-compat.env names -- the newest upstream release for `latest`,
+# else the pinned vX.Y.Z -- but never older than $1, the tag Cargo.toml pins:
+# a sync must not move the pin backwards. $2 is the newest release when the
+# caller already has it (saves a second ls-remote); it is read only when
+# GATEWAY_REF is `latest`.
+upstream_target_tag() {
+	local pinned=$1 latest=${2:-} knob ref want
+	knob="$(git rev-parse --show-toplevel)/.github/upstream-compat.env"
+	[[ -f $knob ]] || die "$knob not found"
+	ref=$(sed -n 's/^GATEWAY_REF=//p' "$knob" | tail -1 | tr -d '[:space:]')
+	[[ -n $ref ]] || die "GATEWAY_REF is not set in $knob"
+	if [[ $ref == latest ]]; then
+		[[ -n $latest ]] || latest=$(latest_upstream_tag) || true
+		[[ -n $latest ]] || die "could not reach upstream to resolve 'latest'"
+		want=$latest
+	else
+		[[ $ref =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "GATEWAY_REF in $knob must be 'latest' or a vX.Y.Z tag, got '$ref'"
+		want=$ref
+	fi
+	printf '%s\n%s\n' "$pinned" "$want" | sort -V | tail -1
+}
+
 # The upstream release the chart ships: `upstream.version` in the chart's
 # values.yaml (or in the values file given as $1), which check-chart-render.sh
 # holds equal to the Cargo.toml pin. The chart pins upstream's gateway,

@@ -3,6 +3,10 @@ on:
   pull_request:
   push:
     branches: [main]
+  # upstream-sync dispatches this on the branch it pushes: a PR opened with
+  # GITHUB_TOKEN triggers no pull_request run, and the smokes must install the
+  # pins the PR proposes.
+  workflow_dispatch:
 
 jobs:
   # Guards upstream-sync.yml's trigger surface. That workflow holds
