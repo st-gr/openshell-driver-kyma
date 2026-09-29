@@ -50,6 +50,7 @@ mock! {
         async fn validate_create(&self, sb: &DriverSandbox) -> Result<(), DriverError>;
         async fn has_gpu_capacity(&self, count: u32) -> Result<bool, DriverError>;
         async fn start_sandbox(&self, sandbox_id: &str) -> Result<(), DriverError>;
+        async fn runtime_identity(&self, sandbox_id: &str) -> Result<String, DriverError>;
         async fn stop_sandbox(&self, sandbox_id: &str) -> Result<(), DriverError>;
         async fn apply_apirule(
             &self,
@@ -243,6 +244,8 @@ async fn grpc_authenticate_sandbox_is_unimplemented() {
 async fn grpc_create_then_get_round_trips() {
     let mut p = MockProvisioner::new();
     p.expect_create().returning(|_| Ok(()));
+    p.expect_runtime_identity()
+        .returning(|_| Ok("kyma://openshell/cr-uid".to_string()));
     p.expect_get().returning(|name| {
         Ok(DriverSandbox {
             id: "sb-id-1".into(),
@@ -350,6 +353,8 @@ async fn grpc_stop_and_start_are_implemented() {
     let mut p = MockProvisioner::new();
     p.expect_stop_sandbox().times(1).returning(|_| Ok(()));
     p.expect_start_sandbox().times(1).returning(|_| Ok(()));
+    p.expect_runtime_identity()
+        .returning(|_| Ok("kyma://openshell/cr-uid".to_string()));
 
     let (_dir, socket) = temp_socket();
     let (mut client, shutdown, handle) =

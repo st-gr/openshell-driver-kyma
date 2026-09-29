@@ -48,6 +48,11 @@ pub trait SandboxProvisioner: Send + Sync + 'static {
 
     /// Start a stopped sandbox. Keyed by sandbox **id**, like `get`/`delete`.
     async fn start_sandbox(&self, sandbox_id: &str) -> Result<(), DriverError>;
+    /// Stable runtime identity of a sandbox's compute resource.
+    ///
+    /// Returned from `CreateSandbox` and `StartSandbox` and compared by the
+    /// gateway on every bootstrap. `NotFound` if the Sandbox CR is gone.
+    async fn runtime_identity(&self, sandbox_id: &str) -> Result<String, DriverError>;
     /// Stop a running sandbox and wait until its pod is actually gone.
     /// Returning before termination would let the gateway believe a sandbox
     /// is stopped while its pod still runs.

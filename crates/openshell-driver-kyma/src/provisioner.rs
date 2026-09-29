@@ -1722,6 +1722,19 @@ impl SandboxProvisioner for KymaProvisioner {
         result
     }
 
+    async fn runtime_identity(&self, sandbox_id: &str) -> Result<String, DriverError> {
+        let cr = self.find_by_sandbox_id(sandbox_id).await?;
+        let namespace = cr.metadata.namespace.as_deref().ok_or_else(|| {
+            DriverError::FailedPrecondition(format!(
+                "sandbox {sandbox_id} resource has no namespace"
+            ))
+        })?;
+        let uid = cr.metadata.uid.as_deref().ok_or_else(|| {
+            DriverError::FailedPrecondition(format!("sandbox {sandbox_id} resource has no UID"))
+        })?;
+        Ok(crate::sandbox_auth::runtime_identity(namespace, uid))
+    }
+
     async fn get(&self, sandbox_id: &str) -> Result<DriverSandbox, DriverError> {
         let obj = self.find_by_sandbox_id(sandbox_id).await?;
         object_to_driver_sandbox(&obj).map_err(DriverError::InvalidArgument)

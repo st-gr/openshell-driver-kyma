@@ -291,14 +291,15 @@ impl ComputeDriver for Driver {
                     }
                 }
 
-                // `runtime_identity` is "required when the driver advertises
-                // sandbox authentication support" (see `get_capabilities`);
-                // this driver never sets `supports_sandbox_authentication`,
-                // so an empty string is the correct value here, not a
-                // placeholder for missing behavior.
-                Ok(Response::new(CreateSandboxResponse {
-                    runtime_identity: String::new(),
-                }))
+                // Required whenever the driver advertises
+                // `supports_sandbox_authentication`. An empty value makes the
+                // gateway compensate the create and delete the sandbox.
+                let runtime_identity = self
+                    .provisioner
+                    .runtime_identity(&id)
+                    .await
+                    .map_err(Status::from)?;
+                Ok(Response::new(CreateSandboxResponse { runtime_identity }))
             }
             Err(e) => {
                 self.metrics.sandbox_failed(&name, "create_failed");
@@ -358,12 +359,12 @@ impl ComputeDriver for Driver {
             .start_sandbox(&id)
             .await
             .map_err(Status::from)?;
-        // Same rationale as `CreateSandboxResponse::runtime_identity` above:
-        // this driver never advertises sandbox authentication support, so
-        // it never has a runtime identity to report here.
-        Ok(Response::new(StartSandboxResponse {
-            runtime_identity: String::new(),
-        }))
+        let runtime_identity = self
+            .provisioner
+            .runtime_identity(&id)
+            .await
+            .map_err(Status::from)?;
+        Ok(Response::new(StartSandboxResponse { runtime_identity }))
     }
 
     async fn delete_sandbox(
@@ -713,6 +714,8 @@ mod tests {
     async fn create_calls_provisioner_and_records_metrics_on_success() {
         let mut p = MockSandboxProvisioner::new();
         p.expect_create().returning(|_| Ok(()));
+        p.expect_runtime_identity()
+            .returning(|_| Ok("kyma://openshell/cr-uid".to_string()));
         let mut m = MockDriverMetrics::new();
         m.expect_sandbox_created()
             .with(eq("sb-1"), eq(false), always())
@@ -724,6 +727,51 @@ mod tests {
         }))
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn create_returns_the_runtime_identity() {
+        let mut p = MockSandboxProvisioner::new();
+        p.expect_create().returning(|_| Ok(()));
+        p.expect_runtime_identity()
+            .returning(|_| Ok("kyma://openshell/cr-uid".to_string()));
+        let mut m = MockDriverMetrics::new();
+        m.expect_sandbox_created().return_const(());
+        let d = make_driver_with_mocks(Config::default(), p, m);
+
+        let resp = d
+            .create_sandbox(Request::new(CreateSandboxRequest {
+                sandbox: Some(valid_request_sandbox()),
+            }))
+            .await
+            .expect("create should succeed");
+
+        assert_eq!(
+            resp.into_inner().runtime_identity,
+            "kyma://openshell/cr-uid"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_returns_the_runtime_identity() {
+        let mut p = MockSandboxProvisioner::new();
+        p.expect_start_sandbox().returning(|_| Ok(()));
+        p.expect_runtime_identity()
+            .returning(|_| Ok("kyma://openshell/cr-uid".to_string()));
+        let d = make_driver_with_mocks(Config::default(), p, MockDriverMetrics::new());
+
+        let resp = d
+            .start_sandbox(Request::new(StartSandboxRequest {
+                sandbox_id: "sb-1".into(),
+                ..Default::default()
+            }))
+            .await
+            .expect("start should succeed");
+
+        assert_eq!(
+            resp.into_inner().runtime_identity,
+            "kyma://openshell/cr-uid"
+        );
     }
 
     #[tokio::test]
