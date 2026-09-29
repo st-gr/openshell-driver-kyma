@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! The production [`KymaHooks`]: request enrichment, APIRule exposure, and Managed-mode namespace labelling.
+//!
+//! Namespace labelling runs on `EnsureWorkspace` and also before
+//! `CreateSandbox`: upstream's gateway calls `EnsureWorkspace` only in
+//! provider-credential flows, while upstream's driver creates the Managed
+//! namespace inside `CreateSandbox` itself.
 
 use std::time::Duration;
 
@@ -21,7 +26,8 @@ pub struct KymaHookSet {
     /// `None` unless `--kyma-enable-apirule` is set.
     exposure: Option<ExposureReconciler>,
     /// `None` unless the driver creates namespaces (Managed mode) and a Pod
-    /// Security level is configured.
+    /// Security level is configured. Applied on `EnsureWorkspace` and, via
+    /// `prepares_workspace_before_create`, before every `CreateSandbox`.
     namespaces: Option<NamespaceLabeler>,
 }
 
@@ -71,6 +77,12 @@ impl KymaHooks for KymaHookSet {
             Some(labeler) => labeler.label(workspace).await,
             None => Ok(()),
         }
+    }
+
+    /// Upstream creates the Managed namespace inside `CreateSandbox`, so the
+    /// label must be applied there too, before the first pod is admitted.
+    fn prepares_workspace_before_create(&self) -> bool {
+        self.namespaces.is_some()
     }
 }
 
@@ -211,5 +223,15 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(status.code(), tonic::Code::Unavailable);
+    }
+
+    #[tokio::test]
+    async fn create_prepares_the_workspace_only_when_a_labeler_is_configured() {
+        let (client, _) = mock_client(|_| (200, "{}".to_string()));
+        let with = KymaHookSet::new(EnrichConfig::default(), None, Some(labeler(client)));
+        let without = KymaHookSet::new(EnrichConfig::default(), None, None);
+
+        assert!(KymaHooks::prepares_workspace_before_create(&with));
+        assert!(!KymaHooks::prepares_workspace_before_create(&without));
     }
 }

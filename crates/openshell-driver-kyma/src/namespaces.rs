@@ -6,6 +6,14 @@
 //! release namespace, and Operator-mode namespaces belong to the operator, so
 //! neither is touched. The namespace name comes from upstream's own
 //! `namespace_for_workspace`, never re-derived here.
+//!
+//! The label is applied both after `EnsureWorkspace` and before
+//! `CreateSandbox` (see `KymaComputeDriver::create_sandbox`). Upstream's
+//! gateway calls `EnsureWorkspace` only in provider-credential flows; its
+//! create path never does, because upstream's driver creates the Managed
+//! namespace inside `CreateSandbox` itself. Labelling only on `EnsureWorkspace`
+//! would leave a fresh workspace's first pods admitted under the cluster
+//! default.
 
 use std::time::Duration;
 
@@ -107,6 +115,12 @@ mod tests {
         .is_none());
         assert!(NamespaceLabeler::new(
             client.clone(),
+            config(WorkspaceMode::Operator),
+            "baseline".into()
+        )
+        .is_none());
+        assert!(NamespaceLabeler::new(
+            client.clone(),
             config(WorkspaceMode::Managed),
             String::new()
         )
@@ -139,7 +153,7 @@ mod tests {
         let body: serde_json::Value = serde_json::from_str(&recorded[0].body).expect("json body");
         assert_eq!(
             body,
-            json!({"metadata": {"labels": {PSA_ENFORCE_LABEL: "baseline"}}})
+            json!({"metadata": {"labels": {"pod-security.kubernetes.io/enforce": "baseline"}}})
         );
     }
 

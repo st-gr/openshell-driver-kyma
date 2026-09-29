@@ -3,10 +3,11 @@
 //! The Kyma compute driver: upstream's `ComputeDriverService` behind three
 //! Kyma hooks.
 //!
-//! Every RPC is forwarded verbatim. Only `CreateSandbox` (enrich before,
-//! expose after) and `EnsureWorkspace` (label after) add behaviour, so
-//! capabilities, admission, sandbox authentication and runtime identity are
-//! upstream's own — that is what makes this driver behave like upstream's.
+//! Every RPC is forwarded verbatim. Only `CreateSandbox` (enrich and prepare
+//! the workspace before, expose after) and `EnsureWorkspace` (label after) add
+//! behaviour, so capabilities, admission, sandbox authentication and runtime
+//! identity are upstream's own — that is what makes this driver behave like
+//! upstream's.
 
 use std::sync::Arc;
 
@@ -31,9 +32,21 @@ pub trait KymaHooks: Send + Sync + 'static {
     /// fail the create; implementations report their own failures.
     async fn after_create(&self, sandbox: DriverSandbox);
 
-    /// Runs after upstream ensured a workspace. An error fails the RPC so the
-    /// gateway retries.
+    /// Runs after upstream ensured a workspace, on `EnsureWorkspace` and, when
+    /// `prepares_workspace_before_create`, on `CreateSandbox`. An error fails
+    /// that RPC so the gateway retries.
     async fn after_ensure_workspace(&self, workspace: &str) -> Result<(), Status>;
+
+    /// Whether `CreateSandbox` must ensure (and run `after_ensure_workspace`
+    /// for) the sandbox's workspace before upstream creates anything.
+    ///
+    /// Upstream's gateway calls `EnsureWorkspace` only in provider-credential
+    /// flows; its create path never does. Upstream's driver creates a Managed
+    /// namespace inside `CreateSandbox` itself, so a hook that must act on the
+    /// namespace before the first pod exists cannot rely on `EnsureWorkspace`.
+    fn prepares_workspace_before_create(&self) -> bool {
+        false
+    }
 }
 
 /// Hooks that do nothing: the driver behaves exactly like upstream's.
@@ -105,6 +118,22 @@ impl<S: ComputeDriver> ComputeDriver for KymaComputeDriver<S> {
     ) -> Result<Response<CreateSandboxResponse>, Status> {
         if let Some(sandbox) = request.get_mut().sandbox.as_mut() {
             self.hooks.enrich(sandbox);
+        }
+        if self.hooks.prepares_workspace_before_create() {
+            // Without a sandbox there is no workspace: forward unchanged and let
+            // upstream reject the request.
+            if let Some(sandbox) = request.get_ref().sandbox.as_ref() {
+                // Upstream's own idempotent path, so the namespace exists (or is
+                // ownership-checked) and is prepared before any pod is admitted.
+                // A failure here must not reach upstream's create.
+                let workspace = sandbox.workspace.clone();
+                self.inner
+                    .ensure_workspace(Request::new(EnsureWorkspaceRequest {
+                        workspace: workspace.clone(),
+                    }))
+                    .await?;
+                self.hooks.after_ensure_workspace(&workspace).await?;
+            }
         }
         let created = request.get_ref().sandbox.clone();
         let response = self.inner.create_sandbox(request).await?;
@@ -321,11 +350,16 @@ mod tests {
 
     /// Hooks that label the sandbox on enrich, report after_create through a
     /// channel, record each workspace after_ensure_workspace receives, and
-    /// optionally fail after_ensure_workspace.
+    /// optionally fail after_ensure_workspace. `preparing` hooks also ask for
+    /// the workspace to be prepared before create and log
+    /// `hook_after_ensure_workspace` into the fake inner's call log, so tests
+    /// can assert the order across the inner service and the hook.
     struct RecordingHooks {
         created: mpsc::UnboundedSender<String>,
         ensured: Mutex<Vec<String>>,
         fail_ensure: bool,
+        prepares: bool,
+        call_log: Option<Arc<FakeState>>,
     }
 
     impl RecordingHooks {
@@ -335,8 +369,23 @@ mod tests {
                 created,
                 ensured: Mutex::new(Vec::new()),
                 fail_ensure,
+                prepares: false,
+                call_log: None,
             };
             (Arc::new(hooks), rx)
+        }
+
+        /// Hooks that prepare the workspace before create, logging into `state`.
+        fn preparing(state: &Arc<FakeState>, fail_ensure: bool) -> Arc<Self> {
+            // after_create's receiver is not needed: a closed channel is ignored.
+            let (created, _rx) = mpsc::unbounded_channel();
+            Arc::new(Self {
+                created,
+                ensured: Mutex::new(Vec::new()),
+                fail_ensure,
+                prepares: true,
+                call_log: Some(Arc::clone(state)),
+            })
         }
     }
 
@@ -356,10 +405,20 @@ mod tests {
         }
         async fn after_ensure_workspace(&self, workspace: &str) -> Result<(), Status> {
             self.ensured.lock().unwrap().push(workspace.to_string());
+            if let Some(state) = &self.call_log {
+                state
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .push("hook_after_ensure_workspace");
+            }
             if self.fail_ensure {
                 return Err(Status::unavailable("could not label namespace"));
             }
             Ok(())
+        }
+        fn prepares_workspace_before_create(&self) -> bool {
+            self.prepares
         }
     }
 
@@ -374,6 +433,15 @@ mod tests {
     fn create_request(id: &str) -> Request<CreateSandboxRequest> {
         Request::new(CreateSandboxRequest {
             sandbox: Some(sandbox(id)),
+        })
+    }
+
+    fn create_request_in(id: &str, workspace: &str) -> Request<CreateSandboxRequest> {
+        Request::new(CreateSandboxRequest {
+            sandbox: Some(DriverSandbox {
+                workspace: workspace.to_string(),
+                ..sandbox(id)
+            }),
         })
     }
 
@@ -600,5 +668,95 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(*hooks_probe.ensured.lock().unwrap(), vec!["team-a"]);
+    }
+
+    #[tokio::test]
+    async fn create_prepares_the_workspace_before_forwarding() {
+        let (inner, state) = FakeInner::new(FakeState::default());
+        let hooks = RecordingHooks::preparing(&state, false);
+        let hooks_probe = Arc::clone(&hooks);
+        let driver = KymaComputeDriver::new(inner, hooks);
+
+        driver
+            .create_sandbox(create_request_in("sb-1", "team-a"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            *state.calls.lock().unwrap(),
+            vec![
+                "ensure_workspace",
+                "hook_after_ensure_workspace",
+                "create_sandbox"
+            ]
+        );
+        assert_eq!(*hooks_probe.ensured.lock().unwrap(), vec!["team-a"]);
+    }
+
+    #[tokio::test]
+    async fn create_is_not_forwarded_when_the_workspace_hook_fails() {
+        let (inner, state) = FakeInner::new(FakeState::default());
+        let driver = KymaComputeDriver::new(inner, RecordingHooks::preparing(&state, true));
+
+        let err = driver
+            .create_sandbox(create_request_in("sb-1", "team-a"))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::Unavailable);
+        assert_eq!(
+            *state.calls.lock().unwrap(),
+            vec!["ensure_workspace", "hook_after_ensure_workspace"],
+            "an unlabelled namespace must not get a pod"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_is_not_forwarded_when_upstream_ensure_fails() {
+        let (inner, state) = FakeInner::new(FakeState {
+            fail_ensure: true,
+            ..Default::default()
+        });
+        let hooks = RecordingHooks::preparing(&state, false);
+        let hooks_probe = Arc::clone(&hooks);
+        let driver = KymaComputeDriver::new(inner, hooks);
+
+        let err = driver
+            .create_sandbox(create_request_in("sb-1", "team-a"))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::Internal);
+        assert_eq!(*state.calls.lock().unwrap(), vec!["ensure_workspace"]);
+        assert!(hooks_probe.ensured.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_makes_no_ensure_call_unless_the_hooks_ask_for_one() {
+        let (inner, state) = FakeInner::new(FakeState::default());
+        let (hooks, _rx) = RecordingHooks::new(false);
+        let hooks_probe = Arc::clone(&hooks);
+        let driver = KymaComputeDriver::new(inner, hooks);
+
+        driver
+            .create_sandbox(create_request_in("sb-1", "team-a"))
+            .await
+            .unwrap();
+
+        assert_eq!(*state.calls.lock().unwrap(), vec!["create_sandbox"]);
+        assert!(hooks_probe.ensured.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_without_a_sandbox_is_forwarded_unchanged() {
+        let (inner, state) = FakeInner::new(FakeState::default());
+        let driver = KymaComputeDriver::new(inner, RecordingHooks::preparing(&state, false));
+
+        driver
+            .create_sandbox(Request::new(CreateSandboxRequest { sandbox: None }))
+            .await
+            .unwrap();
+
+        assert_eq!(*state.calls.lock().unwrap(), vec!["create_sandbox"]);
     }
 }
