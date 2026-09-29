@@ -5,6 +5,8 @@
 # at /workspace/target so cargo's incremental cache survives between runs.
 # Linux/macOS hosts work directly; Windows hosts must use Git Bash or WSL2.
 
+# bash, not /bin/sh: Debian/Ubuntu's /bin/sh is dash, which rejects -o pipefail.
+SHELL := /bin/bash
 .SHELLFLAGS := -eu -o pipefail -c
 
 IMAGE_NAME ?= openshell-driver-kyma
