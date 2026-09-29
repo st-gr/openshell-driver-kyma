@@ -11,6 +11,8 @@ use http_body_util::BodyExt;
 pub struct Recorded {
     /// `"<METHOD> <path>"`, e.g. `"PATCH /api/v1/namespaces/ns/services/x"`.
     pub line: String,
+    /// The raw (percent-encoded) query string, or empty.
+    pub query: String,
     pub body: String,
 }
 
@@ -26,6 +28,7 @@ where
         let respond = Arc::clone(&respond);
         async move {
             let line = format!("{} {}", request.method(), request.uri().path());
+            let query = request.uri().query().unwrap_or_default().to_string();
             let bytes = request
                 .into_body()
                 .collect()
@@ -34,6 +37,7 @@ where
                 .unwrap_or_default();
             log.lock().unwrap().push(Recorded {
                 line: line.clone(),
+                query,
                 body: String::from_utf8_lossy(&bytes).into_owned(),
             });
             let (status, body) = respond(&line);
@@ -46,4 +50,13 @@ where
         }
     });
     (kube::Client::new(service, "default"), seen)
+}
+
+/// A client whose API server never answers, for timeout tests.
+pub fn hanging_client() -> kube::Client {
+    let service = tower::service_fn(|_request: http::Request<kube::client::Body>| async {
+        std::future::pending::<Result<http::Response<kube::client::Body>, std::convert::Infallible>>()
+            .await
+    });
+    kube::Client::new(service, "default")
 }

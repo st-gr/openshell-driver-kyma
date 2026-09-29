@@ -3,12 +3,18 @@
 //! The production [`KymaHooks`]: request enrichment and APIRule exposure now;
 //! namespace labelling joins in a later task.
 
+use std::time::Duration;
+
 use openshell_core::proto::compute::v1::DriverSandbox;
 use tonic::Status;
 
 use crate::enrich::{enrich, EnrichConfig};
 use crate::exposure::ExposureReconciler;
 use crate::service::KymaHooks;
+
+/// Upstream's `KUBE_API_TIMEOUT` (`driver.rs`). `after_create` runs detached,
+/// so a hung API call must end here rather than leak the task.
+const EXPOSURE_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct KymaHookSet {
     enrich: EnrichConfig,
@@ -20,6 +26,23 @@ impl KymaHookSet {
     pub fn new(enrich: EnrichConfig, exposure: Option<ExposureReconciler>) -> Self {
         Self { enrich, exposure }
     }
+
+    /// Exposes the sandbox, if enabled, giving up after `limit`. Failures are
+    /// logged, never returned: the sandbox itself was created.
+    async fn expose_within(&self, sandbox: &DriverSandbox, limit: Duration) {
+        let Some(exposure) = &self.exposure else {
+            return;
+        };
+        match tokio::time::timeout(limit, exposure.reconcile(sandbox)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(sandbox_id = %sandbox.id, %error, "sandbox created but not exposed");
+            }
+            Err(_elapsed) => {
+                tracing::warn!(sandbox_id = %sandbox.id, timeout = ?limit, "sandbox created but exposure timed out");
+            }
+        }
+    }
 }
 
 #[tonic::async_trait]
@@ -29,12 +52,7 @@ impl KymaHooks for KymaHookSet {
     }
 
     async fn after_create(&self, sandbox: DriverSandbox) {
-        let Some(exposure) = &self.exposure else {
-            return;
-        };
-        if let Err(error) = exposure.reconcile(&sandbox.id).await {
-            tracing::warn!(sandbox_id = %sandbox.id, %error, "sandbox created but not exposed");
-        }
+        self.expose_within(&sandbox, EXPOSURE_TIMEOUT).await;
     }
 
     async fn after_ensure_workspace(&self, _workspace: &str) -> Result<(), Status> {
@@ -47,7 +65,8 @@ mod tests {
     use super::*;
     use crate::enrich::{ISTIO_INJECT_LABEL, KAGENTI_TYPE_LABEL, KAGENTI_TYPE_VALUE};
     use crate::exposure::ExposureConfig;
-    use crate::test_support::mock_client;
+    use crate::test_support::{hanging_client, mock_client};
+    use std::time::Duration;
 
     #[test]
     fn enrich_hook_applies_the_configured_enrichment() {
@@ -93,5 +112,30 @@ mod tests {
         let recorded = seen.lock().unwrap().clone();
         assert_eq!(recorded.len(), 1, "the failed lookup is not retried");
         assert!(recorded[0].line.starts_with("GET "), "{}", recorded[0].line);
+    }
+
+    // The task is detached: a hung API call must end at the timeout, not leak.
+    #[tokio::test]
+    async fn exposure_gives_up_when_the_api_never_answers() {
+        let exposure = ExposureReconciler::new(
+            hanging_client(),
+            ExposureConfig {
+                cluster_domain: "example.org".to_string(),
+                ingress_namespace: "istio-system".to_string(),
+                search_namespace: Some("sandboxes".to_string()),
+            },
+        );
+        let hooks = KymaHookSet::new(EnrichConfig::default(), Some(exposure));
+        let sandbox = DriverSandbox {
+            id: "sb-1".to_string(),
+            ..Default::default()
+        };
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            hooks.expose_within(&sandbox, Duration::from_millis(50)),
+        )
+        .await
+        .expect("expose_within returns once its limit is reached");
     }
 }

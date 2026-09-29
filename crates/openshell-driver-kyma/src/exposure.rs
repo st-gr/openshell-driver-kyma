@@ -11,8 +11,11 @@
 //! Kubernetes deletes them with it, and labelled as ours so they never look
 //! like upstream's objects.
 
+use k8s_openapi::chrono::{SecondsFormat, Utc};
 use kube::api::{Api, ApiResource, DynamicObject, ListParams, Patch, PatchParams, PostParams};
 use kube::core::GroupVersionKind;
+use openshell_core::driver_utils::{LABEL_MANAGED_BY, LABEL_MANAGED_BY_VALUE, LABEL_SANDBOX_ID};
+use openshell_core::proto::compute::v1::DriverSandbox;
 use serde_json::{json, Value};
 
 pub const MANAGED_BY_LABEL: &str = "app.kubernetes.io/managed-by";
@@ -68,6 +71,10 @@ pub struct ExposureConfig {
 pub enum ExposureError {
     #[error("no Sandbox resource carries {SANDBOX_ID_LABEL}={0}")]
     SandboxNotFound(String),
+    #[error(
+        "{count} Sandbox resources carry {SANDBOX_ID_LABEL}={sandbox_id}; expected exactly one"
+    )]
+    AmbiguousSandbox { sandbox_id: String, count: usize },
     #[error("the Sandbox resource for {0} has no namespace, name or uid")]
     IncompleteSandbox(String),
     #[error("{what}: {source}")]
@@ -84,6 +91,14 @@ pub fn service_name(kube_name: &str) -> String {
 
 pub fn policy_name(kube_name: &str) -> String {
     format!("{kube_name}-expose")
+}
+
+/// The APIRule host's first label: `{workspace}--{name}` in every workspace
+/// mode. That is upstream's Shared-mode resource name (so it equals the CR
+/// name there), but in Managed and Operator mode the CR is named just `{name}`
+/// in a per-workspace namespace, and two workspaces may both have a `dev`.
+pub fn host_label(workspace: &str, name: &str) -> String {
+    format!("{workspace}--{name}")
 }
 
 fn labels(sandbox_id: &str) -> Value {
@@ -142,23 +157,28 @@ pub fn ingress_policy_manifest(
     })
 }
 
-pub fn apirule_manifest(owner: &SandboxOwner, sandbox_id: &str, cluster_domain: &str) -> Value {
+pub fn apirule_manifest(
+    owner: &SandboxOwner,
+    sandbox_id: &str,
+    host_label: &str,
+    cluster_domain: &str,
+) -> Value {
     json!({
         "apiVersion": "gateway.kyma-project.io/v2",
         "kind": "APIRule",
         "metadata": metadata(owner, &owner.name, sandbox_id),
         "spec": {
             "gateway": KYMA_GATEWAY,
-            // Workspace-qualified, so two sandboxes named `dev` in different
-            // workspaces never claim the same host.
-            "hosts": [format!("{}.{cluster_domain}", owner.name)],
+            // `host_label` is workspace-qualified; `owner.name` is not in Managed
+            // and Operator mode, where it would collide across workspaces.
+            "hosts": [format!("{host_label}.{cluster_domain}")],
             "service": {"name": service_name(&owner.name), "port": EXPOSE_PORT},
             "rules": [{"path": "/*", "methods": ["GET", "POST"], "noAuth": true}],
         },
     })
 }
 
-fn failure_event_manifest(owner: &SandboxOwner, message: &str) -> Value {
+fn failure_event_manifest(owner: &SandboxOwner, message: &str, timestamp: &str) -> Value {
     json!({
         "apiVersion": "v1",
         "kind": "Event",
@@ -173,6 +193,9 @@ fn failure_event_manifest(owner: &SandboxOwner, message: &str) -> Value {
         "type": "Warning",
         "reason": "ExposureFailed",
         "message": message,
+        "count": 1,
+        "firstTimestamp": timestamp,
+        "lastTimestamp": timestamp,
         "source": {"component": FIELD_MANAGER},
     })
 }
@@ -196,9 +219,11 @@ impl ExposureReconciler {
     ///
     /// Runs in a detached task after `CreateSandbox`, where a panic would be
     /// lost, so nothing on this path may panic: every failure is an `Err`.
-    pub async fn reconcile(&self, sandbox_id: &str) -> Result<(), ExposureError> {
+    pub async fn reconcile(&self, sandbox: &DriverSandbox) -> Result<(), ExposureError> {
+        let sandbox_id = sandbox.id.as_str();
         let owner = self.find_owner(sandbox_id).await?;
-        if let Err(error) = self.expose(&owner, sandbox_id).await {
+        let host_label = host_label(&sandbox.workspace, &sandbox.name);
+        if let Err(error) = self.expose(&owner, sandbox_id, &host_label).await {
             if let Err(event_error) = self.report_failure(&owner, &error).await {
                 tracing::warn!(sandbox_id, error = %event_error, "could not record the exposure failure as an Event");
             }
@@ -225,11 +250,20 @@ impl ExposureReconciler {
             what: format!("listing Sandbox resources at {SANDBOX_GROUP}/{version}"),
             source,
         })?;
-        let object = list
-            .items
-            .into_iter()
-            .next()
-            .ok_or_else(|| ExposureError::SandboxNotFound(sandbox_id.to_string()))?;
+        // Exactly one CR may carry the id: exposing the wrong one would publish
+        // some other sandbox.
+        let mut items = list.items;
+        let count = items.len();
+        let object = match (count, items.pop()) {
+            (1, Some(object)) => object,
+            (0, _) => return Err(ExposureError::SandboxNotFound(sandbox_id.to_string())),
+            _ => {
+                return Err(ExposureError::AmbiguousSandbox {
+                    sandbox_id: sandbox_id.to_string(),
+                    count,
+                })
+            }
+        };
         match (
             object.metadata.namespace,
             object.metadata.name,
@@ -255,11 +289,18 @@ impl ExposureReconciler {
             Some(namespace) => Api::namespaced_with(self.client.clone(), namespace, &sandboxes),
             None => Api::all_with(self.client.clone(), &sandboxes),
         };
-        api.list(&ListParams::default().labels(&format!("{SANDBOX_ID_LABEL}={sandbox_id}")))
-            .await
+        // Upstream's own lookup pairs the id with its managed-by label.
+        let selector =
+            format!("{LABEL_MANAGED_BY}={LABEL_MANAGED_BY_VALUE},{LABEL_SANDBOX_ID}={sandbox_id}");
+        api.list(&ListParams::default().labels(&selector)).await
     }
 
-    async fn expose(&self, owner: &SandboxOwner, sandbox_id: &str) -> Result<(), ExposureError> {
+    async fn expose(
+        &self,
+        owner: &SandboxOwner,
+        sandbox_id: &str,
+        host_label: &str,
+    ) -> Result<(), ExposureError> {
         self.apply(
             resource("", "v1", "Service", "services"),
             owner,
@@ -285,7 +326,7 @@ impl ExposureReconciler {
             resource("gateway.kyma-project.io", "v2", "APIRule", "apirules"),
             owner,
             &owner.name,
-            apirule_manifest(owner, sandbox_id, &self.config.cluster_domain),
+            apirule_manifest(owner, sandbox_id, host_label, &self.config.cluster_domain),
             "applying the APIRule",
         )
         .await
@@ -324,8 +365,9 @@ impl ExposureReconciler {
             &owner.namespace,
             &resource("", "v1", "Event", "events"),
         );
+        let now = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
         let event: DynamicObject =
-            serde_json::from_value(failure_event_manifest(owner, &error.to_string()))
+            serde_json::from_value(failure_event_manifest(owner, &error.to_string(), &now))
                 .map_err(kube::Error::SerdeError)?;
         api.create(&PostParams::default(), &event).await.map(|_| ())
     }
@@ -334,7 +376,8 @@ impl ExposureReconciler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::mock_client;
+    use crate::test_support::{mock_client, Recorded};
+    use std::sync::{Arc, Mutex};
 
     fn owner() -> SandboxOwner {
         SandboxOwner {
@@ -342,6 +385,17 @@ mod tests {
             name: "ws--sb".to_string(),
             uid: "cr-uid".to_string(),
             api_version: "agents.x-k8s.io/v1beta1".to_string(),
+        }
+    }
+
+    /// What the gateway hands `after_create`: in Shared mode the CR is named
+    /// `{workspace}--{name}`, i.e. `ws--sb` here.
+    fn sandbox(workspace: &str, name: &str) -> DriverSandbox {
+        DriverSandbox {
+            id: "sb-id".to_string(),
+            name: name.to_string(),
+            workspace: workspace.to_string(),
+            ..Default::default()
         }
     }
 
@@ -359,6 +413,14 @@ mod tests {
         NoSandbox,
         /// The cluster serves the Sandbox CRD at `v1alpha1` only.
         OnlyV1Alpha1,
+        /// `OnlyV1Alpha1`, and the APIRule is rejected.
+        OnlyV1Alpha1ApiRuleRejected,
+        /// Neither Sandbox API version is served.
+        NoSandboxApi,
+        /// Two Sandbox CRs carry the sandbox id.
+        TwoSandboxes,
+        /// Managed mode: the CR is named bare (`dev`) in the workspace's own namespace.
+        Managed(&'static str),
     }
 
     fn not_found() -> String {
@@ -370,11 +432,24 @@ mod tests {
         .to_string()
     }
 
+    fn sandbox_cr(api_version: &str, namespace: &str, name: &str, uid: &str) -> Value {
+        json!({
+            "apiVersion": api_version,
+            "kind": "Sandbox",
+            "metadata": {"name": name, "namespace": namespace, "uid": uid}
+        })
+    }
+
     fn respond(scenario: Scenario) -> impl Fn(&str) -> (u16, String) + Send + Sync + 'static {
         move |line: &str| {
             if line.starts_with("GET ") && line.ends_with("/sandboxes") {
-                let only_v1alpha1 = matches!(scenario, Scenario::OnlyV1Alpha1);
-                if only_v1alpha1 && line.contains("/v1beta1/") {
+                let only_v1alpha1 = matches!(
+                    scenario,
+                    Scenario::OnlyV1Alpha1 | Scenario::OnlyV1Alpha1ApiRuleRejected
+                );
+                if matches!(scenario, Scenario::NoSandboxApi)
+                    || (only_v1alpha1 && line.contains("/v1beta1/"))
+                {
                     return (404, not_found());
                 }
                 let api_version = if only_v1alpha1 {
@@ -382,13 +457,19 @@ mod tests {
                 } else {
                     "agents.x-k8s.io/v1beta1"
                 };
+                let cr = |namespace: &str, name: &str, uid: &str| {
+                    sandbox_cr(api_version, namespace, name, uid)
+                };
                 let items = match scenario {
                     Scenario::NoSandbox => json!([]),
-                    _ => json!([{
-                        "apiVersion": api_version,
-                        "kind": "Sandbox",
-                        "metadata": {"name": "ws--sb", "namespace": "sandboxes", "uid": "cr-uid"}
-                    }]),
+                    Scenario::TwoSandboxes => json!([
+                        cr("sandboxes", "ws--sb", "cr-uid"),
+                        cr("sandboxes", "ws--sb-2", "cr-uid-2")
+                    ]),
+                    Scenario::Managed(workspace) => {
+                        json!([cr(workspace, "dev", &format!("uid-{workspace}"))])
+                    }
+                    _ => json!([cr("sandboxes", "ws--sb", "cr-uid")]),
                 };
                 let list = json!({
                     "apiVersion": api_version,
@@ -398,7 +479,11 @@ mod tests {
                 });
                 return (200, list.to_string());
             }
-            if matches!(scenario, Scenario::ApiRuleRejected) && line.contains("/apirules/") {
+            if matches!(
+                scenario,
+                Scenario::ApiRuleRejected | Scenario::OnlyV1Alpha1ApiRuleRejected
+            ) && line.contains("/apirules/")
+            {
                 return (404, not_found());
             }
             (
@@ -409,14 +494,25 @@ mod tests {
         }
     }
 
-    fn lines(
-        seen: &std::sync::Arc<std::sync::Mutex<Vec<crate::test_support::Recorded>>>,
-    ) -> Vec<String> {
+    fn lines(seen: &Arc<Mutex<Vec<Recorded>>>) -> Vec<String> {
         seen.lock()
             .unwrap()
             .iter()
             .map(|r| r.line.clone())
             .collect()
+    }
+
+    /// The query string with the characters `kube` percent-encodes in a label
+    /// selector turned back, so assertions read like the selector.
+    fn decoded(query: &str) -> String {
+        query
+            .replace("%2F", "/")
+            .replace("%3D", "=")
+            .replace("%2C", ",")
+    }
+
+    fn json_body(recorded: &Recorded) -> Value {
+        serde_json::from_str(&recorded.body).expect("a JSON body")
     }
 
     #[test]
@@ -439,7 +535,7 @@ mod tests {
         for manifest in [
             service_manifest(&owner, "sb-id"),
             ingress_policy_manifest(&owner, "sb-id", "istio-system"),
-            apirule_manifest(&owner, "sb-id", "example.org"),
+            apirule_manifest(&owner, "sb-id", "ws--sb", "example.org"),
         ] {
             let labels = &manifest["metadata"]["labels"];
             assert_eq!(labels[MANAGED_BY_LABEL], MANAGED_BY_VALUE);
@@ -486,7 +582,7 @@ mod tests {
 
     #[test]
     fn apirule_host_uses_the_workspace_qualified_name() {
-        let rule = apirule_manifest(&owner(), "sb-id", "example.org");
+        let rule = apirule_manifest(&owner(), "sb-id", "ws--sb", "example.org");
         assert_eq!(rule["apiVersion"], "gateway.kyma-project.io/v2");
         assert_eq!(rule["spec"]["hosts"], json!(["ws--sb.example.org"]));
         assert_eq!(rule["spec"]["service"]["name"], "ws--sb-svc");
@@ -494,11 +590,16 @@ mod tests {
         assert_eq!(rule["spec"]["gateway"], KYMA_GATEWAY);
     }
 
+    #[test]
+    fn host_label_is_workspace_and_name_in_every_mode() {
+        assert_eq!(host_label("a", "dev"), "a--dev");
+    }
+
     #[tokio::test]
     async fn reconcile_applies_service_policy_and_apirule_in_order() {
         let (client, seen) = mock_client(respond(Scenario::Ok));
         ExposureReconciler::new(client, config(Some("sandboxes")))
-            .reconcile("sb-id")
+            .reconcile(&sandbox("ws", "sb"))
             .await
             .expect("exposure succeeds");
         assert_eq!(
@@ -512,19 +613,56 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn lookup_and_apply_carry_the_expected_query_parameters() {
+        let (client, seen) = mock_client(respond(Scenario::Ok));
+        ExposureReconciler::new(client, config(Some("sandboxes")))
+            .reconcile(&sandbox("ws", "sb"))
+            .await
+            .expect("exposure succeeds");
+        let recorded = seen.lock().unwrap().clone();
+        // Upstream's own lookup pairs managed-by with the id; so must ours.
+        assert!(
+            decoded(&recorded[0].query).contains(
+                "labelSelector=openshell.ai/managed-by=openshell,openshell.ai/sandbox-id=sb-id"
+            ),
+            "{}",
+            recorded[0].query
+        );
+        let patches: Vec<_> = recorded
+            .iter()
+            .filter(|r| r.line.starts_with("PATCH "))
+            .collect();
+        assert_eq!(patches.len(), 3);
+        for patch in patches {
+            assert!(
+                patch.query.contains("fieldManager=openshell-driver-kyma"),
+                "{}: {}",
+                patch.line,
+                patch.query
+            );
+            assert!(
+                patch.query.contains("force=true"),
+                "{}: {}",
+                patch.line,
+                patch.query
+            );
+        }
+    }
+
     // Review Focus 4.
     #[tokio::test]
     async fn shared_mode_lookup_is_namespaced() {
         let (client, seen) = mock_client(respond(Scenario::Ok));
         ExposureReconciler::new(client, config(Some("sandboxes")))
-            .reconcile("sb-id")
+            .reconcile(&sandbox("ws", "sb"))
             .await
             .unwrap();
         assert!(lines(&seen)[0].contains("/namespaces/sandboxes/sandboxes"));
 
         let (client, seen) = mock_client(respond(Scenario::Ok));
         ExposureReconciler::new(client, config(None))
-            .reconcile("sb-id")
+            .reconcile(&sandbox("ws", "sb"))
             .await
             .unwrap();
         assert_eq!(
@@ -533,12 +671,42 @@ mod tests {
         );
     }
 
+    // Two workspaces may each have a sandbox `dev`; in Managed mode both CRs
+    // are named `dev` (in their own namespaces), so the host must not be.
+    #[tokio::test]
+    async fn managed_mode_hosts_never_collide_across_workspaces() {
+        let mut hosts = Vec::new();
+        for workspace in ["a", "b"] {
+            let (client, seen) = mock_client(respond(Scenario::Managed(workspace)));
+            ExposureReconciler::new(client, config(None))
+                .reconcile(&sandbox(workspace, "dev"))
+                .await
+                .expect("exposure succeeds");
+            let recorded = seen.lock().unwrap().clone();
+            let rule = recorded
+                .iter()
+                .find(|r| r.line.contains("/apirules/"))
+                .expect("an APIRule was applied");
+            assert_eq!(
+                rule.line,
+                format!(
+                    "PATCH /apis/gateway.kyma-project.io/v2/namespaces/{workspace}/apirules/dev"
+                )
+            );
+            hosts.push(json_body(rule)["spec"]["hosts"][0].clone());
+        }
+        assert_eq!(
+            hosts,
+            [json!("a--dev.example.org"), json!("b--dev.example.org")]
+        );
+    }
+
     // Review Focus 3.
     #[tokio::test]
     async fn apirule_failure_emits_a_warning_event() {
         let (client, seen) = mock_client(respond(Scenario::ApiRuleRejected));
         let err = ExposureReconciler::new(client, config(Some("sandboxes")))
-            .reconcile("sb-id")
+            .reconcile(&sandbox("ws", "sb"))
             .await
             .unwrap_err();
         assert!(err.to_string().contains("APIRule"), "{err}");
@@ -556,15 +724,72 @@ mod tests {
         );
     }
 
+    // `kubectl describe` shows an Event's age from these.
+    #[tokio::test]
+    async fn failure_event_carries_timestamps_and_a_count() {
+        let (client, seen) = mock_client(respond(Scenario::ApiRuleRejected));
+        ExposureReconciler::new(client, config(Some("sandboxes")))
+            .reconcile(&sandbox("ws", "sb"))
+            .await
+            .unwrap_err();
+        let recorded = seen.lock().unwrap().clone();
+        let event = json_body(
+            recorded
+                .iter()
+                .find(|r| r.line.starts_with("POST "))
+                .expect("a Warning Event was recorded"),
+        );
+        let first = event["firstTimestamp"].as_str().expect("firstTimestamp");
+        let last = event["lastTimestamp"].as_str().expect("lastTimestamp");
+        assert_eq!(first, last);
+        // RFC 3339, second precision, UTC: 2026-09-29T07:33:00Z
+        let bytes = first.as_bytes();
+        assert_eq!(bytes.len(), 20, "{first}");
+        assert_eq!(
+            (bytes[4], bytes[7], bytes[10]),
+            (b'-', b'-', b'T'),
+            "{first}"
+        );
+        assert_eq!(
+            (bytes[13], bytes[16], bytes[19]),
+            (b':', b':', b'Z'),
+            "{first}"
+        );
+        assert_eq!(event["count"], 1);
+    }
+
     #[tokio::test]
     async fn missing_sandbox_is_reported_without_an_event() {
         let (client, seen) = mock_client(respond(Scenario::NoSandbox));
         let err = ExposureReconciler::new(client, config(Some("sandboxes")))
-            .reconcile("sb-id")
+            .reconcile(&sandbox("ws", "sb"))
             .await
             .unwrap_err();
         assert!(matches!(err, ExposureError::SandboxNotFound(_)));
         assert!(lines(&seen).iter().all(|line| !line.starts_with("POST ")));
+    }
+
+    #[tokio::test]
+    async fn several_matching_sandboxes_are_reported_not_guessed() {
+        let (client, seen) = mock_client(respond(Scenario::TwoSandboxes));
+        let err = ExposureReconciler::new(client, config(Some("sandboxes")))
+            .reconcile(&sandbox("ws", "sb"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, ExposureError::AmbiguousSandbox { count: 2, .. }),
+            "{err}"
+        );
+        let message = err.to_string();
+        assert!(
+            message.contains("sb-id") && message.contains('2'),
+            "{message}"
+        );
+        assert_eq!(
+            lines(&seen).len(),
+            1,
+            "nothing is applied for an ambiguous sandbox"
+        );
     }
 
     // R26: mirror upstream's Sandbox API version fallback.
@@ -572,7 +797,7 @@ mod tests {
     async fn sandbox_lookup_falls_back_to_v1alpha1_on_404() {
         let (client, seen) = mock_client(respond(Scenario::OnlyV1Alpha1));
         ExposureReconciler::new(client, config(Some("sandboxes")))
-            .reconcile("sb-id")
+            .reconcile(&sandbox("ws", "sb"))
             .await
             .expect("exposure succeeds");
         assert_eq!(
@@ -592,13 +817,49 @@ mod tests {
             .collect();
         assert_eq!(patches.len(), 3);
         for patch in patches {
-            let manifest: Value = serde_json::from_str(&patch.body).expect("a JSON manifest");
             assert_eq!(
-                manifest["metadata"]["ownerReferences"][0]["apiVersion"],
+                json_body(patch)["metadata"]["ownerReferences"][0]["apiVersion"],
                 "agents.x-k8s.io/v1alpha1",
                 "{}",
                 patch.line
             );
         }
+    }
+
+    #[tokio::test]
+    async fn fallback_failure_event_names_the_v1alpha1_sandbox() {
+        let (client, seen) = mock_client(respond(Scenario::OnlyV1Alpha1ApiRuleRejected));
+        ExposureReconciler::new(client, config(Some("sandboxes")))
+            .reconcile(&sandbox("ws", "sb"))
+            .await
+            .unwrap_err();
+        let recorded = seen.lock().unwrap().clone();
+        let event = json_body(
+            recorded
+                .iter()
+                .find(|r| r.line == "POST /api/v1/namespaces/sandboxes/events")
+                .expect("a Warning Event was recorded"),
+        );
+        assert_eq!(
+            event["involvedObject"]["apiVersion"],
+            "agents.x-k8s.io/v1alpha1"
+        );
+    }
+
+    #[tokio::test]
+    async fn both_sandbox_api_versions_missing_fails_without_writes() {
+        let (client, seen) = mock_client(respond(Scenario::NoSandboxApi));
+        let err = ExposureReconciler::new(client, config(Some("sandboxes")))
+            .reconcile(&sandbox("ws", "sb"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ExposureError::Kube { .. }), "{err}");
+        assert_eq!(
+            lines(&seen),
+            vec![
+                "GET /apis/agents.x-k8s.io/v1beta1/namespaces/sandboxes/sandboxes",
+                "GET /apis/agents.x-k8s.io/v1alpha1/namespaces/sandboxes/sandboxes",
+            ]
+        );
     }
 }
