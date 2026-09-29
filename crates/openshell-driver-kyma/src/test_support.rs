@@ -20,11 +20,26 @@ pub fn mock_client<F>(respond: F) -> (kube::Client, Arc<Mutex<Vec<Recorded>>>)
 where
     F: Fn(&str) -> (u16, String) + Send + Sync + 'static,
 {
+    mock_client_hanging_on(|_| false, respond)
+}
+
+/// [`mock_client`], except that a request whose line `hang` matches is recorded
+/// and then never answered, for timeout tests.
+pub fn mock_client_hanging_on<H, F>(
+    hang: H,
+    respond: F,
+) -> (kube::Client, Arc<Mutex<Vec<Recorded>>>)
+where
+    H: Fn(&str) -> bool + Send + Sync + 'static,
+    F: Fn(&str) -> (u16, String) + Send + Sync + 'static,
+{
     let seen = Arc::new(Mutex::new(Vec::new()));
     let log = Arc::clone(&seen);
+    let hang = Arc::new(hang);
     let respond = Arc::new(respond);
     let service = tower::service_fn(move |request: http::Request<kube::client::Body>| {
         let log = Arc::clone(&log);
+        let hang = Arc::clone(&hang);
         let respond = Arc::clone(&respond);
         async move {
             let line = format!("{} {}", request.method(), request.uri().path());
@@ -40,6 +55,9 @@ where
                 query,
                 body: String::from_utf8_lossy(&bytes).into_owned(),
             });
+            if hang(&line) {
+                std::future::pending::<()>().await;
+            }
             let (status, body) = respond(&line);
             Ok::<_, std::convert::Infallible>(
                 http::Response::builder()

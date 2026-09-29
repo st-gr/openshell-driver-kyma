@@ -23,6 +23,7 @@ use openshell_driver_kyma::service::KymaComputeDriver;
 use openshell_driver_kyma::upstream_args::{
     compute_config, parse_managed_ssh_gateway_pod_selector, UpstreamArgs,
 };
+use openshell_driver_kyma::workspaces::UpstreamNamespaces;
 use tracing::{error, info};
 
 // `about`/`long_about = None` keep `--help` without a description line, like
@@ -113,6 +114,7 @@ async fn main() -> Result<()> {
                 cluster_domain: kyma.kyma_cluster_domain.clone(),
                 ingress_namespace: kyma.kyma_ingress_namespace.clone(),
                 search_namespace: (!config.is_multi_namespace()).then(|| config.namespace.clone()),
+                gateway_id: config.gateway_id.clone(),
             },
         )
     });
@@ -124,9 +126,14 @@ async fn main() -> Result<()> {
     let driver = KubernetesComputeDriver::new(config.clone(), shutdown_rx)
         .await
         .into_diagnostic()?;
+    // A clone of upstream's driver for the step its create path runs before
+    // anything else (ensure_namespace), so a create the Kyma layer prepares first
+    // keeps upstream's status codes.
+    let workspace_namespaces = UpstreamNamespaces::new(driver.clone(), config.gateway_id.clone());
     let service = ComputeDriverServer::new(KymaComputeDriver::new(
         ComputeDriverService::new(driver),
         Arc::new(KymaHookSet::new(kyma.enrich_config(), exposure, namespaces)),
+        Arc::new(workspace_namespaces),
     ));
     let shutdown = async move {
         shutdown_signal().await;
@@ -161,4 +168,18 @@ async fn main() -> Result<()> {
     };
     health.abort();
     served
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+    use clap::CommandFactory;
+
+    // Upstream's options and the Kyma layer's, flattened, must form one valid
+    // command: clap's own consistency checks (no duplicate flags, valid
+    // defaults and relations).
+    #[test]
+    fn the_command_line_is_consistent() {
+        Cli::command().debug_assert();
+    }
 }

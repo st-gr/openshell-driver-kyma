@@ -11,10 +11,15 @@
 //! Kubernetes deletes them with it, and labelled as ours so they never look
 //! like upstream's objects.
 
+use std::future::Future;
+use std::time::Duration;
+
 use k8s_openapi::chrono::{SecondsFormat, Utc};
 use kube::api::{Api, ApiResource, DynamicObject, ListParams, Patch, PatchParams, PostParams};
 use kube::core::GroupVersionKind;
-use openshell_core::driver_utils::{LABEL_MANAGED_BY, LABEL_MANAGED_BY_VALUE, LABEL_SANDBOX_ID};
+use openshell_core::driver_utils::{
+    LABEL_GATEWAY_ID, LABEL_MANAGED_BY, LABEL_MANAGED_BY_VALUE, LABEL_SANDBOX_ID,
+};
 use openshell_core::proto::compute::v1::DriverSandbox;
 use serde_json::{json, Value};
 
@@ -34,6 +39,12 @@ const SANDBOX_GROUP: &str = "agents.x-k8s.io";
 /// `v1beta1`, fall back to `v1alpha1` only when the API answers 404.
 const SANDBOX_VERSION_V1BETA1: &str = "v1beta1";
 const SANDBOX_VERSION_V1ALPHA1: &str = "v1alpha1";
+/// Upstream's `KUBE_API_TIMEOUT` (`driver.rs`): the bound on each API call, so
+/// a hung call becomes an error that the Warning Event still reports.
+pub const KUBE_API_TIMEOUT: Duration = Duration::from_secs(30);
+/// The most API calls one reconcile makes: two Sandbox lookups (the `v1beta1`
+/// probe and the `v1alpha1` fallback), three applies and the failure Event.
+pub const MAX_API_CALLS: u64 = 6;
 
 /// The Sandbox CR the exposure objects belong to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +76,10 @@ pub struct ExposureConfig {
     /// `Some(namespace)` in Shared mode, where the driver's RBAC is namespaced;
     /// `None` searches all namespaces (Managed and Operator modes).
     pub search_namespace: Option<String>,
+    /// Upstream's gateway id. When set, the Sandbox lookup also requires its
+    /// `openshell.ai/gateway-id` label, as upstream's `sandbox_lookup_selector_for`
+    /// does, so another gateway's sandbox with the same id is never exposed.
+    pub gateway_id: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -83,6 +98,27 @@ pub enum ExposureError {
         #[source]
         source: kube::Error,
     },
+    #[error("{what} timed out after {limit:?}")]
+    Timeout { what: String, limit: Duration },
+}
+
+/// `call`, bounded by `limit`: an API error is `Kube`, a hang is `Timeout`, both
+/// naming `what`.
+async fn bounded<T>(
+    limit: Duration,
+    what: &str,
+    call: impl Future<Output = Result<T, kube::Error>>,
+) -> Result<T, ExposureError> {
+    match tokio::time::timeout(limit, call).await {
+        Ok(result) => result.map_err(|source| ExposureError::Kube {
+            what: what.into(),
+            source,
+        }),
+        Err(_elapsed) => Err(ExposureError::Timeout {
+            what: what.into(),
+            limit,
+        }),
+    }
 }
 
 pub fn service_name(kube_name: &str) -> String {
@@ -207,15 +243,29 @@ fn resource(group: &str, version: &str, kind: &str, plural: &str) -> ApiResource
 pub struct ExposureReconciler {
     client: kube::Client,
     config: ExposureConfig,
+    /// The bound on each API call: [`KUBE_API_TIMEOUT`], shorter in tests.
+    api_timeout: Duration,
 }
 
 impl ExposureReconciler {
     pub fn new(client: kube::Client, config: ExposureConfig) -> Self {
-        Self { client, config }
+        Self {
+            client,
+            config,
+            api_timeout: KUBE_API_TIMEOUT,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_api_timeout(mut self, limit: Duration) -> Self {
+        self.api_timeout = limit;
+        self
     }
 
     /// Find the sandbox's CR, expose it, and on failure record a Warning Event
     /// on the CR. Never retried here: the sandbox itself is healthy either way.
+    /// Each API call is bounded by [`KUBE_API_TIMEOUT`], so a hung one fails the
+    /// exposure like any other error and, once the CR is known, is reported on it.
     ///
     /// Runs in a detached task after `CreateSandbox`, where a panic would be
     /// lost, so nothing on this path may panic: every failure is an `Err`.
@@ -239,17 +289,17 @@ impl ExposureReconciler {
             .list_sandboxes(SANDBOX_VERSION_V1BETA1, sandbox_id)
             .await
         {
-            Err(kube::Error::Api(response)) if response.code == 404 => (
+            Err(ExposureError::Kube {
+                source: kube::Error::Api(response),
+                ..
+            }) if response.code == 404 => (
                 SANDBOX_VERSION_V1ALPHA1,
                 self.list_sandboxes(SANDBOX_VERSION_V1ALPHA1, sandbox_id)
                     .await,
             ),
             listed => (SANDBOX_VERSION_V1BETA1, listed),
         };
-        let list = listed.map_err(|source| ExposureError::Kube {
-            what: format!("listing Sandbox resources at {SANDBOX_GROUP}/{version}"),
-            source,
-        })?;
+        let list = listed?;
         // Exactly one CR may carry the id: exposing the wrong one would publish
         // some other sandbox.
         let mut items = list.items;
@@ -283,16 +333,19 @@ impl ExposureReconciler {
         &self,
         version: &str,
         sandbox_id: &str,
-    ) -> Result<kube::core::ObjectList<DynamicObject>, kube::Error> {
+    ) -> Result<kube::core::ObjectList<DynamicObject>, ExposureError> {
         let sandboxes = resource(SANDBOX_GROUP, version, "Sandbox", "sandboxes");
         let api: Api<DynamicObject> = match &self.config.search_namespace {
             Some(namespace) => Api::namespaced_with(self.client.clone(), namespace, &sandboxes),
             None => Api::all_with(self.client.clone(), &sandboxes),
         };
-        // Upstream's own lookup pairs the id with its managed-by label.
-        let selector =
-            format!("{LABEL_MANAGED_BY}={LABEL_MANAGED_BY_VALUE},{LABEL_SANDBOX_ID}={sandbox_id}");
-        api.list(&ListParams::default().labels(&selector)).await
+        let selector = lookup_selector(sandbox_id, &self.config.gateway_id);
+        bounded(
+            self.api_timeout,
+            &format!("listing Sandbox resources at {SANDBOX_GROUP}/{version}"),
+            api.list(&ListParams::default().labels(&selector)),
+        )
+        .await
     }
 
     async fn expose(
@@ -342,24 +395,18 @@ impl ExposureReconciler {
     ) -> Result<(), ExposureError> {
         let api: Api<DynamicObject> =
             Api::namespaced_with(self.client.clone(), &owner.namespace, &api_resource);
-        api.patch(
-            name,
-            &PatchParams::apply(FIELD_MANAGER).force(),
-            &Patch::Apply(&manifest),
-        )
-        .await
-        .map(|_| ())
-        .map_err(|source| ExposureError::Kube {
-            what: what.into(),
-            source,
-        })
+        let params = PatchParams::apply(FIELD_MANAGER).force();
+        let patch = Patch::Apply(&manifest);
+        bounded(self.api_timeout, what, api.patch(name, &params, &patch))
+            .await
+            .map(|_| ())
     }
 
     async fn report_failure(
         &self,
         owner: &SandboxOwner,
         error: &ExposureError,
-    ) -> Result<(), kube::Error> {
+    ) -> Result<(), ExposureError> {
         let api: Api<DynamicObject> = Api::namespaced_with(
             self.client.clone(),
             &owner.namespace,
@@ -368,15 +415,38 @@ impl ExposureReconciler {
         let now = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
         let event: DynamicObject =
             serde_json::from_value(failure_event_manifest(owner, &error.to_string(), &now))
-                .map_err(kube::Error::SerdeError)?;
-        api.create(&PostParams::default(), &event).await.map(|_| ())
+                .map_err(|source| ExposureError::Kube {
+                    what: "building the failure Event".into(),
+                    source: kube::Error::SerdeError(source),
+                })?;
+        let params = PostParams::default();
+        bounded(
+            self.api_timeout,
+            "recording the failure Event",
+            api.create(&params, &event),
+        )
+        .await
+        .map(|_| ())
+    }
+}
+
+/// Upstream's own Sandbox lookup selector (`sandbox_lookup_selector_for` in its
+/// `driver.rs`): the managed-by label, the sandbox id and, when there is one,
+/// the gateway id.
+fn lookup_selector(sandbox_id: &str, gateway_id: &str) -> String {
+    let selector =
+        format!("{LABEL_MANAGED_BY}={LABEL_MANAGED_BY_VALUE},{LABEL_SANDBOX_ID}={sandbox_id}");
+    if gateway_id.is_empty() {
+        selector
+    } else {
+        format!("{selector},{LABEL_GATEWAY_ID}={gateway_id}")
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{mock_client, Recorded};
+    use crate::test_support::{mock_client, mock_client_hanging_on, Recorded};
     use std::sync::{Arc, Mutex};
 
     fn owner() -> SandboxOwner {
@@ -404,6 +474,7 @@ mod tests {
             cluster_domain: "example.org".to_string(),
             ingress_namespace: "istio-system".to_string(),
             search_namespace: search_namespace.map(str::to_string),
+            gateway_id: "gw".to_string(),
         }
     }
 
@@ -621,10 +692,12 @@ mod tests {
             .await
             .expect("exposure succeeds");
         let recorded = seen.lock().unwrap().clone();
-        // Upstream's own lookup pairs managed-by with the id; so must ours.
+        // Upstream's own lookup (`sandbox_lookup_selector_for`) pairs the id
+        // with its managed-by and gateway-id labels; so must ours.
         assert!(
             decoded(&recorded[0].query).contains(
-                "labelSelector=openshell.ai/managed-by=openshell,openshell.ai/sandbox-id=sb-id"
+                "labelSelector=openshell.ai/managed-by=openshell,openshell.ai/sandbox-id=sb-id,\
+                 openshell.ai/gateway-id=gw"
             ),
             "{}",
             recorded[0].query
@@ -648,6 +721,58 @@ mod tests {
                 patch.query
             );
         }
+    }
+
+    // Without a gateway id there is no gateway label to require.
+    #[tokio::test]
+    async fn lookup_without_a_gateway_id_matches_on_the_sandbox_id() {
+        let (client, seen) = mock_client(respond(Scenario::Ok));
+        ExposureReconciler::new(
+            client,
+            ExposureConfig {
+                gateway_id: String::new(),
+                ..config(Some("sandboxes"))
+            },
+        )
+        .reconcile(&sandbox("ws", "sb"))
+        .await
+        .expect("exposure succeeds");
+        let query = decoded(&seen.lock().unwrap()[0].query);
+        assert!(
+            query.contains("openshell.ai/sandbox-id=sb-id") && !query.contains("gateway-id"),
+            "{query}"
+        );
+    }
+
+    // Each call is bounded: an APIRule apply that never returns fails the
+    // exposure, and the CR, already known, still gets its Warning Event.
+    #[tokio::test]
+    async fn a_hanging_apply_times_out_and_still_records_the_event() {
+        let (client, seen) =
+            mock_client_hanging_on(|line| line.contains("/apirules/"), respond(Scenario::Ok));
+        let err = ExposureReconciler::new(client, config(Some("sandboxes")))
+            .with_api_timeout(Duration::from_millis(50))
+            .reconcile(&sandbox("ws", "sb"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, ExposureError::Timeout { what, .. } if what.contains("APIRule")),
+            "{err}"
+        );
+        let recorded = seen.lock().unwrap().clone();
+        let event = recorded
+            .iter()
+            .find(|r| r.line == "POST /api/v1/namespaces/sandboxes/events")
+            .expect("a Warning Event was recorded");
+        let event = json_body(event);
+        assert_eq!(event["type"], "Warning");
+        assert_eq!(event["involvedObject"]["uid"], "cr-uid");
+        assert!(
+            event["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("timed out")),
+            "{event}"
+        );
     }
 
     // Review Focus 4.

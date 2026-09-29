@@ -36,7 +36,7 @@ pub struct KymaArgs {
     #[arg(long, env = "OPENSHELL_KYMA_ENABLE_APIRULE")]
     pub kyma_enable_apirule: bool,
 
-    /// Domain for APIRule hosts (`<sandbox>.<domain>`). Required with
+    /// Domain for APIRule hosts (`<workspace>--<name>.<domain>`). Required with
     /// --kyma-enable-apirule.
     #[arg(long, env = "OPENSHELL_KYMA_CLUSTER_DOMAIN", default_value = "")]
     pub kyma_cluster_domain: String,
@@ -133,6 +133,7 @@ mod tests {
     use crate::enrich::enrich;
     use clap::Parser;
     use openshell_core::proto::compute::v1::DriverSandbox;
+    use std::sync::{Mutex, MutexGuard, PoisonError};
 
     #[derive(Parser)]
     struct Probe {
@@ -140,12 +141,63 @@ mod tests {
         kyma: KymaArgs,
     }
 
-    fn parse(argv: &[&str]) -> KymaArgs {
+    /// clap reads OPENSHELL_KYMA_* from the process environment, which the
+    /// tests share: every parse here holds this lock, so a test that sets one
+    /// cannot leak it into another's parse.
+    static ENV: Mutex<()> = Mutex::new(());
+
+    fn env_lock() -> MutexGuard<'static, ()> {
+        ENV.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn parse_locked(argv: &[&str]) -> KymaArgs {
         let mut full = vec!["openshell-driver-kyma"];
         full.extend_from_slice(argv);
         Probe::try_parse_from(full)
             .expect("arguments should parse")
             .kyma
+    }
+
+    fn parse(argv: &[&str]) -> KymaArgs {
+        let _env = env_lock();
+        parse_locked(argv)
+    }
+
+    /// Sets one environment variable while alive, under the lock, and removes it
+    /// on drop, even when the test fails.
+    struct EnvVar {
+        name: &'static str,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl EnvVar {
+        fn set(name: &'static str, value: &str) -> Self {
+            let lock = env_lock();
+            std::env::set_var(name, value);
+            Self { name, _lock: lock }
+        }
+    }
+
+    impl Drop for EnvVar {
+        fn drop(&mut self) {
+            std::env::remove_var(self.name);
+        }
+    }
+
+    // The chart passes the list through the environment variable, not the
+    // flag: clap must split the variable on commas too.
+    #[test]
+    fn sandbox_env_variable_splits_on_commas() {
+        let _var = EnvVar::set("OPENSHELL_KYMA_SANDBOX_ENV", "A=1,B=x=y");
+        let args = parse_locked(&[]);
+        assert!(args.validate().is_ok());
+        assert_eq!(
+            args.enrich_config().environment,
+            vec![
+                ("A".to_string(), "1".to_string()),
+                ("B".to_string(), "x=y".to_string())
+            ]
+        );
     }
 
     #[test]

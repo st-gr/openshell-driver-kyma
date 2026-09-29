@@ -13,13 +13,17 @@ use openshell_core::proto::compute::v1::DriverSandbox;
 use tonic::Status;
 
 use crate::enrich::{enrich, EnrichConfig};
-use crate::exposure::ExposureReconciler;
+use crate::exposure::{ExposureReconciler, KUBE_API_TIMEOUT, MAX_API_CALLS};
 use crate::namespaces::NamespaceLabeler;
 use crate::service::KymaHooks;
 
-/// Upstream's `KUBE_API_TIMEOUT` (`driver.rs`). `after_create` runs detached,
-/// so a hung API call must end here rather than leak the task.
-const EXPOSURE_TIMEOUT: Duration = Duration::from_secs(30);
+/// The last-resort bound on one exposure. Each of its API calls is already
+/// bounded by upstream's `KUBE_API_TIMEOUT` (`exposure::KUBE_API_TIMEOUT`), so a
+/// hung call fails the exposure and still records the Warning Event; this only
+/// ends a task that hangs outside them. `after_create` runs detached, so
+/// nothing may leak.
+const EXPOSURE_TIMEOUT: Duration =
+    Duration::from_secs(KUBE_API_TIMEOUT.as_secs() * (MAX_API_CALLS + 1));
 
 pub struct KymaHookSet {
     enrich: EnrichConfig,
@@ -124,6 +128,7 @@ mod tests {
                 cluster_domain: "example.org".to_string(),
                 ingress_namespace: "istio-system".to_string(),
                 search_namespace: Some("sandboxes".to_string()),
+                gateway_id: "gw".to_string(),
             },
         );
         let hooks = KymaHookSet::new(EnrichConfig::default(), Some(exposure), None);
@@ -151,6 +156,7 @@ mod tests {
                 cluster_domain: "example.org".to_string(),
                 ingress_namespace: "istio-system".to_string(),
                 search_namespace: Some("sandboxes".to_string()),
+                gateway_id: "gw".to_string(),
             },
         );
         let hooks = KymaHookSet::new(EnrichConfig::default(), Some(exposure), None);
