@@ -41,11 +41,18 @@ supervisor_image=$(resolve_image_digest ghcr.io/nvidia/openshell/supervisor "$im
 	|| die "failed to resolve the supervisor image digest for ${image_tag}"
 [[ -n $supervisor_image ]] || die "supervisor image digest resolved empty for ${image_tag}"
 
-pinned_proto_ref=$(lock_get ref) || die "failed to read the pinned proto ref from UPSTREAM.lock"
+sandbox_runtime_image=$(resolve_image_digest ghcr.io/nvidia/openshell/sandbox "$image_tag") \
+	|| die "failed to resolve the sandbox runtime image digest for ${image_tag}"
+[[ -n $sandbox_runtime_image ]] || die "sandbox runtime image digest resolved empty for ${image_tag}"
+
+# Kept as PINNED_PROTO_REF for the workflows that read it; it is now the
+# upstream tag the driver links (Cargo.toml), since protos are no longer vendored.
+pinned_proto_ref=$(pinned_upstream_tag) || die "failed to read the pinned upstream tag from Cargo.toml"
 [[ -n $pinned_proto_ref ]] || die "pinned proto ref resolved empty"
 
 printf 'GATEWAY_TAG=%s\n' "$tag"
 printf 'GATEWAY_IMAGE=%s\n' "$gateway_image"
 printf 'SUPERVISOR_IMAGE=%s\n' "$supervisor_image"
+printf 'SANDBOX_RUNTIME_IMAGE=%s\n' "$sandbox_runtime_image"
 printf 'CLI_VERSION=%s\n' "$image_tag"
 printf 'PINNED_PROTO_REF=%s\n' "$pinned_proto_ref"

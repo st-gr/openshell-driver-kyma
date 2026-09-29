@@ -56,22 +56,22 @@ jobs:
 
           echo "OK: upstream-sync.yml triggers are exactly schedule and workflow_dispatch"
 
-  # Guards the vendored ComputeDriver contract. The protos drifted six
-  # upstream changes (two wire-breaking) before anything noticed, because
-  # nothing compared them against upstream. This job is that comparison.
-  proto-drift:
-    name: vendored protos match upstream
+  # Guards the option surface this driver mirrors from upstream's Kubernetes
+  # driver. The driver links upstream's crates at a pinned tag, but upstream
+  # declares its CLI options in the driver binary's main.rs, so they are copied
+  # into upstream_args.rs. A copy that drifted from the pin would silently drop
+  # or misread flags.
+  upstream-parity:
+    name: driver options match upstream
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Check proto drift
-        run: ./scripts/check-proto-drift.sh
-
-      - name: Check vendored driver source drift
-        run: ./scripts/check-vendor-drift.sh
+      - name: Check the mirrored upstream option surface
+        shell: bash
+        run: ./scripts/check-upstream-args.sh
 
   # Guards the chart's gateway TOML. The gateway rejects an unknown schema
   # version or field at startup, which otherwise only shows on a cluster. The

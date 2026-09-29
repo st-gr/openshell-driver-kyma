@@ -20,7 +20,7 @@
 # nag for a human, not a broken build.
 #
 # Emits `KEY: value` lines a workflow step can pick out, the same
-# convention check-pin-status.sh and check-proto-drift.sh use:
+# convention check-pin-status.sh and check-upstream-pin.sh use:
 #
 #   SANDBOX_BASE_STATUS    current | stale | unknown
 #   CLAUDE_CODE_STATUS     current | stale | unknown

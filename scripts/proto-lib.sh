@@ -1,49 +1,14 @@
 # shellcheck shell=bash
 #
-# Shared helpers for the proto vendoring/drift scripts.
-#
-# The vendored protos carry a provenance header that upstream does not have,
-# so every comparison has to strip it before hashing. Keeping that logic in
-# one place means `vendor-proto.sh` and `check-proto-drift.sh` can never
-# disagree about what "the pristine file" means — a disagreement there would
-# make CI either permanently red or permanently useless.
+# Shared helpers for the upstream pin and image-resolution scripts.
 
 set -euo pipefail
 
 UPSTREAM_REPO_DEFAULT="https://github.com/NVIDIA/OpenShell"
 
-# The header is inserted *after* the two SPDX lines so the license banner
-# stays at the top of the file where linters and humans expect it.
-SPDX_LINES=2
-
 die() {
 	printf 'error: %s\n' "$*" >&2
 	exit 1
-}
-
-sha256_of() {
-	if command -v sha256sum >/dev/null 2>&1; then
-		sha256sum "$1" | cut -d' ' -f1
-	else
-		shasum -a 256 "$1" | cut -d' ' -f1
-	fi
-}
-
-# Read a top-level scalar from UPSTREAM.lock, e.g. `lock_get ref`.
-lock_get() {
-	local key=$1 lock=${2:-proto/UPSTREAM.lock}
-	sed -n "s/^${key}[[:space:]]*=[[:space:]]*\"\{0,1\}\([^\"]*\)\"\{0,1\}[[:space:]]*$/\1/p" \
-		"$lock" | head -1
-}
-
-# Strip the provenance header, reproducing the pristine upstream bytes.
-# Keeps the SPDX banner, drops the `header_lines` block that follows it.
-strip_header() {
-	local file=$1 header_lines=$2
-	{
-		head -n "$SPDX_LINES" "$file"
-		tail -n "+$((SPDX_LINES + header_lines + 1))" "$file"
-	}
 }
 
 # Highest `v*` tag upstream, by version sort. Uses `git ls-remote` rather than
@@ -57,16 +22,6 @@ latest_upstream_tag() {
 		grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' |
 		sort -V |
 		tail -1
-}
-
-# Commit SHA a tag resolves to. Prefers the dereferenced (`^{}`) entry so
-# annotated tags yield the commit, not the tag object.
-upstream_tag_commit() {
-	local tag=$1
-	git ls-remote "$UPSTREAM_REPO_DEFAULT" "refs/tags/${tag}" "refs/tags/${tag}^{}" 2>/dev/null |
-		sort -k2 |
-		tail -1 |
-		awk '{print $1}'
 }
 
 # Resolve `<repo>:<tag>` to an immutable `<repo>@sha256:<digest>` reference.
@@ -97,9 +52,11 @@ resolve_image_digest() {
 	printf '%s@%s\n' "$repo" "$digest"
 }
 
-# Fetch one proto from a pinned upstream commit to stdout.
-fetch_upstream() {
-	local commit=$1 path=$2
-	curl -fsSL "https://raw.githubusercontent.com/NVIDIA/OpenShell/${commit}/${path}" \
-		|| die "could not fetch ${path} at ${commit}"
+# The upstream NVIDIA/OpenShell tag the workspace links, read from the one-line
+# `openshell-driver-kubernetes = { git = "...", tag = "..." }` in Cargo.toml.
+pinned_upstream_tag() {
+	local root
+	root=$(git rev-parse --show-toplevel)
+	sed -nE 's/^openshell-driver-kubernetes = \{ git = "[^"]+", tag = "([^"]+)" \}.*/\1/p' \
+		"${root}/Cargo.toml" | head -1 | grep .
 }

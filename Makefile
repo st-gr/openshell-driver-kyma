@@ -30,8 +30,6 @@ help:
 	@echo "  dev-shell            interactive shell in the dev image"
 	@echo "  dev-shell-with-kube  shell with \$$HOME/.kube mounted read-only"
 	@echo ""
-	@echo "  proto                regenerate tonic/prost bindings (rare)"
-	@echo "  vendor-check         verify vendored driver source matches upstream"
 	@echo "  fmt                  cargo fmt --all"
 	@echo "  fmt-check            cargo fmt --all --check"
 	@echo "  clippy               cargo clippy with pedantic warnings as errors"
@@ -64,30 +62,23 @@ dev-shell-with-kube:
 # Build / test (run inside the dev container)
 # ---------------------------------------------------------------------------
 
-.PHONY: proto
-proto:
-	$(DOCKER_RUN) $(DEV_IMAGE) cargo build -p computev1
-
-# Verify the vendored protos still match the upstream ref pinned in
-# proto/UPSTREAM.lock. Runs on the host (needs network), not in the container.
-.PHONY: proto-check
-proto-check:
-	./scripts/check-proto-drift.sh
-
-# Re-vendor at a new upstream tag: make proto-vendor TAG=v0.0.91
-.PHONY: proto-vendor
-proto-vendor:
-ifeq ($(strip $(TAG)),)
-	$(error TAG must be set, e.g. make proto-vendor TAG=v0.0.91)
-endif
-	./scripts/vendor-proto.sh $(TAG)
-
-# Verify vendored Rust source (crates/openshell-driver-kyma/src/vendor/)
-# still matches the upstream ref pinned in that directory's UPSTREAM.lock.
+# The mirrored upstream option surface must match upstream at the pinned tag.
 # Runs on the host (needs network), not in the container.
-.PHONY: vendor-check
-vendor-check:
-	./scripts/check-vendor-drift.sh
+.PHONY: upstream-args-check
+upstream-args-check:
+	./scripts/check-upstream-args.sh
+
+# Move the driver to a new upstream release: make upstream-bump TAG=v0.1.3
+# Rewrites the tag on the three openshell-* git dependencies, refreshes
+# Cargo.lock, then prints any option-surface diff to mirror into
+# crates/openshell-driver-kyma/src/upstream_args.rs.
+.PHONY: upstream-bump
+upstream-bump:
+	@test -n "$(TAG)" || { echo "usage: make upstream-bump TAG=vX.Y.Z" >&2; exit 2; }
+	sed -i.bak -E 's#^(openshell-[a-z-]+ = \{ git = "https://github.com/NVIDIA/OpenShell", tag = ")[^"]+(")#\1$(TAG)\2#' Cargo.toml
+	rm -f Cargo.toml.bak
+	$(DOCKER_RUN) $(DEV_IMAGE) cargo update -p openshell-driver-kubernetes
+	./scripts/check-upstream-args.sh
 
 .PHONY: fmt
 fmt:

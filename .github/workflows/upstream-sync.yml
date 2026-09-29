@@ -59,7 +59,7 @@ jobs:
       # The tag a re-vendor should target -- distinct from GATEWAY_TAG
       # (resolve-upstream-refs.sh, from GATEWAY_REF), which pins the
       # gateway *image* and can legitimately sit behind the newest
-      # upstream contract tag. See check-proto-drift.sh's VENDOR_TARGET_TAG
+      # upstream contract tag. See check-upstream-pin.sh's VENDOR_TARGET_TAG
       # line, which this is sourced from.
       vendor_target_tag: ${{ steps.drift.outputs.vendor_target_tag }}
       # scripts/check-pin-status.sh's findings, threaded through to the sync
@@ -90,18 +90,18 @@ jobs:
         shell: bash
         run: ./scripts/resolve-upstream-refs.sh | tee -a "$GITHUB_ENV"
 
-      - name: Check proto drift
+      - name: Check upstream pin
         id: drift
         # shell: bash is NOT decorative here either — see the same-named
         # comment on "Resolve upstream references" above. Without it, `tee`
-        # swallows check-proto-drift.sh's exit 1 on REAL drift, the
+        # swallows check-upstream-pin.sh's exit 1 on REAL drift, the
         # `^ADVISORY:` grep below finds nothing (that text is only printed on
         # the advisory path, never the failure path), behind=false gets
         # reported, and this job would tell you "no upstream movement" while
         # the vendored protos are actually corrupt.
         shell: bash
         run: |
-          ./scripts/check-proto-drift.sh | tee /tmp/drift.txt
+          ./scripts/check-upstream-pin.sh | tee /tmp/drift.txt
           if grep -q "^ADVISORY:" /tmp/drift.txt; then
             echo "behind=true" >> "$GITHUB_OUTPUT"
           else
@@ -173,7 +173,7 @@ jobs:
           echo "latest_upstream_tag=${latest_upstream_tag}" >> "$GITHUB_OUTPUT"
 
       # An architectural change behind an UNCHANGED wire contract: neither
-      # check-proto-drift.sh nor the image digests would notice it.
+      # check-upstream-pin.sh nor the image digests would notice it.
       - name: Check whether upstream still ships inference.local
         id: inflocal
         shell: bash
