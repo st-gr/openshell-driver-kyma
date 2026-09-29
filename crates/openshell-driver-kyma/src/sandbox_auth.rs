@@ -74,6 +74,11 @@ fn user_extra_one(user: &UserInfo, key: &str) -> Result<String, DriverError> {
 /// `Ok(None)` means the apiserver did not authenticate the token at all, which
 /// the caller reports as a plain rejection. `Err` means the token authenticated
 /// but is not one this driver accepts.
+///
+/// Only the ServiceAccount *name* is validated here. The returned
+/// `TokenIdentity::namespace` is UNVALIDATED: a same-named ServiceAccount in
+/// another namespace is accepted, so the caller must admit the namespace
+/// before trusting the identity.
 pub fn token_review_identity(
     status: &TokenReviewStatus,
     expected_service_account: &str,
@@ -106,6 +111,11 @@ pub fn token_review_identity(
                 "sandbox credential is not a ServiceAccount token".to_string(),
             )
         })?;
+    if namespace.is_empty() {
+        return Err(DriverError::PermissionDenied(
+            "sandbox credential has an empty namespace".to_string(),
+        ));
+    }
     if service_account != expected_service_account {
         return Err(DriverError::PermissionDenied(
             "sandbox credential ServiceAccount is not accepted".to_string(),
@@ -222,9 +232,9 @@ mod tests {
         );
     }
 
-    // Review Focus 5: rejected before any apiserver call.
+    // Review Focus 5: blank credentials never reach the apiserver.
     #[test]
-    fn blank_credentials_are_rejected_without_calling_the_apiserver() {
+    fn blank_credentials_are_rejected() {
         for candidate in ["", "   ", "\t\n"] {
             let err = reject_blank_credential(candidate).unwrap_err();
             assert!(
@@ -233,5 +243,164 @@ mod tests {
             );
         }
         assert!(reject_blank_credential("a-real-token").is_ok());
+    }
+
+    fn denied(s: &TokenReviewStatus) -> bool {
+        matches!(
+            token_review_identity(s, "sandbox-sa"),
+            Err(DriverError::PermissionDenied(_))
+        )
+    }
+
+    fn base() -> TokenReviewStatus {
+        status_for("sandbox-sa", "openshell", "p", "u", SA_TOKEN_AUDIENCE)
+    }
+
+    // Finding 1: the namespace is returned unvalidated; the caller must admit it.
+    #[test]
+    fn foreign_namespace_is_returned_verbatim_for_the_caller_to_admit() {
+        let s = status_for("sandbox-sa", "foreign-ns", "p", "u", SA_TOKEN_AUDIENCE);
+        let id = token_review_identity(&s, "sandbox-sa").unwrap().unwrap();
+        assert_eq!(id.namespace, "foreign-ns");
+    }
+
+    // Finding 2: exactly one value per pod extra.
+    #[test]
+    fn pod_uid_extra_missing_is_rejected() {
+        let mut s = base();
+        s.user
+            .as_mut()
+            .unwrap()
+            .extra
+            .as_mut()
+            .unwrap()
+            .remove(POD_UID_EXTRA);
+        assert!(denied(&s));
+    }
+
+    #[test]
+    fn pod_name_extra_missing_is_rejected() {
+        let mut s = base();
+        s.user
+            .as_mut()
+            .unwrap()
+            .extra
+            .as_mut()
+            .unwrap()
+            .remove(POD_NAME_EXTRA);
+        assert!(denied(&s));
+    }
+
+    #[test]
+    fn empty_pod_extra_values_are_rejected() {
+        for key in [POD_NAME_EXTRA, POD_UID_EXTRA] {
+            let mut s = base();
+            s.user
+                .as_mut()
+                .unwrap()
+                .extra
+                .as_mut()
+                .unwrap()
+                .insert(key.into(), vec![]);
+            assert!(denied(&s), "empty values for {key}");
+        }
+    }
+
+    #[test]
+    fn multiple_pod_extra_values_are_rejected() {
+        for key in [POD_NAME_EXTRA, POD_UID_EXTRA] {
+            let mut s = base();
+            s.user
+                .as_mut()
+                .unwrap()
+                .extra
+                .as_mut()
+                .unwrap()
+                .insert(key.into(), vec!["a".into(), "b".into()]);
+            assert!(denied(&s), "two values for {key}");
+        }
+    }
+
+    // Finding 3: audience matching is exact membership.
+    #[test]
+    fn missing_or_empty_audiences_are_rejected() {
+        for auds in [None, Some(vec![])] {
+            let mut s = base();
+            s.audiences = auds;
+            let err = token_review_identity(&s, "sandbox-sa").unwrap_err();
+            assert!(
+                matches!(err, DriverError::Unauthenticated(_)),
+                "got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn multiple_audiences_including_ours_are_accepted() {
+        let mut s = base();
+        s.audiences = Some(vec!["other".into(), SA_TOKEN_AUDIENCE.into()]);
+        assert!(token_review_identity(&s, "sandbox-sa").unwrap().is_some());
+    }
+
+    #[test]
+    fn near_miss_audience_is_rejected() {
+        let s = status_for("sandbox-sa", "openshell", "p", "u", "openshell-gateway-x");
+        let err = token_review_identity(&s, "sandbox-sa").unwrap_err();
+        assert!(
+            matches!(err, DriverError::Unauthenticated(_)),
+            "got {err:?}"
+        );
+    }
+
+    // Finding 4: username parsing branches.
+    #[test]
+    fn missing_user_is_rejected() {
+        let mut s = base();
+        s.user = None;
+        assert!(denied(&s));
+    }
+
+    #[test]
+    fn missing_username_is_rejected() {
+        let mut s = base();
+        s.user.as_mut().unwrap().username = None;
+        assert!(denied(&s));
+    }
+
+    #[test]
+    fn username_without_a_second_colon_is_rejected() {
+        let mut s = base();
+        s.user.as_mut().unwrap().username = Some("system:serviceaccount:ns".into());
+        assert!(denied(&s));
+    }
+
+    #[test]
+    fn service_account_name_with_an_extra_colon_is_rejected() {
+        let mut s = base();
+        s.user.as_mut().unwrap().username = Some("system:serviceaccount:ns:sandbox-sa:x".into());
+        assert!(denied(&s));
+    }
+
+    // Finding 5: unauthenticated wins, and is checked before the audience.
+    #[test]
+    fn authenticated_none_yields_none() {
+        let mut s = base();
+        s.authenticated = None;
+        assert!(token_review_identity(&s, "sandbox-sa").unwrap().is_none());
+    }
+
+    #[test]
+    fn unauthenticated_beats_a_wrong_audience() {
+        let mut s = status_for("sandbox-sa", "openshell", "p", "u", "some-other-audience");
+        s.authenticated = Some(false);
+        assert!(token_review_identity(&s, "sandbox-sa").unwrap().is_none());
+    }
+
+    // Finding 6: an empty namespace is rejected outright.
+    #[test]
+    fn empty_namespace_is_rejected() {
+        let mut s = base();
+        s.user.as_mut().unwrap().username = Some("system:serviceaccount::sandbox-sa".into());
+        assert!(denied(&s));
     }
 }
