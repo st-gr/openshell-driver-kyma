@@ -134,13 +134,13 @@ scripts/check-chart-render.sh fails CI when an upstream option is missing here.
 - name: OPENSHELL_PROVIDER_SPIFFE_WORKLOAD_API_SOCKET
   value: {{ . | quote }}
 {{- end }}
-{{- with $d.sandboxUid }}
+{{- with include "openshell-driver-kyma.sandboxIdentity" (dict "key" "driver.sandboxUid" "value" $d.sandboxUid) }}
 - name: OPENSHELL_K8S_SANDBOX_UID
-  value: {{ include "openshell-driver-kyma.wholeNumber" . | quote }}
+  value: {{ . | quote }}
 {{- end }}
-{{- with $d.sandboxGid }}
+{{- with include "openshell-driver-kyma.sandboxIdentity" (dict "key" "driver.sandboxGid" "value" $d.sandboxGid) }}
 - name: OPENSHELL_K8S_SANDBOX_GID
-  value: {{ include "openshell-driver-kyma.wholeNumber" . | quote }}
+  value: {{ . | quote }}
 {{- end }}
 {{- with $d.sandboxStorageSize }}
 - name: OPENSHELL_K8S_WORKSPACE_DEFAULT_STORAGE_SIZE
@@ -183,12 +183,46 @@ scripts/check-chart-render.sh fails CI when an upstream option is missing here.
 {{- end -}}
 
 {{/*
-A whole number as digits. A values file yields float64, which Go prints as
-1.00074e+09 from seven digits up, and OpenShift-range UIDs have ten. Strings
-pass through unchanged, so the driver's own parser reports a bad one.
+A sandbox UID or GID as digits, for driver.sandboxUid / driver.sandboxGid. Takes
+(dict "key" <values key> "value" <its value>).
+
+Unset (nil or "") gives an empty string, so the variable is omitted and upstream
+resolves the identity itself. A set value must be a whole number in
+[1, 4294967294], upstream's range (openshell-policy MIN_SANDBOX_UID and
+MAX_SANDBOX_UID, checked by validate_sandbox_identity_config in
+openshell-driver-kubernetes src/config.rs:569); anything else fails the render
+naming the key. So 0 is refused instead of silently dropped, and a fraction
+instead of truncated. Digit strings are accepted, other strings are not.
+
+The digits are printed from an int64: a values file yields float64, which Go
+prints as 1.00074e+09 from seven digits up, and OpenShift-range UIDs have ten.
 */}}
-{{- define "openshell-driver-kyma.wholeNumber" -}}
-{{- if kindIs "float64" . -}}{{ int64 . }}{{- else -}}{{ . }}{{- end -}}
+{{- define "openshell-driver-kyma.sandboxIdentity" -}}
+{{- $v := .value -}}
+{{- $unset := kindIs "invalid" $v -}}
+{{- if kindIs "string" $v -}}
+{{- if eq $v "" -}}
+{{- $unset = true -}}
+{{- end -}}
+{{- end -}}
+{{- if not $unset -}}
+{{- $ok := or (kindIs "float64" $v) (kindIs "int64" $v) (kindIs "int" $v) -}}
+{{- if kindIs "string" $v -}}
+{{- $ok = regexMatch "^[0-9]+$" $v -}}
+{{- end -}}
+{{- $shown := printf "%v" $v -}}
+{{- if kindIs "float64" $v -}}
+{{- $shown = printf "%.15g" $v -}}
+{{- end -}}
+{{- if not $ok -}}
+{{- fail (printf "%s %s must be a whole number from 1 to 4294967294 (upstream's sandbox identity range); leave it unset for upstream's default." .key $shown) -}}
+{{- end -}}
+{{- $f := float64 $v -}}
+{{- if or (lt $f (float64 1)) (gt $f (float64 4294967294)) (ne $f (floor $f)) -}}
+{{- fail (printf "%s %s must be a whole number from 1 to 4294967294 (upstream's sandbox identity range); leave it unset for upstream's default." .key $shown) -}}
+{{- end -}}
+{{- int64 $f -}}
+{{- end -}}
 {{- end -}}
 
 {{/*
@@ -223,5 +257,21 @@ strips those from the sandbox environment).
 {{- if and (hasPrefix "OPENSHELL_" $key) (ne $key "OPENSHELL_LOG_LEVEL") -}}
 {{- fail (printf "driver.sandboxEnv entry %q uses a reserved OPENSHELL_* key: upstream strips it from the sandbox environment (only OPENSHELL_LOG_LEVEL is kept)." $e) -}}
 {{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Pre-flight guard for driver values that are not workspace or sandbox-env
+settings, called from deployment.yaml beside the other guards.
+
+driver.allowDriverConfig renders as a bare TOML value in the gateway's config
+and as a JSON value in the driver's admission policy. Given the string "false",
+the TOML still reads as the boolean false but the JSON carries the string
+"false", which the driver rejects. It must be a real boolean.
+*/}}
+{{- define "openshell-driver-kyma.driverValueGuards" -}}
+{{- $allow := .Values.driver.allowDriverConfig -}}
+{{- if not (kindIs "bool" $allow) -}}
+{{- fail (printf "driver.allowDriverConfig must be a boolean (true or false), got %s %v. It renders into the gateway's TOML and the driver's admission JSON, and a string breaks the JSON." (kindOf $allow) $allow) -}}
 {{- end -}}
 {{- end -}}

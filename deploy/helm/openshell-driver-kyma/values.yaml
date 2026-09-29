@@ -91,7 +91,9 @@ driver:
   # Numeric identity for sandbox workloads (OPENSHELL_K8S_SANDBOX_UID/GID).
   # Leave both empty for upstream's own resolution: an OpenShift SCC
   # namespace annotation if present, otherwise upstream's default UID
-  # (10001). sandboxGid defaults to sandboxUid when omitted.
+  # (10001). sandboxGid defaults to sandboxUid when omitted. A set value must
+  # be a whole number from 1 to 4294967294, upstream's range; the chart refuses
+  # to render 0 or anything else out of range.
   sandboxUid: ""
   sandboxGid: ""
   # Default size of the per-sandbox workspace PVC mounted at `/sandbox`
@@ -113,9 +115,12 @@ driver:
   #   managed  - one driver-created namespace per workspace, named
   #              openshell-{gatewayId}-{workspace}. The gateway id is
   #              gateway.sandboxJwt.gatewayId (default: the release's
-  #              fullname) and must be a DNS-1123 label.
-  #   operator - namespaces the operator selects: set operatorNamespaceLabel
-  #              or operatorNamespaceConfigMap below.
+  #              fullname) and must be a DNS-1123 label of at most 33
+  #              characters, so a long release name needs an explicit,
+  #              shorter gatewayId. managedSshIngress.enabled also needs
+  #              its gatewayNamespace and gatewayPodSelector.
+  #   operator - namespaces the operator selects: set exactly one of
+  #              operatorNamespaceLabel or operatorNamespaceConfigMap below.
   #
   # SWITCHING MODES IS BREAKING. The namespace holding a sandbox changes, so
   # existing sandboxes become unreachable. Delete every sandbox before
@@ -127,10 +132,14 @@ driver:
   # [openshell.drivers.kyma] allow_driver_config and the driver's
   # OPENSHELL_DRIVER_ADMISSION_CONFIG_JSON: the gateway refuses to start unless
   # the driver acknowledges the identical policy, so never set them separately.
+  # Must be a real boolean, not a string; the chart refuses to render otherwise.
   allowDriverConfig: true
   # --- Upstream openshell-driver-kubernetes options (same names upstream's
   # chart uses; each maps to the upstream environment variable in
-  # templates/_driver-env.tpl). Empty/false means "upstream's default". ---
+  # templates/_driver-env.tpl). Empty/false leaves the variable unset, so
+  # upstream's default applies, except sandboxRuntimeImage,
+  # sandboxRuntimeBoundaryPort and saTokenTtlSecs: the chart always passes
+  # those, the last two at upstream's own defaults. ---
   # Sandbox runtime (isolation backend) image, digest-pinned. Upstream's
   # compiled-in default depends on build variables a git-dependency build does
   # not set, so the chart always passes it.
@@ -152,7 +161,8 @@ driver:
   hostGatewayIp: ""
   providerSpiffeWorkloadApiSocket: ""
   # Operator mode: select namespaces by label, or by a file of names mounted
-  # from a ConfigMap (replaces the removed operatorNamespaceAllowlist).
+  # from a ConfigMap, exactly one of the two (replaces the removed
+  # operatorNamespaceAllowlist).
   operatorNamespaceLabel: ""
   operatorNamespaceConfigMap:
     name: ""
@@ -278,7 +288,7 @@ gateway:
     # `openshell-x86_64-unknown-linux-musl.tar.gz` from the release instead,
     # and the pin is lifted.
     #
-    # The gateway image is resolved from the upstream release in `upstream.version`.
+    # Pin the digest of the gateway image published for `upstream.version`.
     # Keep this in lockstep with the `openshell` CLI version operators
     # install — a newer CLI against an older gateway can fail on
     # commands whose response shape changed (e.g. `inference get`).

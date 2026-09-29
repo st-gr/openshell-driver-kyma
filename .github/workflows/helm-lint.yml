@@ -7,6 +7,8 @@ on:
       - 'scripts/check-chart-render.sh'
       - 'scripts/check-upstream-args.sh'
       - 'scripts/proto-lib.sh'
+      - 'scripts/testdata/**'
+      - 'crates/openshell-driver-kyma/src/kyma_args.rs'
       - 'Cargo.toml'
   push:
     branches: [main]
@@ -15,6 +17,8 @@ on:
       - 'scripts/check-chart-render.sh'
       - 'scripts/check-upstream-args.sh'
       - 'scripts/proto-lib.sh'
+      - 'scripts/testdata/**'
+      - 'crates/openshell-driver-kyma/src/kyma_args.rs'
       - 'Cargo.toml'
 
 jobs:

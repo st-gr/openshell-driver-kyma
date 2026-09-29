@@ -4,6 +4,7 @@
 {{- include "openshell-driver-kyma.gatewayTlsGuards" . -}}
 {{- include "openshell-driver-kyma.workspaceGuards" . -}}
 {{- include "openshell-driver-kyma.sandboxEnvGuards" . -}}
+{{- include "openshell-driver-kyma.driverValueGuards" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
