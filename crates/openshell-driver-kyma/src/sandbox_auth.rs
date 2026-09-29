@@ -128,6 +128,77 @@ pub fn token_review_identity(
     }))
 }
 
+/// Reject a credential from a namespace this driver does not serve.
+///
+/// An empty `served` list means "not namespace-constrained" (cluster-wide
+/// modes); binding is then carried entirely by `admit_owner`.
+pub fn admit_namespace(namespace: &str, served: &[String]) -> Result<(), DriverError> {
+    if served.is_empty() || served.iter().any(|candidate| candidate == namespace) {
+        return Ok(());
+    }
+    Err(DriverError::PermissionDenied(
+        "sandbox credential namespace is not served by this driver".to_string(),
+    ))
+}
+
+/// Confirm the Sandbox CR resolved from a Pod's label really owns that Pod.
+///
+/// The Pod's sandbox-id label is caller-visible metadata and is not a trust
+/// boundary on its own: it only becomes trustworthy once the CR it names agrees
+/// that it owns that id *and* lives in the Pod's namespace. Without the second
+/// check a Pod could name a sandbox in another namespace and borrow its
+/// identity.
+pub fn admit_owner(
+    pod_namespace: &str,
+    pod_sandbox_id: &str,
+    cr_namespace: &str,
+    cr_sandbox_id: Option<&str>,
+) -> Result<(), DriverError> {
+    if cr_namespace != pod_namespace {
+        return Err(DriverError::PermissionDenied(
+            "authenticated pod and its sandbox are in different namespaces".to_string(),
+        ));
+    }
+    match cr_sandbox_id {
+        Some(found) if found == pod_sandbox_id => Ok(()),
+        _ => Err(DriverError::PermissionDenied(
+            "authenticated pod is not owned by this sandbox".to_string(),
+        )),
+    }
+}
+
+/// A sandbox that disappears between authentication and lookup is a race a
+/// client loses, not a server fault — report it as a rejection so it cannot be
+/// mistaken for an outage.
+#[must_use]
+pub fn map_sandbox_lookup_error(error: DriverError) -> DriverError {
+    match error {
+        DriverError::NotFound(_) => DriverError::PermissionDenied(
+            "sandbox for the authenticated pod no longer exists".to_string(),
+        ),
+        other => other,
+    }
+}
+
+/// Map a failed TokenReview call onto a status an operator can act on.
+///
+/// A 403 here means this driver's ServiceAccount is missing the `tokenreviews`
+/// create grant, which is a deployment fault. Reporting it as a rejected
+/// credential would make a misconfigured install look like an attack.
+#[must_use]
+pub fn map_token_review_error(error: &kube::Error) -> DriverError {
+    if let kube::Error::Api(response) = error {
+        if response.code == 403 {
+            return DriverError::Unavailable(
+                "Kubernetes rejected the TokenReview call (403); the driver ServiceAccount \
+                 needs create on tokenreviews"
+                    .to_string(),
+            );
+        }
+    }
+    DriverError::Unavailable("Kubernetes TokenReview call failed".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,5 +473,91 @@ mod tests {
         let mut s = base();
         s.user.as_mut().unwrap().username = Some("system:serviceaccount::sandbox-sa".into());
         assert!(denied(&s));
+    }
+
+    // Review Focus 1: SA names are not unique across namespaces.
+    #[test]
+    fn a_namespace_this_driver_does_not_serve_is_rejected() {
+        let err = admit_namespace("someone-elses-ns", &["openshell".to_string()]).unwrap_err();
+        assert!(
+            matches!(err, DriverError::PermissionDenied(_)),
+            "got {err:?}"
+        );
+        assert!(admit_namespace("openshell", &["openshell".to_string()]).is_ok());
+    }
+
+    #[test]
+    fn an_empty_served_namespace_list_admits_any_namespace() {
+        // Cluster-wide modes do not constrain the namespace here; ownership
+        // validation is what binds the pod to the sandbox.
+        assert!(admit_namespace("anything", &[]).is_ok());
+    }
+
+    // Review Focus 2: the Pod's sandbox-id label is caller-visible metadata.
+    // It is only trustworthy once the Sandbox CR it names agrees that it owns
+    // that id, and lives in the same namespace as the Pod.
+    #[test]
+    fn a_cr_that_claims_a_different_sandbox_id_is_rejected() {
+        let err = admit_owner("openshell", "sb-1", "openshell", Some("sb-2")).unwrap_err();
+        assert!(
+            matches!(err, DriverError::PermissionDenied(_)),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_cr_with_no_sandbox_id_label_is_rejected() {
+        let err = admit_owner("openshell", "sb-1", "openshell", None).unwrap_err();
+        assert!(
+            matches!(err, DriverError::PermissionDenied(_)),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_cr_in_a_different_namespace_than_the_pod_is_rejected() {
+        let err = admit_owner("openshell", "sb-1", "other-ns", Some("sb-1")).unwrap_err();
+        assert!(
+            matches!(err, DriverError::PermissionDenied(_)),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_matching_cr_in_the_pods_namespace_is_admitted() {
+        assert!(admit_owner("openshell", "sb-1", "openshell", Some("sb-1")).is_ok());
+    }
+
+    // Review Focus 3: a sandbox deleted mid-bootstrap is a normal race.
+    #[test]
+    fn a_vanished_sandbox_is_a_rejection_not_a_server_fault() {
+        let mapped = map_sandbox_lookup_error(DriverError::NotFound("gone".into()));
+        assert!(
+            matches!(mapped, DriverError::PermissionDenied(_)),
+            "got {mapped:?}"
+        );
+        // Anything else keeps its own code.
+        let mapped = map_sandbox_lookup_error(DriverError::Unavailable("apiserver".into()));
+        assert!(
+            matches!(mapped, DriverError::Unavailable(_)),
+            "got {mapped:?}"
+        );
+    }
+
+    // Review Focus 4: a missing RBAC grant must not read as a bad credential.
+    #[test]
+    fn a_forbidden_tokenreview_is_unavailable_not_unauthenticated() {
+        let forbidden = kube::Error::Api(Box::new(
+            kube::core::Status::failure("forbidden", "Forbidden").with_code(403),
+        ));
+        let mapped = map_token_review_error(&forbidden);
+        assert!(
+            matches!(mapped, DriverError::Unavailable(_)),
+            "got {mapped:?}"
+        );
+        assert!(
+            mapped.to_string().contains("tokenreviews"),
+            "the message must point an operator at the RBAC grant: {mapped}"
+        );
     }
 }

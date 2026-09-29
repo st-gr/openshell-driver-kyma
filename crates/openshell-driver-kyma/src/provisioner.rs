@@ -24,7 +24,8 @@ use crate::main_process::{MainProcessConfig, MAIN_PROCESS_SPEC};
 use async_trait::async_trait;
 use computev1::pb::{DriverPlatformEvent, DriverSandbox};
 use futures::StreamExt;
-use k8s_openapi::api::core::v1::{Event as CoreEvent, Namespace, Node, ServiceAccount};
+use k8s_openapi::api::authentication::v1::{TokenReview, TokenReviewSpec};
+use k8s_openapi::api::core::v1::{Event as CoreEvent, Namespace, Node, Pod, ServiceAccount};
 use kube::{
     api::{
         Api, ApiResource, DeleteParams, DynamicObject, ListParams, Patch, PatchParams, PostParams,
@@ -178,6 +179,15 @@ impl KymaProvisioner {
         match self.cfg.workspace_mode {
             WorkspaceMode::Shared => Some(self.cfg.namespace.clone()),
             WorkspaceMode::Managed | WorkspaceMode::Operator => None,
+        }
+    }
+
+    /// Namespaces whose sandboxes this driver serves. Empty means the mode
+    /// spans namespaces, so the credential's namespace is not constrained here.
+    fn served_namespaces(&self) -> &[String] {
+        match self.cfg.workspace_mode {
+            WorkspaceMode::Shared => std::slice::from_ref(&self.cfg.namespace),
+            WorkspaceMode::Managed | WorkspaceMode::Operator => &[],
         }
     }
 
@@ -1733,6 +1743,98 @@ impl SandboxProvisioner for KymaProvisioner {
             DriverError::FailedPrecondition(format!("sandbox {sandbox_id} resource has no UID"))
         })?;
         Ok(crate::sandbox_auth::runtime_identity(namespace, uid))
+    }
+
+    async fn authenticate_sandbox(
+        &self,
+        credential: &str,
+    ) -> Result<(String, String), DriverError> {
+        use crate::sandbox_auth::{
+            admit_namespace, admit_owner, map_sandbox_lookup_error, map_token_review_error,
+            reject_blank_credential, runtime_identity, token_review_identity,
+        };
+
+        reject_blank_credential(credential)?;
+
+        let reviews: Api<TokenReview> = Api::all(self.client.clone());
+        let review = reviews
+            .create(
+                &PostParams::default(),
+                &TokenReview {
+                    metadata: kube::core::ObjectMeta::default(),
+                    spec: TokenReviewSpec {
+                        audiences: Some(vec![SA_TOKEN_AUDIENCE.to_string()]),
+                        token: credential.to_string(),
+                    },
+                    status: None,
+                },
+            )
+            .await
+            .map_err(|error| {
+                // Never log `credential`; it is secret-tagged in the proto.
+                tracing::warn!(%error, "Kubernetes TokenReview call failed");
+                map_token_review_error(&error)
+            })?;
+
+        let status = review.status.ok_or_else(|| {
+            DriverError::Unavailable("TokenReview response had no status".to_string())
+        })?;
+        let identity =
+            token_review_identity(&status, SANDBOX_SERVICE_ACCOUNT)?.ok_or_else(|| {
+                DriverError::Unauthenticated("sandbox credential was not accepted".to_string())
+            })?;
+
+        admit_namespace(&identity.namespace, self.served_namespaces())?;
+
+        let pods: Api<Pod> = Api::namespaced(self.client.clone(), &identity.namespace);
+        let pod = pods.get_opt(&identity.pod_name).await?.ok_or_else(|| {
+            DriverError::PermissionDenied("authenticated pod no longer exists".to_string())
+        })?;
+
+        if pod.metadata.uid.as_deref() != Some(identity.pod_uid.as_str()) {
+            return Err(DriverError::PermissionDenied(
+                "authenticated pod UID does not match the credential".to_string(),
+            ));
+        }
+
+        let sandbox_id = pod
+            .metadata
+            .labels
+            .as_ref()
+            .and_then(|labels| labels.get(LABEL_SANDBOX_ID))
+            .cloned()
+            .ok_or_else(|| {
+                DriverError::PermissionDenied("authenticated pod carries no sandbox id".to_string())
+            })?;
+
+        let cr = self
+            .find_by_sandbox_id(&sandbox_id)
+            .await
+            .map_err(map_sandbox_lookup_error)?;
+        let namespace = cr.metadata.namespace.as_deref().ok_or_else(|| {
+            DriverError::FailedPrecondition(format!(
+                "sandbox {sandbox_id} resource has no namespace"
+            ))
+        })?;
+
+        // The Pod's label named this CR; confirm the CR agrees it owns that id
+        // and shares the Pod's namespace before trusting either.
+        admit_owner(
+            &identity.namespace,
+            &sandbox_id,
+            namespace,
+            cr.metadata
+                .labels
+                .as_ref()
+                .and_then(|labels| labels.get(LABEL_SANDBOX_ID))
+                .map(String::as_str),
+        )?;
+
+        let uid = cr.metadata.uid.as_deref().ok_or_else(|| {
+            DriverError::FailedPrecondition(format!("sandbox {sandbox_id} resource has no UID"))
+        })?;
+
+        Ok((sandbox_id.clone(), runtime_identity(namespace, uid)))
     }
 
     async fn get(&self, sandbox_id: &str) -> Result<DriverSandbox, DriverError> {

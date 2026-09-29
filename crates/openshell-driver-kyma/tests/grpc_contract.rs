@@ -51,6 +51,10 @@ mock! {
         async fn has_gpu_capacity(&self, count: u32) -> Result<bool, DriverError>;
         async fn start_sandbox(&self, sandbox_id: &str) -> Result<(), DriverError>;
         async fn runtime_identity(&self, sandbox_id: &str) -> Result<String, DriverError>;
+        async fn authenticate_sandbox(
+            &self,
+            credential: &str,
+        ) -> Result<(String, String), DriverError>;
         async fn stop_sandbox(&self, sandbox_id: &str) -> Result<(), DriverError>;
         async fn apply_apirule(
             &self,

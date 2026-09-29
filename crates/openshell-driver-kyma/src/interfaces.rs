@@ -53,6 +53,12 @@ pub trait SandboxProvisioner: Send + Sync + 'static {
     /// Returned from `CreateSandbox` and `StartSandbox` and compared by the
     /// gateway on every bootstrap. `NotFound` if the Sandbox CR is gone.
     async fn runtime_identity(&self, sandbox_id: &str) -> Result<String, DriverError>;
+    /// Verify a sandbox's bootstrap credential and resolve who presented it.
+    ///
+    /// Returns `(sandbox_id, runtime_identity)`. The gateway compares the
+    /// identity against the one recorded at create time before minting a token.
+    async fn authenticate_sandbox(&self, credential: &str)
+        -> Result<(String, String), DriverError>;
     /// Stop a running sandbox and wait until its pod is actually gone.
     /// Returning before termination would let the gateway believe a sandbox
     /// is stopped while its pod still runs.
