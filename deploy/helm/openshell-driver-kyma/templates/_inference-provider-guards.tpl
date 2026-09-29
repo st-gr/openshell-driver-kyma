@@ -15,11 +15,20 @@ gets immediate feedback. */}}
 {{- if not .Values.inferenceProvider.type -}}
 {{- fail "inferenceProvider.enabled=true requires inferenceProvider.type (e.g. \"anthropic\")." -}}
 {{- end -}}
+{{- if ne .Values.inferenceProvider.type "anthropic" -}}
+{{- fail (printf "inferenceProvider.type %q is not supported: the chart ships a provider profile for \"anthropic\" only." .Values.inferenceProvider.type) -}}
+{{- end -}}
 {{- if not .Values.inferenceProvider.baseUrl -}}
 {{- fail "inferenceProvider.enabled=true requires inferenceProvider.baseUrl (e.g. http://gateway.your-llm-ns.svc.cluster.local:8080/anthropic)." -}}
 {{- end -}}
+{{- if contains "," .Values.inferenceProvider.baseUrl -}}
+{{- fail (printf "inferenceProvider.baseUrl %q contains a comma; it reaches sandboxes as ANTHROPIC_BASE_URL through OPENSHELL_KYMA_SANDBOX_ENV, which the driver splits on commas, so a value cannot contain one." .Values.inferenceProvider.baseUrl) -}}
+{{- end -}}
 {{- if not .Values.inferenceProvider.modelId -}}
 {{- fail "inferenceProvider.enabled=true requires inferenceProvider.modelId (e.g. claude-opus-4-7)." -}}
+{{- end -}}
+{{- if contains "," .Values.inferenceProvider.modelId -}}
+{{- fail (printf "inferenceProvider.modelId %q contains a comma; it reaches sandboxes as ANTHROPIC_MODEL through OPENSHELL_KYMA_SANDBOX_ENV, which the driver splits on commas, so a value cannot contain one." .Values.inferenceProvider.modelId) -}}
 {{- end -}}
 {{- if not .Values.inferenceProvider.credentialSecret.name -}}
 {{- fail "inferenceProvider.enabled=true requires inferenceProvider.credentialSecret.name pointing at a Secret you manage in .Release.Namespace." -}}

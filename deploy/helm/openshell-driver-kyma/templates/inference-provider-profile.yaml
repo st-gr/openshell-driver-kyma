@@ -1,0 +1,40 @@
+{{- if .Values.inferenceProvider.enabled }}
+{{- $url := urlParse .Values.inferenceProvider.baseUrl }}
+{{- $hostPort := splitList ":" $url.host }}
+{{- $host := first $hostPort }}
+{{- $port := ternary (last $hostPort) (ternary "443" "80" (eq $url.scheme "https")) (eq (len $hostPort) 2) }}
+# Provider profile for upstream's profile model. The endpoint is the inference
+# proxy the sandbox actually calls (inferenceProvider.baseUrl), not
+# api.anthropic.com: the supervisor injects the credential only for requests
+# to this host, and only from the processes in `binaries`.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "openshell-driver-kyma.fullname" . }}-inference-profile
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+data:
+  profile.yaml: |
+    id: {{ include "openshell-driver-kyma.inferenceProfileId" . }}
+    display_name: Anthropic via {{ $host }}
+    description: Anthropic inference through the cluster's inference proxy
+    category: inference
+    inference_capable: true
+    credentials:
+      - name: api_key
+        description: Anthropic API key
+        env_vars: [ANTHROPIC_API_KEY]
+        required: true
+        auth_style: header
+        header_name: x-api-key
+    discovery:
+      credentials: [api_key]
+    endpoints:
+      - host: {{ $host }}
+        port: {{ $port }}
+        protocol: rest
+        access: read-write
+        enforcement: enforce
+    binaries: {{ toJson .Values.inferenceProvider.binaries }}
+{{- end }}

@@ -147,8 +147,9 @@ gatewayApirule:
 #   - The gateway sidecar serves `GetInferenceBundle` (config plane only).
 #     It does NOT forward inference request bytes.
 #
-# When this block is enabled, a post-install Job runs `openshell provider
-# create` + `openshell inference set` against the in-pod gateway. The
+# When this block is enabled, the chart renders a provider profile and a
+# post-install Job registers it and creates the provider (`openshell provider
+# profile import` + `openshell provider create`) against the in-pod gateway. The
 # Anthropic API key is mounted into the Job from the Secret you created
 # in the pre-flight checklist — the chart never sees it.
 inferenceProvider:

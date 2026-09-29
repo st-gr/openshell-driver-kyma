@@ -170,3 +170,15 @@ is a list of Secret names, as the driver's environment takes it.
 {{- end -}}
 {{- uniq $names | toJson -}}
 {{- end }}
+
+{{/*
+Id of the provider profile the chart registers with the gateway, and the name of
+the provider the hook creates from it (inferenceProvider.profileId and .name).
+*/}}
+{{- define "openshell-driver-kyma.inferenceProfileId" -}}
+{{- default (printf "kyma-%s" .Values.inferenceProvider.type) .Values.inferenceProvider.profileId -}}
+{{- end -}}
+
+{{- define "openshell-driver-kyma.inferenceProviderName" -}}
+{{- default (printf "%s-%s" .Release.Name .Values.inferenceProvider.type) .Values.inferenceProvider.name -}}
+{{- end -}}

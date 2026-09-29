@@ -226,11 +226,21 @@ prints as 1.00074e+09 from seven digits up, and OpenShift-range UIDs have ten.
 {{- end -}}
 
 {{/*
-Comma-joined KEY=VALUE list for OPENSHELL_KYMA_SANDBOX_ENV. driver.sandboxEnv is
-checked separately, by openshell-driver-kyma.sandboxEnvGuards.
+Comma-joined KEY=VALUE list for OPENSHELL_KYMA_SANDBOX_ENV: driver.sandboxEnv, then,
+with inferenceProvider.enabled, the endpoint and model sandboxes call
+(ANTHROPIC_BASE_URL, ANTHROPIC_MODEL). The driver keeps the first entry for a
+key, so an explicit driver.sandboxEnv entry wins. driver.sandboxEnv is checked
+separately, by openshell-driver-kyma.sandboxEnvGuards; the two provider values, by
+openshell-driver-kyma.inferenceProviderGuards.
 */}}
 {{- define "openshell-driver-kyma.sandboxEnv" -}}
-{{- join "," .Values.driver.sandboxEnv -}}
+{{- $env := .Values.driver.sandboxEnv -}}
+{{- if .Values.inferenceProvider.enabled -}}
+{{- $env = concat $env (list
+      (printf "ANTHROPIC_BASE_URL=%s" .Values.inferenceProvider.baseUrl)
+      (printf "ANTHROPIC_MODEL=%s" .Values.inferenceProvider.modelId)) -}}
+{{- end -}}
+{{- join "," $env -}}
 {{- end -}}
 
 {{/*

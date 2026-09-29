@@ -425,15 +425,18 @@ gatewayApirule:
         #       jwksUri: https://my-tenant.accounts.ondemand.com/oauth2/certs
         authentications: []
 
-# Optional: declaratively configure the gateway's inference provider via
-# a post-install Job. The Job runs `openshell provider create` and
-# `openshell inference set` against the in-pod gateway, configuring the
-# gateway-side override of the upstream URL.
+# Optional: declaratively configure an inference provider through upstream's
+# provider-profile model. The chart renders a provider profile (a ConfigMap:
+# the endpoint host `baseUrl` names, and the `binaries` allowed to reach it),
+# and a post-install Job registers it with the in-pod gateway
+# (`openshell provider profile import`) and creates the provider from it
+# (`openshell provider create`), using the CLI of `upstream.version`. The
+# sandbox supervisor injects the API key into requests from those binaries to
+# that host. Sandboxes receive ANTHROPIC_BASE_URL (`baseUrl`) and
+# ANTHROPIC_MODEL (`modelId`) in their environment, and attach the provider
+# with `openshell sandbox create --provider <name>`.
 #
-# Architecture preservation: sandboxes still talk only to the upstream
-# pseudo-endpoint `inference.local`; the gateway sidecar (not the
-# sandbox) holds the real URL + key and rewrites traffic. The chart
-# never sees the API key — supply it via a Secret you manage in
+# The chart never sees the API key — supply it via a Secret you manage in
 # .Release.Namespace before install.
 inferenceProvider:
   enabled: false
@@ -441,6 +444,16 @@ inferenceProvider:
   name: ""                # provider name visible to `openshell provider list`. Defaults to <release>-<type> when empty.
   baseUrl: ""             # e.g. http://gateway.your-llm-ns.svc.cluster.local:8080/anthropic
   modelId: ""             # e.g. claude-opus-4-7
+  # Provider profile id registered with the gateway. Empty = "kyma-<type>".
+  profileId: ""
+  # Processes allowed to reach the inference endpoint through the sandbox
+  # supervisor. claude-code runs under node, so node must be listed; add the
+  # interpreter of any other SDK your sandbox image uses.
+  binaries:
+    - /usr/bin/node
+    - /usr/local/bin/node
+    - /usr/bin/claude
+    - /usr/local/bin/claude
   # Operator-managed Secret carrying the API key. Must already exist
   # in .Release.Namespace before install. The chart does NOT create it
   # (chart isolation guarantee #10: never inject pull-secrets into

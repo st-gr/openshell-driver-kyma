@@ -1,19 +1,27 @@
 {{- if .Values.inferenceProvider.enabled -}}
 {{- include "openshell-driver-kyma.inferenceProviderGuards" . -}}
-# Post-install / post-upgrade hook: configures the gateway's inference
-# provider + inference route via the openshell CLI.
+# Post-install / post-upgrade hook: registers the gateway's inference provider
+# through upstream's provider-profile model, using the openshell CLI of the
+# pinned upstream release (.Values.upstream.version).
 #
 # Runs AFTER the gateway pod is up (hook-weight -5, after gateway's
-# pre-install certgen at -20/-30). Calls:
-#   1. openshell provider create / provider update  — idempotent
-#   2. openshell inference set                      — idempotent (overwrites)
+# pre-install certgen at -20/-30). Calls, all idempotent:
+#   1. openshell provider profile lint / import / update
+#        the profile that inference-provider-profile.yaml renders and this Job
+#        mounts at /profile: the endpoint host the credential is injected for,
+#        and the binaries allowed to reach it;
+#   2. openshell provider create / provider update
+#        the provider, created from that profile with the API key.
+# There is no route-selection step: the model reaches sandboxes as
+# ANTHROPIC_MODEL (see the sandboxEnv helper in _driver-env.tpl), and sandboxes
+# attach the provider with `openshell sandbox create --provider <name>`.
 #
 # Auth note: this script assumes the gateway runs with
 # --disable-tls + allow_unauthenticated_users=true (the default when
 # gateway.oidc.issuer is unset). When the gateway has OIDC enabled,
 # the Job's CLI calls would require a valid admin token — that case is
 # out of scope here (Tasks 8/9). In an OIDC-enabled cluster the operator
-# must run the provider/inference setup manually via an authenticated
+# must register the profile and provider manually via an authenticated
 # CLI session.
 #
 # The chart never touches the API key — it stays inside the Secret
@@ -126,20 +134,20 @@ spec:
               # port. Requires `gw-health` to be in the chart's Service.
               value: "http://{{ include "openshell-driver-kyma.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.gateway.healthPort }}"
             - name: PROVIDER_NAME
-              value: {{ default (printf "%s-%s" (include "openshell-driver-kyma.fullname" .) .Values.inferenceProvider.type) .Values.inferenceProvider.name | quote }}
-            - name: PROVIDER_TYPE
-              value: {{ .Values.inferenceProvider.type | quote }}
-            - name: PROVIDER_BASE_URL
-              value: {{ .Values.inferenceProvider.baseUrl | quote }}
-            - name: MODEL_ID
-              value: {{ .Values.inferenceProvider.modelId | quote }}
+              value: {{ include "openshell-driver-kyma.inferenceProviderName" . | quote }}
+            - name: PROFILE_ID
+              value: {{ include "openshell-driver-kyma.inferenceProfileId" . | quote }}
             - name: CLI_VERSION
-              value: "v0.0.91"
+              value: {{ .Values.upstream.version | quote }}
             - name: ANTHROPIC_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.inferenceProvider.credentialSecret.name | quote }}
                   key: {{ .Values.inferenceProvider.credentialSecret.key | quote }}
+          volumeMounts:
+            - name: profile
+              mountPath: /profile
+              readOnly: true
           command:
             - /bin/sh
             - -eu
@@ -167,37 +175,48 @@ spec:
                 sleep 2
               done
 
-              # 4. Configure the provider. Idempotent: try create first,
-              # on AlreadyExists fall back to update. Both converge on the
-              # same desired state (credentials + ANTHROPIC_BASE_URL set).
-              # NOTE: `provider update` and `provider get` take a positional
-              # <NAME>, not `--name <NAME>`. `provider create` uses --name.
-              echo "[hook] configuring provider '${PROVIDER_NAME}'..."
+              # 4. Register the provider profile (upstream's profile model).
+              #    Idempotent, and it runs again on every `helm upgrade`: import
+              #    a new profile, or update the one that exists. The profile is
+              #    platform-scoped (--global), so the provider below is created
+              #    against the platform-scoped profile.
+              #    - An update must carry the stored resource_version (upstream's
+              #      optimistic concurrency); `export` reports it.
+              #    - `lint` rejects an id that is already registered, so it runs
+              #      on the import path only; `update` validates the file itself.
+              if current=$(openshell --gateway-endpoint "${GATEWAY_URL}" provider profile export "${PROFILE_ID}" --global 2>/dev/null); then
+                version=$(printf '%s\n' "${current}" | sed -n 's/^resource_version: *//p')
+                if [ -z "${version}" ]; then
+                  echo "[hook] provider profile ${PROFILE_ID} exists but reports no resource_version" >&2
+                  exit 1
+                fi
+                echo "[hook] provider profile ${PROFILE_ID} exists (resource_version ${version}); updating..."
+                { echo "resource_version: ${version}"; cat /profile/profile.yaml; } > /tmp/profile.yaml
+                openshell --gateway-endpoint "${GATEWAY_URL}" provider profile update -f /tmp/profile.yaml --global "${PROFILE_ID}"
+              else
+                echo "[hook] validating provider profile ${PROFILE_ID}..."
+                openshell --gateway-endpoint "${GATEWAY_URL}" provider profile lint -f /profile/profile.yaml --global
+                echo "[hook] registering provider profile ${PROFILE_ID}..."
+                openshell --gateway-endpoint "${GATEWAY_URL}" provider profile import -f /profile/profile.yaml --global
+              fi
+
+              # 5. Create the provider from that profile with the API key.
+              #    The CLI reads ANTHROPIC_API_KEY from this container's env.
+              #    `provider update` takes the positional <NAME>, `provider
+              #    create` takes --name.
+              echo "[hook] configuring provider ${PROVIDER_NAME}..."
               if openshell --gateway-endpoint "${GATEWAY_URL}" provider create \
-                  --name "${PROVIDER_NAME}" \
-                  --type "${PROVIDER_TYPE}" \
-                  --credential "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" \
-                  --config "ANTHROPIC_BASE_URL=${PROVIDER_BASE_URL}"; then
+                   --name "${PROVIDER_NAME}" --type "${PROFILE_ID}" \
+                   --credential ANTHROPIC_API_KEY --global-profile; then
                 echo "[hook] provider created"
               else
                 echo "[hook] provider create failed (likely AlreadyExists); updating"
                 openshell --gateway-endpoint "${GATEWAY_URL}" provider update "${PROVIDER_NAME}" \
-                  --credential "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" \
-                  --config "ANTHROPIC_BASE_URL=${PROVIDER_BASE_URL}"
+                  --credential ANTHROPIC_API_KEY
               fi
-
-              # 4. inference set — idempotent (overwrites existing).
-              # `--no-verify` skips the gateway's endpoint verification: that
-              # check would have the gateway sidecar dial the upstream once,
-              # which the chart's driver+gateway-pod NetworkPolicy doesn't
-              # allow (egress to in-cluster RFC1918:8080 is reserved for the
-              # sandbox-pod NP, where real inference traffic originates).
-              # The first sandbox round-trip is the real verification.
-              echo "[hook] setting inference route to provider=${PROVIDER_NAME} model=${MODEL_ID}..."
-              openshell --gateway-endpoint "${GATEWAY_URL}" inference set \
-                --provider "${PROVIDER_NAME}" \
-                --model "${MODEL_ID}" \
-                --no-verify
-
-              echo "[hook] DONE"
+              echo "[hook] done. Create sandboxes with: openshell sandbox create --provider ${PROVIDER_NAME} ..."
+      volumes:
+        - name: profile
+          configMap:
+            name: {{ include "openshell-driver-kyma.fullname" . }}-inference-profile
 {{- end }}

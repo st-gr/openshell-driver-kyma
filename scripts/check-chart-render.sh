@@ -25,7 +25,12 @@
 #      upstream's rules plus the Kyma layer's for that render: nothing missing and
 #      nothing extra, per scope, in every workspace mode and option combination the
 #      table names, including the Secrets the driver may read;
-#   6. values.yaml's upstream.version equals the tag Cargo.toml pins.
+#   6. values.yaml's upstream.version equals the tag Cargo.toml pins;
+#   7. providers follow upstream's profile model: no template calls the removed
+#      `openshell inference`, the chart renders a provider profile for the configured
+#      endpoint, the hook installs the pinned CLI, sandboxes receive the endpoint and
+#      model, and 7b an endpoint or model the driver would refuse (a comma) or a
+#      missing one fails the render, naming the value.
 # Needs helm, python3 with PyYAML, and network access (for check 1).
 set -euo pipefail
 
@@ -129,6 +134,34 @@ try good-3f-unset '' t
 # policy as "false", which the driver rejects.
 try bad-3g-string 'driver.allowDriverConfig' t --set-string driver.allowDriverConfig=false
 
+# 7 and 7b. An inference provider. Every value goes in explicitly and as the last
+# word on its key: helm applies --set after --set-json, so an override of a --set
+# value with --set-json would be ignored. baseUrl and modelId reach the sandboxes'
+# environment, which the driver splits on commas, so the chart holds them to the same
+# rules as driver.sandboxEnv: no comma, and not empty.
+inference_url=http://gateway.llm.svc.cluster.local:8080/anthropic
+inference_model=claude-opus-4-7
+inference_common=(--set inferenceProvider.enabled=true --set inferenceProvider.type=anthropic
+	--set inferenceProvider.credentialSecret.name=creds --set inferenceProvider.credentialSecret.key=api-key)
+try bad-7b-url-comma 'http://gateway.llm.svc.cluster.local:8080/a,b' t "${inference_common[@]}" \
+	--set-json 'inferenceProvider.baseUrl="http://gateway.llm.svc.cluster.local:8080/a,b"' \
+	--set "inferenceProvider.modelId=$inference_model"
+try bad-7b-model-comma 'claude-opus,4-7' t "${inference_common[@]}" \
+	--set "inferenceProvider.baseUrl=$inference_url" --set-json 'inferenceProvider.modelId="claude-opus,4-7"'
+try bad-7b-url-empty 'inferenceProvider.baseUrl' t "${inference_common[@]}" \
+	--set inferenceProvider.baseUrl= --set "inferenceProvider.modelId=$inference_model"
+try bad-7b-model-empty 'inferenceProvider.modelId' t "${inference_common[@]}" \
+	--set "inferenceProvider.baseUrl=$inference_url" --set inferenceProvider.modelId=
+try bad-7b-type 'inferenceProvider.type "openai"' t "${inference_common[@]}" \
+	--set inferenceProvider.type=openai --set "inferenceProvider.baseUrl=$inference_url" \
+	--set "inferenceProvider.modelId=$inference_model"
+# The endpoint and model join what driver.sandboxEnv already sets, in that order.
+try good-7-env '' t "${inference_common[@]}" --set "inferenceProvider.baseUrl=$inference_url" \
+	--set "inferenceProvider.modelId=$inference_model" --set-json 'driver.sandboxEnv=["OPTS=a=b"]'
+# An endpoint without a port gets its scheme's default port in the profile.
+try good-7-https '' t "${inference_common[@]}" --set inferenceProvider.baseUrl=https://llm.example.org/anthropic \
+	--set "inferenceProvider.modelId=$inference_model"
+
 # 4 and 5. Renders for the NetworkPolicy and RBAC checks. Named rbac-*, so check 2's
 # render-*.yaml glob skips them, and check 4's r*.yaml glob takes them.
 # Exposure on, in shared, managed (which also labels namespaces) and operator mode.
@@ -160,6 +193,9 @@ render_as t --set networkPolicy.enabled=false >"$WORK/rbac-shared-no-netpol.yaml
 render_as t --set gateway.enabled=false >"$WORK/rbac-shared-no-gateway.yaml"
 render_as t --set bedrockBridge.enabled=true --set bedrockBridge.sap.serviceKeySecret.name=sap-key \
 	--set bedrockBridge.singleDeploymentId=deployment >"$WORK/rbac-bedrock-bridge.yaml"
+# An inference provider, whose hook has a Role of its own that must not reach the driver.
+render_as t "${inference_common[@]}" --set "inferenceProvider.baseUrl=$inference_url" \
+	--set "inferenceProvider.modelId=$inference_model" >"$WORK/rbac-inference.yaml"
 
 python3 - "$WORK" "$CHART" "$KYMA_ARGS" "$ALL_OPTIONS" <<'PY'
 import glob, json, pathlib, re, sys
@@ -244,7 +280,7 @@ still = [k for k in removed if k in driver_values]
 if still:
     failures.append("removed values still in values.yaml: " + ", ".join(still))
 
-# 3b-3g. values upstream or the driver would refuse fail the render, naming the value
+# 3b-3g and 7b. values upstream or the driver would refuse fail the render, naming the value
 bad_cases = sorted(pathlib.Path(p).stem for p in glob.glob(str(work / "bad-*.rc")))
 if not bad_cases:
     failures.append("no refused-value cases were rendered")
@@ -452,6 +488,7 @@ EXPECTED = {
     "rbac-shared-no-gateway": (SHARED, SHARED_CLUSTER),                                    # an external gateway changes no RBAC
     "rbac-apirule": (SHARED + [KYMA_EXPOSURE], SHARED_CLUSTER),
     "rbac-shared-secrets": (SHARED, SHARED_CLUSTER),                                       # shared mode stages no Secret
+    "rbac-inference": (SHARED, SHARED_CLUSTER),                                            # the hook's own Role is bound to the hook
     "render-managed-true": ([], MANAGED),
     "render-managed-false": ([], MANAGED_NO_PVC),
     "rbac-managed-apirule": ([], MANAGED + [KYMA_EXPOSURE, KYMA_PSA_LABEL]),
@@ -483,6 +520,51 @@ pinned = (work / "pinned-tag.txt").read_text().strip()
 chart_version = (yaml.safe_load(values) or {}).get("upstream", {}).get("version")
 if chart_version != pinned:
     failures.append(f"values upstream.version={chart_version!r}, Cargo.toml pins {pinned!r}")
+
+# 7. providers use upstream's profile model, the pinned CLI, and reach sandboxes
+templates = "\n".join(p.read_text() for p in sorted((chart / "templates").iterdir()) if p.is_file())
+if "openshell inference" in templates or "inference set" in templates:
+    failures.append("templates still call the removed `openshell inference` command")
+inference = docs(work / "rbac-inference.yaml")
+profile_cm = next((d for d in inference if d.get("kind") == "ConfigMap"
+                   and "profile.yaml" in d.get("data", {})), None)
+if profile_cm is None:
+    failures.append("no provider profile ConfigMap rendered")
+else:
+    profile = yaml.safe_load(profile_cm["data"]["profile.yaml"])
+    endpoint = profile["endpoints"][0]
+    if (endpoint["host"], endpoint["port"]) != ("gateway.llm.svc.cluster.local", 8080):
+        failures.append(f"profile endpoint {endpoint} does not match inferenceProvider.baseUrl")
+    if "/usr/bin/node" not in profile["binaries"]:
+        failures.append("profile binaries must include node, which runs claude-code")
+# The chart has other hook Jobs (the gateway's PKI): the provider's is the one named for it.
+job = next((d for d in inference if d.get("kind") == "Job"
+            and d["metadata"]["name"].endswith("-inference-provider-hook")), None)
+if job is None:
+    failures.append("no inference provider hook Job rendered")
+else:
+    job_env = {e["name"]: e.get("value") for e in job["spec"]["template"]["spec"]["containers"][0].get("env", [])}
+    if job_env.get("CLI_VERSION") != pinned:
+        failures.append(f"hook CLI_VERSION={job_env.get('CLI_VERSION')!r}, expected the pinned {pinned!r}")
+driver_env = {e["name"]: e.get("value") for e in driver_container(inference).get("env", [])}
+sandbox_env = driver_env.get("OPENSHELL_KYMA_SANDBOX_ENV", "")
+for wanted in ("ANTHROPIC_BASE_URL=http://gateway.llm.svc.cluster.local:8080/anthropic",
+               "ANTHROPIC_MODEL=claude-opus-4-7"):
+    if wanted not in sandbox_env.split(","):
+        failures.append(f"sandboxes do not receive {wanted}")
+
+env = rendered("good-7-env")
+if env is not None and env.get("OPENSHELL_KYMA_SANDBOX_ENV") != (
+        "OPTS=a=b,ANTHROPIC_BASE_URL=http://gateway.llm.svc.cluster.local:8080/anthropic,"
+        "ANTHROPIC_MODEL=claude-opus-4-7"):
+    failures.append("the provider's endpoint and model did not follow driver.sandboxEnv in "
+                    f"OPENSHELL_KYMA_SANDBOX_ENV: {env.get('OPENSHELL_KYMA_SANDBOX_ENV')!r}")
+if rendered("good-7-https") is not None:
+    https_cm = next((d for d in docs(work / "good-7-https.yaml") if d.get("kind") == "ConfigMap"
+                     and "profile.yaml" in d.get("data", {})), None)
+    https_endpoint = yaml.safe_load(https_cm["data"]["profile.yaml"])["endpoints"][0] if https_cm else None
+    if not https_endpoint or (https_endpoint["host"], https_endpoint["port"]) != ("llm.example.org", 443):
+        failures.append(f"an https baseUrl without a port did not give port 443: {https_endpoint}")
 
 if failures:
     print("CHART_RENDER_FAIL:")
