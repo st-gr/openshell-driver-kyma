@@ -13,11 +13,11 @@
 use async_trait::async_trait;
 use computev1::pb::{
     compute_driver_client::ComputeDriverClient, compute_driver_server::ComputeDriverServer,
-    watch_sandboxes_event::Payload, CreateSandboxRequest, DeleteSandboxRequest,
-    DeleteWorkspaceRequest, DriverSandbox, DriverSandboxSpec, DriverSandboxTemplate,
-    EnsureWorkspaceRequest, GetCapabilitiesRequest, GetGatewayListenerRequirementsRequest,
-    GetSandboxRequest, ListSandboxesRequest, StartSandboxRequest, StopSandboxRequest,
-    ValidateSandboxCreateRequest, WatchSandboxesRequest,
+    watch_sandboxes_event::Payload, AuthenticateSandboxRequest, CreateSandboxRequest,
+    DeleteSandboxRequest, DeleteWorkspaceRequest, DriverSandbox, DriverSandboxSpec,
+    DriverSandboxTemplate, EnsureWorkspaceRequest, GetCapabilitiesRequest, GetSandboxRequest,
+    ListSandboxesRequest, StartSandboxRequest, StopSandboxRequest, ValidateSandboxCreateRequest,
+    WatchSandboxesRequest,
 };
 use mockall::mock;
 use openshell_driver_kyma::{
@@ -50,6 +50,11 @@ mock! {
         async fn validate_create(&self, sb: &DriverSandbox) -> Result<(), DriverError>;
         async fn has_gpu_capacity(&self, count: u32) -> Result<bool, DriverError>;
         async fn start_sandbox(&self, sandbox_id: &str) -> Result<(), DriverError>;
+        async fn runtime_identity(&self, sandbox_id: &str) -> Result<String, DriverError>;
+        async fn authenticate_sandbox(
+            &self,
+            credential: &str,
+        ) -> Result<(String, String), DriverError>;
         async fn stop_sandbox(&self, sandbox_id: &str) -> Result<(), DriverError>;
         async fn apply_apirule(
             &self,
@@ -195,7 +200,7 @@ async fn grpc_get_capabilities_returns_kyma() {
     .await;
 
     let r = client
-        .get_capabilities(GetCapabilitiesRequest {})
+        .get_capabilities(GetCapabilitiesRequest::default())
         .await
         .unwrap()
         .into_inner();
@@ -213,25 +218,25 @@ async fn grpc_get_capabilities_returns_kyma() {
     let _ = handle.await;
 }
 
-/// Over the real wire, not just the trait: proves a v0.0.97 gateway calling
-/// this RPC gets a valid empty response rather than `Unimplemented`.
+/// Over the real wire, not just the trait: a v0.1.2 gateway calling
+/// `AuthenticateSandbox` gets the provisioner's rejection back as its gRPC
+/// status code, not a connection error or a silently-accepted credential.
 #[tokio::test]
-async fn grpc_gateway_listener_requirements_returns_empty() {
+async fn grpc_authenticate_sandbox_propagates_rejection() {
     let (_dir, socket) = temp_socket();
-    let (mut client, shutdown, handle) = start_server(
-        socket,
-        MockProvisioner::new(),
-        MockEnricher::new(),
-        MockMetrics::new(),
-    )
-    .await;
+    let mut p = MockProvisioner::new();
+    p.expect_authenticate_sandbox()
+        .returning(|_| Err(DriverError::Unauthenticated("nope".into())));
+    let (mut client, shutdown, handle) =
+        start_server(socket, p, MockEnricher::new(), MockMetrics::new()).await;
 
-    let r = client
-        .get_gateway_listener_requirements(GetGatewayListenerRequirementsRequest {})
+    let err = client
+        .authenticate_sandbox(AuthenticateSandboxRequest {
+            credential: "whatever".into(),
+        })
         .await
-        .expect("RPC must be implemented, not Unimplemented")
-        .into_inner();
-    assert!(r.requirements.is_empty());
+        .expect_err("a rejected credential must not authenticate");
+    assert_eq!(err.code(), tonic::Code::Unauthenticated);
 
     drop(shutdown);
     let _ = handle.await;
@@ -241,6 +246,8 @@ async fn grpc_gateway_listener_requirements_returns_empty() {
 async fn grpc_create_then_get_round_trips() {
     let mut p = MockProvisioner::new();
     p.expect_create().returning(|_| Ok(()));
+    p.expect_runtime_identity()
+        .returning(|_| Ok("kyma://openshell/cr-uid".to_string()));
     p.expect_get().returning(|name| {
         Ok(DriverSandbox {
             id: "sb-id-1".into(),
@@ -264,7 +271,7 @@ async fn grpc_create_then_get_round_trips() {
     let got = client
         .get_sandbox(GetSandboxRequest {
             sandbox_id: "sb-id-1".into(),
-            sandbox_name: "sb-1".into(),
+            name: "sb-1".into(),
         })
         .await
         .unwrap()
@@ -310,7 +317,7 @@ async fn grpc_delete_idempotent_returns_false_on_not_found() {
     let r = client
         .delete_sandbox(DeleteSandboxRequest {
             sandbox_id: "id".into(),
-            sandbox_name: "gone".into(),
+            name: "gone".into(),
         })
         .await
         .unwrap()
@@ -348,6 +355,8 @@ async fn grpc_stop_and_start_are_implemented() {
     let mut p = MockProvisioner::new();
     p.expect_stop_sandbox().times(1).returning(|_| Ok(()));
     p.expect_start_sandbox().times(1).returning(|_| Ok(()));
+    p.expect_runtime_identity()
+        .returning(|_| Ok("kyma://openshell/cr-uid".to_string()));
 
     let (_dir, socket) = temp_socket();
     let (mut client, shutdown, handle) =
@@ -356,14 +365,15 @@ async fn grpc_stop_and_start_are_implemented() {
     client
         .stop_sandbox(StopSandboxRequest {
             sandbox_id: "sb-1".into(),
-            sandbox_name: "n".into(),
+            name: "n".into(),
         })
         .await
         .expect("stop must be implemented");
     client
         .start_sandbox(StartSandboxRequest {
             sandbox_id: "sb-1".into(),
-            sandbox_name: "n".into(),
+            name: "n".into(),
+            ..Default::default()
         })
         .await
         .expect("start must be implemented");
@@ -394,7 +404,7 @@ async fn grpc_stop_rejects_empty_sandbox_id() {
     let err = client
         .stop_sandbox(StopSandboxRequest {
             sandbox_id: String::new(),
-            sandbox_name: "n".into(),
+            name: "n".into(),
         })
         .await
         .expect_err("empty sandbox_id must be rejected");
@@ -418,7 +428,8 @@ async fn grpc_start_rejects_empty_sandbox_id() {
     let err = client
         .start_sandbox(StartSandboxRequest {
             sandbox_id: String::new(),
-            sandbox_name: "n".into(),
+            name: "n".into(),
+            ..Default::default()
         })
         .await
         .expect_err("empty sandbox_id must be rejected");

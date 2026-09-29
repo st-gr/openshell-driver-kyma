@@ -206,6 +206,17 @@ pub struct Config {
     /// unaffected by this flag -- they are not the exposure.
     #[arg(long, default_value_t = false, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
     pub driver_config_allow_volumes: bool,
+
+    /// Mirrors the gateway's `[openshell.drivers.kyma].allow_driver_config`.
+    ///
+    /// The gateway rejects any non-empty caller `driver_config` when this is
+    /// false, so the chart sets both sides from one value.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
+    pub allow_driver_config: bool,
+
+    /// Mirrors the gateway's `[openshell.drivers.kyma].resource_admission.enabled`.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
+    pub resource_admission_enabled: bool,
 }
 
 impl Default for Config {
@@ -236,6 +247,8 @@ impl Default for Config {
             gateway_id: String::new(),
             operator_namespace_allowlist: Vec::new(),
             driver_config_allow_volumes: false,
+            allow_driver_config: true,
+            resource_admission_enabled: true,
         }
     }
 }

@@ -16,5 +16,6 @@ pub mod lifecycle;
 pub mod main_process;
 pub mod metrics;
 pub mod provisioner;
+pub mod sandbox_auth;
 pub mod vendor;
 pub mod workspace;

@@ -7,6 +7,7 @@ use computev1::pb::{
     DriverCondition, DriverResourceRequirements, DriverSandbox, DriverSandboxStatus,
     ResourceRequirements,
 };
+use k8s_openapi::jiff;
 use kube::core::DynamicObject;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
@@ -107,7 +108,7 @@ fn status_from_map(status: &Map<String, Value>) -> DriverSandboxStatus {
     let mut ds = DriverSandboxStatus::default();
 
     if let Some(v) = status.get("sandboxName").and_then(Value::as_str) {
-        ds.sandbox_name = v.to_string();
+        ds.name = v.to_string();
     }
     if let Some(v) = status.get("agentPod").and_then(Value::as_str) {
         ds.instance_id = v.to_string();
@@ -127,12 +128,42 @@ fn status_from_map(status: &Map<String, Value>) -> DriverSandboxStatus {
                 status: get_string(cmap, "status"),
                 reason: get_string(cmap, "reason"),
                 message: get_string(cmap, "message"),
-                last_transition_time: get_string(cmap, "lastTransitionTime"),
+                transition_time: parse_timestamp(&get_string(cmap, "lastTransitionTime")),
             });
         }
     }
 
     ds
+}
+
+/// Convert a jiff instant into the `google.protobuf.Timestamp` wire type.
+/// `compute_driver.proto` moved `DriverCondition.last_transition_time` and
+/// `DriverPlatformEvent.timestamp_ms` to typed `Timestamp` fields in v0.1.2
+/// (`transition_time` / `event_time`); this is the shared conversion both
+/// call sites use. `k8s_openapi::apimachinery::...::Time` is a newtype over
+/// `k8s_openapi::jiff::Timestamp`, so this also covers values read straight
+/// off a typed Kubernetes object (see `provisioner.rs`'s event watch).
+#[must_use]
+pub fn jiff_to_prost_timestamp(t: jiff::Timestamp) -> prost_types::Timestamp {
+    prost_types::Timestamp {
+        seconds: t.as_second(),
+        nanos: t.subsec_nanosecond(),
+    }
+}
+
+/// Parse an RFC3339 timestamp string — e.g. a JSON condition's
+/// `lastTransitionTime`, read out of an untyped `DynamicObject` — into a
+/// `google.protobuf.Timestamp`. Returns `None` for an empty or unparseable
+/// string rather than failing the whole conversion: a malformed timestamp
+/// from the API server should not hide the rest of a condition.
+#[must_use]
+pub fn parse_timestamp(s: &str) -> Option<prost_types::Timestamp> {
+    if s.is_empty() {
+        return None;
+    }
+    s.parse::<jiff::Timestamp>()
+        .ok()
+        .map(jiff_to_prost_timestamp)
 }
 
 /// Safely extract a string value from a JSON map, accepting numeric
@@ -331,7 +362,7 @@ mod tests {
         let sb = object_to_driver_sandbox(&obj).unwrap();
         let st = sb.status.unwrap();
         assert_eq!(st.instance_id, "pod-xyz");
-        assert_eq!(st.sandbox_name, "sb-2-cr");
+        assert_eq!(st.name, "sb-2-cr");
     }
 
     #[test]
@@ -360,8 +391,29 @@ mod tests {
         assert_eq!(st.conditions[0].r#type, "Ready");
         assert_eq!(st.conditions[0].status, "True");
         assert_eq!(st.conditions[0].reason, "PodScheduled");
+        assert_eq!(
+            st.conditions[0].transition_time,
+            Some(prost_types::Timestamp {
+                seconds: 1_779_840_000,
+                nanos: 0,
+            })
+        );
         assert_eq!(st.conditions[1].r#type, "Available");
         assert_eq!(st.conditions[1].status, "False");
+        assert_eq!(st.conditions[1].transition_time, None);
+    }
+
+    #[test]
+    fn parse_timestamp_handles_empty_and_malformed_strings() {
+        assert_eq!(parse_timestamp(""), None);
+        assert_eq!(parse_timestamp("not-a-timestamp"), None);
+        assert_eq!(
+            parse_timestamp("2026-05-27T00:00:00Z"),
+            Some(prost_types::Timestamp {
+                seconds: 1_779_840_000,
+                nanos: 0,
+            })
+        );
     }
 
     #[test]

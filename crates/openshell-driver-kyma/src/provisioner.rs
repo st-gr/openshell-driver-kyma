@@ -24,7 +24,8 @@ use crate::main_process::{MainProcessConfig, MAIN_PROCESS_SPEC};
 use async_trait::async_trait;
 use computev1::pb::{DriverPlatformEvent, DriverSandbox};
 use futures::StreamExt;
-use k8s_openapi::api::core::v1::{Event as CoreEvent, Namespace, Node, ServiceAccount};
+use k8s_openapi::api::authentication::v1::{TokenReview, TokenReviewSpec};
+use k8s_openapi::api::core::v1::{Event as CoreEvent, Namespace, Node, Pod, ServiceAccount};
 use kube::{
     api::{
         Api, ApiResource, DeleteParams, DynamicObject, ListParams, Patch, PatchParams, PostParams,
@@ -49,10 +50,12 @@ use crate::workspace::WorkspaceMode;
 
 const LABEL_KAGENTI: &str = "kagenti.io/type";
 const LABEL_ISTIO_INJECT: &str = "sidecar.istio.io/inject";
-// Pod annotation read by the gateway after a successful TokenReview to
-// resolve a projected SA token's pod identity to a sandbox identity.
+// Pod annotation recording the sandbox id. It currently has no reader: the
+// gateway's TokenReview authenticator that consumed it was deleted in
+// v0.1.2, and this driver's own authentication path reads the LABEL
+// `openshell.ai/sandbox-id` (LABEL_SANDBOX_ID) instead. Kept as-is.
 // Note the differing TLD vs LABEL_SANDBOX_ID: that's intentional, the
-// upstream gateway uses `.io/` for annotations and `.ai/` for labels.
+// upstream gateway used `.io/` for annotations and `.ai/` for labels.
 const ANNOTATION_SANDBOX_ID: &str = "openshell.io/sandbox-id";
 /// Driver-injected variables the AGENT needs, as opposed to supervisor
 /// plumbing. Only these ride along in OPENSHELL_USER_ENVIRONMENT; see the
@@ -94,7 +97,7 @@ const GPU_RESOURCE: &str = "nvidia.com/gpu";
 // control path a caller's driver_config mount must not overlap.
 pub(crate) const SA_TOKEN_VOLUME: &str = "openshell-sa-token";
 pub(crate) const SA_TOKEN_MOUNT_PATH: &str = "/var/run/secrets/openshell";
-const SA_TOKEN_AUDIENCE: &str = "openshell-gateway";
+pub(crate) const SA_TOKEN_AUDIENCE: &str = "openshell-gateway";
 const SA_TOKEN_TTL_SECS: i64 = 3600;
 
 /// `KymaProvisioner` implements `SandboxProvisioner` for SAP BTP Kyma.
@@ -178,6 +181,15 @@ impl KymaProvisioner {
         match self.cfg.workspace_mode {
             WorkspaceMode::Shared => Some(self.cfg.namespace.clone()),
             WorkspaceMode::Managed | WorkspaceMode::Operator => None,
+        }
+    }
+
+    /// Namespaces whose sandboxes this driver serves. Empty means the mode
+    /// spans namespaces, so the credential's namespace is not constrained here.
+    fn served_namespaces(&self) -> &[String] {
+        match self.cfg.workspace_mode {
+            WorkspaceMode::Shared => std::slice::from_ref(&self.cfg.namespace),
+            WorkspaceMode::Managed | WorkspaceMode::Operator => &[],
         }
     }
 
@@ -928,11 +940,11 @@ impl KymaProvisioner {
         }
         let labels = merge_maps(&user_labels, &driver_labels);
 
-        // Annotations: the gateway's K8s SA bootstrap authenticator
-        // resolves the supervisor's projected SA token to a sandbox-id
-        // by reading this annotation on the pod after TokenReview. It
-        // is set once at pod create and immutable for the lifetime of
-        // the sandbox.
+        // Annotations: records the sandbox-id on the pod. Set once at pod
+        // create and immutable for the lifetime of the sandbox. It has no
+        // reader since v0.1.2 deleted the gateway's SA bootstrap
+        // authenticator; the driver's AuthenticateSandbox path resolves
+        // the sandbox from the `openshell.ai/sandbox-id` label instead.
         let mut annotations: HashMap<String, String> = HashMap::new();
         annotations.insert(ANNOTATION_SANDBOX_ID.into(), sb.id.clone());
 
@@ -1601,6 +1613,22 @@ async fn forward_sandbox_watch<S>(
     }
 }
 
+/// Namespace and UID of a Sandbox CR. Shared by `runtime_identity` and
+/// `authenticate_sandbox` so the identity the gateway records at create time
+/// and the one it compares at bootstrap are built from the same fields.
+fn cr_namespace_and_uid<'a>(
+    cr: &'a DynamicObject,
+    sandbox_id: &str,
+) -> Result<(&'a str, &'a str), DriverError> {
+    let namespace = cr.metadata.namespace.as_deref().ok_or_else(|| {
+        DriverError::FailedPrecondition(format!("sandbox {sandbox_id} resource has no namespace"))
+    })?;
+    let uid = cr.metadata.uid.as_deref().ok_or_else(|| {
+        DriverError::FailedPrecondition(format!("sandbox {sandbox_id} resource has no UID"))
+    })?;
+    Ok((namespace, uid))
+}
+
 #[async_trait]
 impl SandboxProvisioner for KymaProvisioner {
     async fn create(&self, sb: &DriverSandbox) -> Result<(), DriverError> {
@@ -1722,6 +1750,124 @@ impl SandboxProvisioner for KymaProvisioner {
         result
     }
 
+    async fn runtime_identity(&self, sandbox_id: &str) -> Result<String, DriverError> {
+        let cr = self.find_by_sandbox_id(sandbox_id).await?;
+        let (namespace, uid) = cr_namespace_and_uid(&cr, sandbox_id)?;
+        Ok(crate::sandbox_auth::runtime_identity(namespace, uid))
+    }
+
+    async fn authenticate_sandbox(
+        &self,
+        credential: &str,
+    ) -> Result<(String, String), DriverError> {
+        use crate::sandbox_auth::{
+            admit_namespace, admit_owner, admit_pod_owner, map_pod_lookup_error,
+            map_sandbox_lookup_error, map_token_review_error, reject_blank_credential,
+            runtime_identity, token_review_identity,
+        };
+
+        reject_blank_credential(credential)?;
+
+        let reviews: Api<TokenReview> = Api::all(self.client.clone());
+        let review = reviews
+            .create(
+                &PostParams::default(),
+                &TokenReview {
+                    metadata: kube::core::ObjectMeta::default(),
+                    spec: TokenReviewSpec {
+                        audiences: Some(vec![SA_TOKEN_AUDIENCE.to_string()]),
+                        token: credential.to_string(),
+                    },
+                    status: None,
+                },
+            )
+            .await
+            .map_err(|error| {
+                // Never log `credential`; it is secret-tagged in the proto.
+                tracing::warn!(%error, "Kubernetes TokenReview call failed");
+                map_token_review_error(&error)
+            })?;
+
+        let status = review.status.ok_or_else(|| {
+            DriverError::Unavailable("TokenReview response had no status".to_string())
+        })?;
+        let identity =
+            token_review_identity(&status, SANDBOX_SERVICE_ACCOUNT)?.ok_or_else(|| {
+                DriverError::Unauthenticated("sandbox credential was not accepted".to_string())
+            })?;
+
+        admit_namespace(&identity.namespace, self.served_namespaces())?;
+
+        let pods: Api<Pod> = Api::namespaced(self.client.clone(), &identity.namespace);
+        let pod = pods
+            .get_opt(&identity.pod_name)
+            .await
+            .map_err(|error| {
+                tracing::warn!(%error, "Kubernetes Pod lookup failed during sandbox authentication");
+                map_pod_lookup_error(error)
+            })?
+            .ok_or_else(|| {
+                DriverError::PermissionDenied("authenticated pod no longer exists".to_string())
+            })?;
+
+        if pod.metadata.uid.as_deref() != Some(identity.pod_uid.as_str()) {
+            tracing::warn!(
+                namespace = %identity.namespace,
+                pod = %identity.pod_name,
+                "sandbox authentication rejected: pod UID does not match the credential"
+            );
+            return Err(DriverError::PermissionDenied(
+                "authenticated pod UID does not match the credential".to_string(),
+            ));
+        }
+
+        let sandbox_id = pod
+            .metadata
+            .labels
+            .as_ref()
+            .and_then(|labels| labels.get(LABEL_SANDBOX_ID))
+            .cloned()
+            .ok_or_else(|| {
+                DriverError::PermissionDenied("authenticated pod carries no sandbox id".to_string())
+            })?;
+
+        // The label only nominates a candidate CR; it is not trusted yet.
+        let cr = self
+            .find_by_sandbox_id(&sandbox_id)
+            .await
+            .map_err(map_sandbox_lookup_error)?;
+        let (namespace, uid) = cr_namespace_and_uid(&cr, &sandbox_id)?;
+
+        admit_owner(
+            &identity.namespace,
+            &sandbox_id,
+            namespace,
+            cr.metadata
+                .labels
+                .as_ref()
+                .and_then(|labels| labels.get(LABEL_SANDBOX_ID))
+                .map(String::as_str),
+        )?;
+
+        // The controller-set ownerReference is what binds the pod to the CR.
+        let owner_refs: Vec<(String, String)> = pod
+            .metadata
+            .owner_references
+            .iter()
+            .flatten()
+            .map(|owner| (owner.kind.clone(), owner.uid.clone()))
+            .collect();
+        admit_pod_owner(uid, &owner_refs).inspect_err(|_| {
+            tracing::warn!(
+                namespace = %identity.namespace,
+                pod = %identity.pod_name,
+                "sandbox authentication rejected: pod is not owned by the sandbox it names"
+            );
+        })?;
+
+        Ok((sandbox_id, runtime_identity(namespace, uid)))
+    }
+
     async fn get(&self, sandbox_id: &str) -> Result<DriverSandbox, DriverError> {
         let obj = self.find_by_sandbox_id(sandbox_id).await?;
         object_to_driver_sandbox(&obj).map_err(DriverError::InvalidArgument)
@@ -1823,11 +1969,10 @@ impl SandboxProvisioner for KymaProvisioner {
                     None => continue,
                 };
                 let platform_event = DriverPlatformEvent {
-                    timestamp_ms: core_ev
+                    event_time: core_ev
                         .last_timestamp
                         .as_ref()
-                        .map(|t| t.0.as_millisecond())
-                        .unwrap_or(0),
+                        .map(|t| crate::helpers::jiff_to_prost_timestamp(t.0)),
                     source: "kubernetes".to_string(),
                     r#type: core_ev.type_.clone().unwrap_or_default(),
                     reason: core_ev.reason.clone().unwrap_or_default(),

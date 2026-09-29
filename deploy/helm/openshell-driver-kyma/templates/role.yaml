@@ -30,9 +30,8 @@ rules:
   # gateway's JWT settings again. It previously lived only inside the
   # `gateway.enabled && gateway.sandboxJwt.enabled` block below, which
   # exists for the *gateway* container's own per-sandbox identity
-  # resolution (after TokenReview validates the supervisor's projected SA
-  # token, the gateway looks up the bound pod to read its
-  # `openshell.io/sandbox-id` annotation). Both containers share this
+  # resolution (legacy: before v0.1.2 the gateway looked up the bound pod
+  # to read its `openshell.io/sandbox-id` annotation). Both containers share this
   # ServiceAccount, but the driver's own need for `pods: get` does not
   # depend on sandboxJwt being enabled, and `values.yaml` ships that
   # disabled by default -- a default install therefore granted `pods` no

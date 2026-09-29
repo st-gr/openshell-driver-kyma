@@ -327,7 +327,7 @@ async fn test_get_sandbox() {
     let got = driver
         .get_sandbox(Request::new(GetSandboxRequest {
             sandbox_id: format!("id-{name}"),
-            sandbox_name: name.clone(),
+            name: name.clone(),
         }))
         .await
         .expect("get")
@@ -362,7 +362,7 @@ async fn test_get_sandbox_resolves_by_id_not_name() {
     let got = driver
         .get_sandbox(Request::new(GetSandboxRequest {
             sandbox_id: format!("id-{name}"),
-            sandbox_name: "totally-wrong-name".into(),
+            name: "totally-wrong-name".into(),
         }))
         .await
         .expect("get should succeed on id alone")
@@ -388,7 +388,7 @@ async fn test_delete_sandbox_idempotent() {
     let r = driver
         .delete_sandbox(Request::new(DeleteSandboxRequest {
             sandbox_id: format!("id-{name}"),
-            sandbox_name: name.clone(),
+            name: name.clone(),
         }))
         .await
         .expect("delete")
@@ -399,7 +399,7 @@ async fn test_delete_sandbox_idempotent() {
     let r = driver
         .delete_sandbox(Request::new(DeleteSandboxRequest {
             sandbox_id: format!("id-{name}"),
-            sandbox_name: name,
+            name,
         }))
         .await
         .expect("second delete")

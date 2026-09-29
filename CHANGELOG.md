@@ -4,6 +4,125 @@ All notable changes to openshell-driver-kyma are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.8.0] — 2026-09-28
+
+### Added
+
+- **Re-vendored the `ComputeDriver` proto contract to upstream `v0.1.2`**
+  (`proto/UPSTREAM.lock`, via `make proto-vendor TAG=v0.1.2`). Unlike the
+  prior `v0.0.116` move, this one changed the wire shape substantially, and
+  `compute_driver.proto` gained two new transitive proto dependencies
+  (`extension.proto`, `sandbox.proto`, which itself pulls in
+  `datamodel.proto`) that upstream did not previously require —
+  `scripts/vendor-proto.sh`'s `FILES` list and `crates/computev1/build.rs`'s
+  compile list were extended to vendor and compile all three, and
+  `crates/computev1/src/lib.rs` now nests the generated modules as
+  `openshell::{compute,extension,sandbox,datamodel}::v1` (re-exported
+  flat under `pb::` for existing call sites) so prost's cross-package
+  `super::` references resolve.
+  - **`GetGatewayListenerRequirements` was removed** and replaced with
+    **`AuthenticateSandbox`**, which this driver implements: it performs the
+    Kubernetes `TokenReview` on the sandbox's projected ServiceAccount token
+    itself and advertises `GetCapabilitiesResponse.supports_sandbox_authentication`.
+    See "Changed" below and `sandbox_auth.rs` / `provisioner.rs`.
+  - **`GetCapabilitiesRequest`/`Response` gained a peer capability/protocol-
+    version negotiation scheme** (`extension.proto`'s `PeerMetadata`), plus
+    `resource_capabilities`, `rootfs_tar_staging_dir`/`rootfs_tar_max_bytes`,
+    and `resource_admission_policy`. This driver now rejects a
+    `GetCapabilitiesRequest.gateway` with unmet `required_capabilities` (per
+    that field's own contract comment), reports `resource_capabilities`
+    reflecting already-implemented CPU/memory-limit and GPU-selection
+    behavior (`helpers::build_resources`, `helpers::effective_gpu_count`),
+    reports no rootfs-tar support (unimplemented), and acknowledges the
+    gateway's resource-admission policy (see "Changed" below). The
+    `extension.protocol_version`/`implementation_name` values sent back
+    remain a conservative self-identification with no verified interop
+    reference (open TODO at the call site in `driver.rs`), and the driver
+    does not yet implement the wider operator admission/policy negotiation
+    surface (`DriverSandboxSpec.policy`, `WorkloadIdentityRequest`,
+    `DriverFenceEvidence`).
+  - **Field renames and retyping**, all with exactly one call site, now
+    updated: `sandbox_name` → `name` on `GetSandboxRequest`,
+    `StopSandboxRequest`, `StartSandboxRequest`, `DeleteSandboxRequest`, and
+    `DriverSandboxStatus`; `DriverCondition.last_transition_time` (string) →
+    `transition_time` (`google.protobuf.Timestamp`); and
+    `DriverPlatformEvent.timestamp_ms` (int64 millis) → `event_time`
+    (`google.protobuf.Timestamp`). New helpers
+    `helpers::parse_timestamp`/`helpers::jiff_to_prost_timestamp` cover the
+    RFC3339-string and typed-`k8s_openapi::Time` conversion paths
+    respectively.
+  - **The pinned gateway/supervisor container image digests**
+    (`gateway.image.tag`, `driver.supervisorImage` in
+    `deploy/helm/openshell-driver-kyma/values.yaml`) were bumped to the
+    `v0.1.2` images in the same change. See the updated comment above
+    `gateway.image` in `values.yaml` for the full contract-diff writeup and
+    prior-pin history.
+  - `cargo test --workspace` gained coverage for the new/changed surface:
+    `driver.rs`'s `get_capabilities_rejects_unmet_gateway_required_capabilities` /
+    `..._accepts_gateway_with_no_required_capabilities`, and
+    `helpers.rs`'s `parse_timestamp_handles_empty_and_
+    malformed_strings` and an updated `conditions_array_is_extracted`.
+
+### Changed
+
+- **UPGRADE NOTE: delete all existing sandboxes before upgrading to this
+  release.** `IssueSandboxToken` compares the sandbox's persisted
+  `COMPUTE_DRIVER` and `COMPUTE_RUNTIME_IDENTITY` annotations, and sandboxes
+  created under v0.0.116 do not carry them. Their bootstrap is therefore
+  denied, and there is no back-fill path. Drain and recreate every sandbox;
+  do not expect an in-place upgrade of running ones.
+- **Gateway config is schema v2.** The chart's `gateway.toml` now sets
+  `version = 2`, no longer emits a gateway-scope `sandbox_namespace`, and
+  declares `[openshell.drivers.kyma]` with `socket_path` and
+  `allow_driver_config`. The TOML is now rendered whenever the gateway runs
+  (previously only with sandbox-JWT enabled). New chart value
+  `driver.allowDriverConfig` feeds both the TOML and the driver's
+  `--allow-driver-config` flag so the two sides cannot disagree; upstream
+  defaults it to false, which would reject every caller `driver_config`.
+  The gateway container selects the driver with `--compute-driver kyma`
+  (upstream v0.1.x removed `--drivers`).
+- **`AuthenticateSandbox` is implemented and the capability is advertised**
+  (`supports_sandbox_authentication: true`). The driver, not the gateway,
+  performs the `TokenReview` on the projected ServiceAccount token
+  (upstream deleted the gateway's `auth/k8s_sa` authenticator in v0.1.2),
+  resolves the presenting Pod to its Sandbox CR, and enforces that the Pod
+  is owned by that CR.
+- **`runtime_identity` is returned from `CreateSandbox`, `StartSandbox` and
+  `AuthenticateSandbox`** as `kyma://{namespace}/{sandbox_uid}`, produced by
+  one function (`sandbox_auth::runtime_identity`) so the three cannot drift.
+- **The resource-admission acknowledgement is reported** in
+  `GetCapabilitiesResponse.resource_admission_policy`. It must equal the
+  policy the gateway derives from `[openshell.drivers.kyma]`, otherwise the
+  gateway refuses the driver at startup.
+- **The `tokenreviews: create` ClusterRole grant is now ungated** (no longer
+  conditional on `gateway.sandboxJwt.enabled`), because the driver's
+  ServiceAccount performs the TokenReview.
+- **New CI guard `scripts/check-gateway-config.sh`** renders the chart's
+  gateway TOML and proves the digest-pinned gateway image the chart deploys
+  accepts it (`GATEWAY_CONFIG_ACCEPTED`), so a schema break is caught in CI
+  rather than at install time.
+- **The gateway pin is lifted.** `.github/upstream-compat.env` is back to
+  `GATEWAY_REF=latest` (which resolves to v0.1.2 today) and `PIN_BLOCKED_BY`
+  is gone; the migration the pin was waiting for has landed.
+
+### Known gap (not addressed by this release)
+
+- **Upstream removed the managed inference router and `inference.local`**
+  between `v0.0.116` and `v0.1.2` (confirmed via
+  `scripts/check-inference-local.sh v0.1.2`; tracks NVIDIA/OpenShell#3195).
+  This is an architecture change behind an **unchanged** `ComputeDriver`
+  wire contract, so it is invisible to `check-proto-drift.sh` and to
+  everything else in this release. `provisioner.rs` still injects
+  `ANTHROPIC_BASE_URL=https://inference.local` /
+  `OPENAI_BASE_URL=https://inference.local` into every sandbox, and that
+  host no longer resolves against a `v0.1.2`+ gateway; the chart's
+  `inferenceProvider.*` values configure the now-removed workspace-global
+  route rather than the replacement provider-profile-plus-attachment
+  workflow. This requires its own dedicated design (there is no upstream
+  Kubernetes driver source vendored in this repo to confirm the replacement
+  wiring against) and is intentionally **not** fixed here — see
+  `scripts/check-inference-local.sh`'s inline hints for where to start.
+
 ## [0.6.0] — 2026-08-31
 
 ### Added

@@ -100,11 +100,14 @@ gateway. The supervisor reads the secret from a mounted ConfigMap.
 
 Kyma driver: projected ServiceAccount token (audience-bound to
 `openshell-gateway`, kubelet-rotated) exchanged for a per-sandbox JWT
-via the gateway's `IssueSandboxToken` RPC. The gateway validates the
-projected token via the apiserver's `TokenReview` API, reads the
-sandbox-pod's `openshell.io/sandbox-id` annotation, mints a fresh
-sandbox JWT signed with a key the gateway holds. Mints a fresh JWT
-on supervisor startup and on refresh-near-expiry.
+via the gateway's `IssueSandboxToken` RPC. The gateway delegates the
+credential check to the driver's `AuthenticateSandbox` RPC: the driver
+validates the projected token via the apiserver's `TokenReview` API,
+resolves the presenting pod to its sandbox through the pod's
+`openshell.ai/sandbox-id` label (and checks the pod is owned by that
+sandbox's CR), and returns the sandbox's runtime identity. The gateway
+then mints a fresh sandbox JWT signed with a key it holds. A fresh JWT
+is minted on supervisor startup and on refresh-near-expiry.
 
 Why the difference: Kyma clusters typically issue OIDC kubeconfigs
 through SAP IAS, the supervisor pod has no shared cluster-wide secret

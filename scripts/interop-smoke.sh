@@ -97,11 +97,11 @@ helm install "$RELEASE" deploy/helm/openshell-driver-kyma \
 	--set driver.supervisorImage="$SUPERVISOR_IMAGE" \
 	--wait --timeout 5m \
 	|| fail "helm install failed"
-# gateway.sandboxJwt.enabled=true is required: templates/gateway-config.yaml
-# is gated `if gateway.enabled AND gateway.sandboxJwt.enabled`, and that
-# ConfigMap is the only place `allow_unauthenticated_users = true` is set.
-# Without it the gateway container gets no --config at all and rejects every
-# gRPC call from the CLI with Unauthenticated.
+# gateway.sandboxJwt.enabled=true is required so supervisors can complete
+# their IssueSandboxToken bootstrap. templates/gateway-config.yaml (and the
+# gateway's --config) render whenever gateway.enabled is true; that ConfigMap
+# is where `allow_unauthenticated_users = true` is set, without which the
+# gateway rejects every gRPC call from the CLI with Unauthenticated.
 
 log "waiting for the driver+gateway pod"
 kubectl -n "$NS" rollout status "deploy/${RELEASE}-openshell-driver-kyma" --timeout=3m \

@@ -100,7 +100,8 @@ What this lands in your cluster:
 - Two NetworkPolicies (driver+gateway-pod default-deny + sandbox-pod
   egress to DNS, gateway VIP, and 0.0.0.0/0:443 with RFC1918 excluded).
 - A ClusterRole + Role pair for `tokenreviews:create` + `pods:get` so
-  the gateway can validate the supervisor's projected SA token.
+  the driver can validate the supervisor's projected SA token (the
+  driver performs the TokenReview in its `AuthenticateSandbox` RPC).
 - An optional PVC for gateway DB persistence.
 
 ## 4. Verify, exec a sandbox
@@ -340,7 +341,7 @@ supervisor logs.** Either `gateway.sandboxJwt.enabled=false` (the chart
 should have failed at install in this case — check for
 `allow_unauthenticated_users = true` in
 `kubectl -n "$NS" get cm <release>-gateway-config -o yaml` only if you
-set an OIDC issuer) or the gateway's TokenReview RBAC is missing (check
+set an OIDC issuer) or the driver's TokenReview RBAC is missing (check
 `kubectl get clusterrole <release>-tokenreview -o yaml`).
 
 **`inference-provider-hook` Job stuck.**
