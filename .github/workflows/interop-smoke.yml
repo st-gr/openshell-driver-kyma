@@ -44,7 +44,7 @@ jobs:
   smoke:
     name: driver works against upstream gateway
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 40
     outputs:
       tested_gateway_tag: ${{ steps.refs.outputs.tag }}
     steps:

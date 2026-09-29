@@ -26,6 +26,10 @@ SB=smoke-$$
 
 log()  { printf '\n=== %s\n' "$*"; }
 fail() { printf '\nFAIL: %s\n' "$*" >&2; dump_diagnostics; exit 1; }
+# The gateway emits ANSI colour codes even without a TTY (see ASSERT 1b). Strip
+# them before matching on its log lines: they land between a level and the
+# text around it, so a literal ` ERROR ` never matches otherwise.
+strip_ansi() { sed $'s/\033\\[[0-9;]*m//g'; }
 
 dump_diagnostics() {
 	printf '\n--- pods ---\n' >&2
@@ -50,7 +54,7 @@ done
 AGENT_SANDBOX_VERSION=v0.5.2
 AGENT_SANDBOX_SHA256=230ee446d6035f631577e1c6b857f6973a8f09a0a853675d3cc34ebfe47abd6b
 log "installing agent-sandbox ${AGENT_SANDBOX_VERSION} (CRD + controller)"
-curl -fsSL -o /tmp/agent-sandbox.yaml \
+curl -fsSL --retry 3 --retry-delay 2 -o /tmp/agent-sandbox.yaml \
 	"https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${AGENT_SANDBOX_VERSION}/sandbox.yaml" \
 	|| fail "could not download agent-sandbox ${AGENT_SANDBOX_VERSION}"
 echo "${AGENT_SANDBOX_SHA256}  /tmp/agent-sandbox.yaml" | sha256sum -c - >/dev/null \
@@ -158,6 +162,8 @@ done
 # matching e2e-cli.sh's osh() helper: it also keeps the test stateless (no
 # $HOME/.config/openshell registration to leak between CI runs).
 osh() { openshell --gateway-endpoint "http://127.0.0.1:8080" "$@"; }
+# The same, bounded: `timeout` cannot run a shell function.
+osh_within() { local secs=$1; shift; timeout "$secs" openshell --gateway-endpoint "http://127.0.0.1:8080" "$@"; }
 
 # --- Assertion 1: the gateway is up and serving --------------------------
 #
@@ -207,26 +213,39 @@ ${gw_logs}"
 
 # --- Assertion 2: the driver creates a well-formed CR --------------------
 #
-# `openshell sandbox create` blocks and does not return even once the sandbox
-# is Ready, so run it backgrounded and poll kubectl. A naive run-and-wait
-# hangs until the job timeout.
+# Create with `--detach` and let the CLI run to completion. Do NOT background
+# it and kill it once the CR appears: the CR is only the first step of
+# CreateSandbox. After it the driver creates the supervisor pod, un-suspends
+# the CR, waits for the workload pod, stages secrets and lifts the scheduling
+# gates, all inline in the one RPC (openshell-driver-kubernetes driver.rs at
+# v0.1.2: CR created at 1941-1950, then create_sandbox_runtime_companions,
+# 2277-2620, awaited). Dropping the RPC there can leave pods stuck
+# SchedulingGated.
+#
+# `--detach` (crates/openshell-cli/src/main.rs:1534, "Start the canonical main
+# process without attaching to it") makes the CLI return instead of attaching
+# a session to `sleep infinity`. It still waits for the sandbox first: run.rs
+# watches it (798-1005) until a non-Ready phase has been followed by Ready
+# (940-947), and only then takes the `if detach { return Ok(0) }` exit
+# (1160-1165). Error, or provisioning idle for OPENSHELL_PROVISION_TIMEOUT
+# (826, 300s default), is a non-zero exit. So a zero exit means the gateway
+# reported Ready. The `timeout` is a backstop for a wedged CLI: a bound, not
+# the wait.
 log "ASSERT 2: sandbox CR is created with the expected name and labels"
-osh sandbox create --name "$SB" --from ghcr.io/nvidia/openshell-community/sandboxes/base:latest \
-	-- sleep infinity >/tmp/create.log 2>&1 &
-CREATE_PID=$!
-cr=""
-for _ in $(seq 1 40); do
-	cr=$(kubectl -n "$NS" get sandbox -l "openshell.ai/sandbox-name=${SB}" \
-		-o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
-	[[ -n $cr ]] && break
-	sleep 3
-done
-kill "$CREATE_PID" 2>/dev/null || true
-[[ -n $cr ]] || { cat /tmp/create.log >&2; fail "no Sandbox CR appeared for ${SB}"; }
+create_rc=0
+osh_within 600 sandbox create --detach --name "$SB" \
+	--from ghcr.io/nvidia/openshell-community/sandboxes/base:latest \
+	-- sleep infinity >/tmp/create.log 2>&1 || create_rc=$?
+cat /tmp/create.log
+((create_rc == 0)) || fail "sandbox create ${SB} exited ${create_rc} (124 = still running after 600s); see the output above"
+cr=$(kubectl -n "$NS" get sandbox -l "openshell.ai/sandbox-name=${SB}" \
+	-o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || cr=""
+[[ -n $cr ]] || fail "no Sandbox CR exists for ${SB} although create returned"
 
 [[ $cr == "default--${SB}" ]] || fail "CR name is '${cr}', expected 'default--${SB}'"
 
-labels=$(kubectl -n "$NS" get sandbox "$cr" -o jsonpath='{.metadata.labels}')
+labels=$(kubectl -n "$NS" get sandbox "$cr" -o jsonpath='{.metadata.labels}') \
+	|| fail "could not read the labels of Sandbox ${cr}"
 # The labels upstream's driver sets. kagenti.io/type is not one of them: the
 # Kyma enrichment puts it on the sandbox template, so it lands on the workload
 # pod and is asserted there (ASSERT 3d).
@@ -244,11 +263,13 @@ ${list_out}"
 printf '%s\n' "$list_out"
 grep -q "$SB" <<<"$list_out" || fail "gateway did not list ${SB} by its bare name"
 
-# --- Assertions 3c-3e: the sandbox actually runs --------------------------
+# --- Assertions 3c-3f: the sandbox actually runs --------------------------
 #
 # What this smoke could not check while it installed only the CRD. The
 # controller now turns the CR into pods, so follow the sandbox to Ready, then
-# through a stop/start round-trip.
+# through a stop/start round-trip. `sandbox create --detach` above already
+# returned at Ready; these check the Kubernetes side of that and the rest of
+# the lifecycle.
 #
 # `openshell sandbox list` prints NAME, CREATED ("YYYY-MM-DD HH:MM:SS", two
 # words) and PHASE, one row per sandbox, PHASE last. The phase is spelled
@@ -277,10 +298,8 @@ wait_phase_not() { # name phase timeout-seconds
 	done
 	return 1
 }
-# `kubectl wait` fails at once when nothing matches yet, and neither pod
-# exists when the CR first appears (the driver creates the supervisor pod
-# after the CR, the controller creates the workload pod once the sandbox is
-# unsuspended). Poll for the pod, then let `kubectl wait` do the waiting.
+# `kubectl wait` fails at once when nothing matches yet, so poll for the pod,
+# then let `kubectl wait` do the waiting.
 wait_pod_exists() { # timeout-seconds kubectl-get-args...
 	local deadline=$((SECONDS + $1))
 	shift
@@ -290,40 +309,92 @@ wait_pod_exists() { # timeout-seconds kubectl-get-args...
 	done
 	return 1
 }
+# Wait until no pod of the sandbox is left. A failed `kubectl get` is not
+# evidence that the pods are gone, so it is retried, not counted.
+wait_pods_gone() { # timeout-seconds selector
+	local deadline=$((SECONDS + $1)) out
+	while ((SECONDS < deadline)); do
+		if out=$(kubectl -n "$NS" get pods -l "$2" -o name 2>/dev/null) && [[ -z $out ]]; then
+			return 0
+		fi
+		sleep 3
+	done
+	return 1
+}
+# Everything needed to see why the pods of a sandbox are not coming up: both
+# pods, described, with the logs of every container. `fail` itself only lists
+# the pods. (`$pair` and `$wl_sel` are set by ASSERT 3c.)
+pair_pod_diagnostics() {
+	printf '\n--- supervisor pod os-supervisor-%s ---\n' "$pair" >&2
+	kubectl -n "$NS" describe pod "os-supervisor-${pair}" >&2 || true
+	kubectl -n "$NS" logs "os-supervisor-${pair}" --all-containers --prefix --tail=200 >&2 || true
+	printf '\n--- workload pod (%s) ---\n' "$wl_sel" >&2
+	kubectl -n "$NS" describe pod -l "$wl_sel" >&2 || true
+	kubectl -n "$NS" logs -l "$wl_sel" --all-containers --prefix --tail=200 >&2 || true
+}
+fail_pods() { pair_pod_diagnostics; fail "$@"; }
+wait_workload_ready() {
+	wait_pod_exists 180 -l "$wl_sel" || fail_pods "the workload pod was never created"
+	kubectl -n "$NS" wait --for=condition=Ready pod -l "$wl_sel" --timeout=5m \
+		|| fail_pods "the workload pod never became Ready"
+}
 
 log "ASSERT 3c: the sandbox runtime starts and bootstraps"
-sid=$(kubectl -n "$NS" get sandbox "$cr" -o jsonpath='{.metadata.labels.openshell\.ai/sandbox-id}')
+sid=$(kubectl -n "$NS" get sandbox "$cr" -o jsonpath='{.metadata.labels.openshell\.ai/sandbox-id}') \
+	|| fail "could not read the sandbox id from Sandbox ${cr}"
 [[ -n $sid ]] || fail "Sandbox ${cr} has no openshell.ai/sandbox-id label"
 pair=${sid,,}
+wl_sel="openshell.ai/boundary-pair=${pair},openshell.ai/boundary-role=workload"
 wait_pod_exists 180 "os-supervisor-${pair}" \
-	|| fail "supervisor pod os-supervisor-${pair} was never created"
-kubectl -n "$NS" wait --for=condition=Ready "pod/os-supervisor-${pair}" --timeout=5m || {
-	kubectl -n "$NS" describe pod "os-supervisor-${pair}" >&2 || true
-	fail "supervisor pod os-supervisor-${pair} never became Ready"
-}
-wait_pod_exists 180 -l "openshell.ai/boundary-pair=${pair},openshell.ai/boundary-role=workload" \
-	|| fail "the workload pod was never created"
-kubectl -n "$NS" wait --for=condition=Ready pod \
-	-l "openshell.ai/boundary-pair=${pair},openshell.ai/boundary-role=workload" --timeout=5m || {
-	kubectl -n "$NS" get pods -l "openshell.ai/boundary-pair=${pair}" -o wide >&2 || true
-	fail "the workload pod never became Ready"
-}
-wait_phase "$SB" Ready 300 || fail "gateway never reported ${SB} Ready: bootstrap did not complete (phase: $(sandbox_phase "$SB"))"
+	|| fail_pods "supervisor pod os-supervisor-${pair} was never created"
+kubectl -n "$NS" wait --for=condition=Ready "pod/os-supervisor-${pair}" --timeout=5m \
+	|| fail_pods "supervisor pod os-supervisor-${pair} never became Ready"
+wait_workload_ready
+wait_phase "$SB" Ready 300 || fail_pods "gateway never reported ${SB} Ready: bootstrap did not complete (phase: $(sandbox_phase "$SB"))"
 
 log "ASSERT 3d: Kyma enrichment reached the workload pod"
-wl_labels=$(kubectl -n "$NS" get pod -l "openshell.ai/boundary-pair=${pair},openshell.ai/boundary-role=workload" \
-	-o jsonpath='{.items[0].metadata.labels}')
+wl_labels=$(kubectl -n "$NS" get pod -l "$wl_sel" -o jsonpath='{.items[0].metadata.labels}') \
+	|| fail "could not read the labels of the workload pod"
 grep -q '"sidecar.istio.io/inject":"false"' <<<"$wl_labels" || fail "workload pod lacks sidecar.istio.io/inject=false: ${wl_labels}"
 grep -q '"kagenti.io/type":"agent"' <<<"$wl_labels" || fail "workload pod lacks kagenti.io/type=agent: ${wl_labels}"
 
 # `sandbox stop` returns once the gateway reports Stopped and `sandbox start`
 # once it reports Ready (each waits up to OPENSHELL_LIFECYCLE_TIMEOUT, 300s by
-# default), so the waits below confirm what the CLI already established.
+# default), so the phase waits confirm what the CLI already established. The
+# pod checks are the Kubernetes-level proof. The driver's stop deletes the
+# supervisor pod, suspends the Sandbox CR so the controller deletes the
+# workload pod, and only returns once that pod is gone (driver.rs
+# stop_sandbox_inner). Both pods carry the boundary-pair label. The start
+# recreates the pods, and the workload one must come back Ready.
 log "ASSERT 3e: stop and start round-trip"
 osh sandbox stop "$SB" || fail "stop ${SB} failed"
 wait_phase_not "$SB" Ready 180 || fail "${SB} never left Ready after stop"
+wait_pods_gone 120 "openshell.ai/boundary-pair=${pair}" \
+	|| fail_pods "pods of ${SB} (boundary-pair=${pair}) still exist after stop"
 osh sandbox start "$SB" || fail "start ${SB} failed"
-wait_phase "$SB" Ready 300 || fail "${SB} did not return to Ready after start (phase: $(sandbox_phase "$SB"))"
+wait_phase "$SB" Ready 300 || fail_pods "${SB} did not return to Ready after start (phase: $(sandbox_phase "$SB"))"
+wait_workload_ready
+
+# The gateway's watch loop (openshell-server compute/mod.rs watch_loop,
+# v0.1.2) logs a warning for each way the driver's watch stream can break, and
+# retries after 2s. The retry hides the break from every assertion above, so
+# look for the warnings themselves. The whole log, not a tail: a break during
+# the stop/start is the case this is for.
+log "ASSERT 3f: the gateway's compute watch stream stayed healthy"
+gw_all=$(kubectl -n "$NS" logs "deploy/${RELEASE}-openshell-driver-kyma" -c gateway --tail=-1 2>&1) \
+	|| fail "could not read gateway logs: ${gw_all}"
+gw_all=$(strip_ansi <<<"$gw_all")
+for msg in \
+	"Compute driver watch stream failed to start" \
+	"Compute driver watch stream errored" \
+	"Compute driver watch stream ended unexpectedly" \
+	"Failed to apply compute driver event"
+do
+	if grep -qF "$msg" <<<"$gw_all"; then
+		fail "the gateway logged '${msg}':
+$(grep -F "$msg" <<<"$gw_all" | tail -3)"
+	fi
+done
 
 # The driver's watch stream used to be asserted here by scraping
 # openshell_driver_watch_events_total from the driver's /metrics. That
@@ -346,6 +417,9 @@ log "ASSERT 4: no ERROR in driver or gateway logs"
 for c in driver gateway; do
 	c_logs=$(kubectl -n "$NS" logs "deploy/${RELEASE}-openshell-driver-kyma" -c "$c" --tail=500 2>&1) \
 		|| fail "could not read ${c} logs: ${c_logs}"
+	# The gateway's ERROR level is wrapped in colour codes, so ` ERROR ` below
+	# cannot match until they are gone.
+	c_logs=$(strip_ansi <<<"$c_logs")
 	grep -E '"level":"ERROR"|[[:space:]]ERROR[[:space:]]' <<<"$c_logs" \
 		&& fail "${c} logged an ERROR"
 	true

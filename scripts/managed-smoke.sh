@@ -24,7 +24,7 @@
 # Like interop-smoke.sh, this runs the real agent-sandbox controller and
 # follows the first sandbox to Ready, through bootstrap and a stop/start
 # round-trip, in the managed namespace. The ownership assertions (M2, M3) then
-# use sandboxes that are only created and deleted.
+# create sandboxes to Ready and delete them.
 
 set -euo pipefail
 
@@ -41,6 +41,9 @@ STORE_SETTLE_SECS=300
 
 log()  { printf '\n=== %s\n' "$*"; }
 fail() { printf '\nFAIL: %s\n' "$*" >&2; dump_diagnostics; exit 1; }
+# The gateway emits ANSI colour codes even without a TTY. Strip them before
+# matching on its log lines, or a literal level or field never matches.
+strip_ansi() { sed $'s/\033\\[[0-9;]*m//g'; }
 
 dump_diagnostics() {
 	printf '\n--- pods (%s) ---\n' "$NS" >&2
@@ -51,12 +54,17 @@ dump_diagnostics() {
 	kubectl -n "$NS" logs "deploy/${RELEASE}-openshell-driver-kyma" -c gateway --tail=50 2>&1 >&2 || true
 	printf '\n--- managed namespaces ---\n' >&2
 	kubectl get ns "$NS_DEFAULT" "$NS_DECOY" "$NS_OWNED" -o wide 2>&1 >&2 || true
-	printf '\n--- pods (%s) ---\n' "$NS_DEFAULT" >&2
-	kubectl -n "$NS_DEFAULT" get pods -o wide 2>&1 | head -20 >&2 || true
+	local ns
+	for ns in "$NS_DEFAULT" "$NS_DECOY" "$NS_OWNED"; do
+		printf '\n--- pods (%s) ---\n' "$ns" >&2
+		kubectl -n "$ns" get pods -o wide 2>&1 | head -20 >&2 || true
+	done
 	printf '\n--- agent-sandbox controller log ---\n' >&2
 	kubectl -n agent-sandbox-system logs deploy/agent-sandbox-controller --tail=50 2>&1 >&2 || true
-	printf '\n--- events (%s) ---\n' "$NS_DEFAULT" >&2
-	kubectl -n "$NS_DEFAULT" get events --sort-by=.lastTimestamp 2>&1 | tail -30 >&2 || true
+	for ns in "$NS_DEFAULT" "$NS_DECOY" "$NS_OWNED"; do
+		printf '\n--- events (%s) ---\n' "$ns" >&2
+		kubectl -n "$ns" get events --sort-by=.lastTimestamp 2>&1 | tail -30 >&2 || true
+	done
 }
 
 # Delete a workspace, tolerating a gateway store that lags Kubernetes.
@@ -116,7 +124,7 @@ done
 AGENT_SANDBOX_VERSION=v0.5.2
 AGENT_SANDBOX_SHA256=230ee446d6035f631577e1c6b857f6973a8f09a0a853675d3cc34ebfe47abd6b
 log "installing agent-sandbox ${AGENT_SANDBOX_VERSION} (CRD + controller)"
-curl -fsSL -o /tmp/agent-sandbox.yaml \
+curl -fsSL --retry 3 --retry-delay 2 -o /tmp/agent-sandbox.yaml \
 	"https://github.com/kubernetes-sigs/agent-sandbox/releases/download/${AGENT_SANDBOX_VERSION}/sandbox.yaml" \
 	|| fail "could not download agent-sandbox ${AGENT_SANDBOX_VERSION}"
 echo "${AGENT_SANDBOX_SHA256}  /tmp/agent-sandbox.yaml" | sha256sum -c - >/dev/null \
@@ -219,12 +227,30 @@ for i in $(seq 1 20); do
 done
 
 osh() { openshell --gateway-endpoint "http://127.0.0.1:8080" "$@"; }
+# The same, bounded: `timeout` cannot run a shell function.
+osh_within() { local secs=$1; shift; timeout "$secs" openshell --gateway-endpoint "http://127.0.0.1:8080" "$@"; }
+
+# Create a sandbox and return only once the gateway reports it Ready.
+# `--detach` makes the CLI wait for Ready and then return (see
+# interop-smoke.sh's Assertion 2 for the source lines). It must be allowed to
+# finish: killing the CLI as soon as the CR appears drops the CreateSandbox RPC
+# while the driver is still creating the pods, and can leave them stuck
+# SchedulingGated. The `timeout` is a backstop for a wedged CLI, not the wait.
+create_sandbox_ready() { # name [sandbox-create-args...]
+	local name=$1 rc=0
+	shift
+	osh_within 600 sandbox create --detach "$@" --name "$name" \
+		--from ghcr.io/nvidia/openshell-community/sandboxes/base:latest \
+		-- sleep infinity >"/tmp/create-${name}.log" 2>&1 || rc=$?
+	cat "/tmp/create-${name}.log"
+	((rc == 0)) || fail "sandbox create ${name} exited ${rc} (124 = still running after 600s); see the output above"
+}
 
 # --- ASSERT M1: creating a sandbox bootstraps the workspace namespace -----
 #
-# `openshell sandbox create` blocks and does not return even once the
-# sandbox is Ready (see interop-smoke.sh's Assertion 2). Run backgrounded and
-# poll kubectl instead of waiting on the CLI to return.
+# Created with `--detach` and run to completion (create_sandbox_ready): it
+# returns once the sandbox is Ready. See interop-smoke.sh's Assertion 2 for why
+# the CLI must not be killed once the CR appears.
 #
 # The gateway does not call EnsureWorkspace before sandbox create -- at
 # upstream v0.0.109 ensure_workspace appears nowhere in
@@ -240,19 +266,10 @@ osh() { openshell --gateway-endpoint "http://127.0.0.1:8080" "$@"; }
 # create lands in the gateway's default workspace ("default"), giving
 # openshell-smoke-default.
 log "ASSERT M1: creating a sandbox bootstraps the managed workspace namespace"
-osh sandbox create --name m1 --from ghcr.io/nvidia/openshell-community/sandboxes/base:latest \
-	-- sleep infinity >/tmp/create-m1.log 2>&1 &
-CREATE_PID=$!
-cr=""
-for _ in $(seq 1 40); do
-	if kubectl -n "$NS_DEFAULT" get sandbox m1 >/dev/null 2>&1; then
-		cr=m1
-		break
-	fi
-	sleep 3
-done
-kill "$CREATE_PID" 2>/dev/null || true
-[[ -n $cr ]] || { cat /tmp/create-m1.log >&2; fail "sandbox CR 'm1' never appeared in ${NS_DEFAULT}"; }
+create_sandbox_ready m1
+kubectl -n "$NS_DEFAULT" get sandbox m1 >/dev/null 2>&1 \
+	|| fail "sandbox CR 'm1' not found in ${NS_DEFAULT} although create returned"
+cr=m1
 
 kubectl get ns "$NS_DEFAULT" >/dev/null 2>&1 || fail "managed namespace $NS_DEFAULT was not created"
 [[ "$(kubectl get ns "$NS_DEFAULT" -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce}')" == "privileged" ]] \
@@ -264,12 +281,13 @@ kubectl -n "$NS_DEFAULT" get sa openshell-sandbox >/dev/null 2>&1 \
 [[ "$(kubectl -n "$NS_DEFAULT" get sandbox m1 -o jsonpath='{.metadata.name}')" == "m1" ]] \
 	|| fail "sandbox CR should be named 'm1' in managed mode"
 
-# --- ASSERT M1b-M1d: the managed sandbox actually runs ---------------------
+# --- ASSERT M1b-M1e: the managed sandbox actually runs ---------------------
 #
 # The same lifecycle interop-smoke.sh follows in shared mode (its ASSERT
-# 3c-3e), here for sandbox m1 in its managed namespace: pods Ready, bootstrap
-# complete, Kyma enrichment on the workload pod, stop/start round-trip. See
-# there for why each step is shaped as it is.
+# 3c-3f), here for sandbox m1 in its managed namespace: pods Ready, bootstrap
+# complete, Kyma enrichment on the workload pod, stop/start round-trip with
+# the pods checked at the Kubernetes level, and the gateway's watch stream
+# healthy. See there for why each step is shaped as it is.
 #
 # `openshell sandbox list` prints NAME, CREATED ("YYYY-MM-DD HH:MM:SS", two
 # words) and PHASE, PHASE last, spelled Provisioning, Ready, Stopping,
@@ -297,8 +315,8 @@ wait_phase_not() { # name phase timeout-seconds
 	done
 	return 1
 }
-# `kubectl wait` fails at once when nothing matches yet, and neither pod
-# exists when the CR first appears. Poll for the pod, then wait on it.
+# `kubectl wait` fails at once when nothing matches yet, so poll for the pod,
+# then let `kubectl wait` do the waiting.
 wait_pod_exists() { # timeout-seconds kubectl-get-args...
 	local deadline=$((SECONDS + $1))
 	shift
@@ -308,38 +326,89 @@ wait_pod_exists() { # timeout-seconds kubectl-get-args...
 	done
 	return 1
 }
+# Wait until no pod of the sandbox is left. A failed `kubectl get` is not
+# evidence that the pods are gone, so it is retried, not counted.
+wait_pods_gone() { # timeout-seconds selector
+	local deadline=$((SECONDS + $1)) out
+	while ((SECONDS < deadline)); do
+		if out=$(kubectl -n "$NS_DEFAULT" get pods -l "$2" -o name 2>/dev/null) && [[ -z $out ]]; then
+			return 0
+		fi
+		sleep 3
+	done
+	return 1
+}
+# Everything needed to see why the pods of a sandbox are not coming up: both
+# pods, described, with the logs of every container. `fail` itself only lists
+# the pods. (`$pair` and `$wl_sel` are set by ASSERT M1b.)
+pair_pod_diagnostics() {
+	printf '\n--- supervisor pod os-supervisor-%s ---\n' "$pair" >&2
+	kubectl -n "$NS_DEFAULT" describe pod "os-supervisor-${pair}" >&2 || true
+	kubectl -n "$NS_DEFAULT" logs "os-supervisor-${pair}" --all-containers --prefix --tail=200 >&2 || true
+	printf '\n--- workload pod (%s) ---\n' "$wl_sel" >&2
+	kubectl -n "$NS_DEFAULT" describe pod -l "$wl_sel" >&2 || true
+	kubectl -n "$NS_DEFAULT" logs -l "$wl_sel" --all-containers --prefix --tail=200 >&2 || true
+}
+fail_pods() { pair_pod_diagnostics; fail "$@"; }
+wait_workload_ready() {
+	wait_pod_exists 180 -l "$wl_sel" || fail_pods "the workload pod was never created in ${NS_DEFAULT}"
+	kubectl -n "$NS_DEFAULT" wait --for=condition=Ready pod -l "$wl_sel" --timeout=5m \
+		|| fail_pods "the workload pod never became Ready"
+}
 
 log "ASSERT M1b: the sandbox runtime starts and bootstraps"
 # Managed mode uses bare names, so the CR name is the sandbox name.
-sid=$(kubectl -n "$NS_DEFAULT" get sandbox "$cr" -o jsonpath='{.metadata.labels.openshell\.ai/sandbox-id}')
+sid=$(kubectl -n "$NS_DEFAULT" get sandbox "$cr" -o jsonpath='{.metadata.labels.openshell\.ai/sandbox-id}') \
+	|| fail "could not read the sandbox id from Sandbox ${cr}"
 [[ -n $sid ]] || fail "Sandbox ${cr} has no openshell.ai/sandbox-id label"
 pair=${sid,,}
+wl_sel="openshell.ai/boundary-pair=${pair},openshell.ai/boundary-role=workload"
 wait_pod_exists 180 "os-supervisor-${pair}" \
-	|| fail "supervisor pod os-supervisor-${pair} was never created in ${NS_DEFAULT}"
-kubectl -n "$NS_DEFAULT" wait --for=condition=Ready "pod/os-supervisor-${pair}" --timeout=5m || {
-	kubectl -n "$NS_DEFAULT" describe pod "os-supervisor-${pair}" >&2 || true
-	fail "supervisor pod os-supervisor-${pair} never became Ready"
-}
-wait_pod_exists 180 -l "openshell.ai/boundary-pair=${pair},openshell.ai/boundary-role=workload" \
-	|| fail "the workload pod was never created in ${NS_DEFAULT}"
-kubectl -n "$NS_DEFAULT" wait --for=condition=Ready pod \
-	-l "openshell.ai/boundary-pair=${pair},openshell.ai/boundary-role=workload" --timeout=5m || {
-	kubectl -n "$NS_DEFAULT" get pods -l "openshell.ai/boundary-pair=${pair}" -o wide >&2 || true
-	fail "the workload pod never became Ready"
-}
-wait_phase "$cr" Ready 300 || fail "gateway never reported ${cr} Ready: bootstrap did not complete (phase: $(sandbox_phase "$cr"))"
+	|| fail_pods "supervisor pod os-supervisor-${pair} was never created in ${NS_DEFAULT}"
+kubectl -n "$NS_DEFAULT" wait --for=condition=Ready "pod/os-supervisor-${pair}" --timeout=5m \
+	|| fail_pods "supervisor pod os-supervisor-${pair} never became Ready"
+wait_workload_ready
+wait_phase "$cr" Ready 300 || fail_pods "gateway never reported ${cr} Ready: bootstrap did not complete (phase: $(sandbox_phase "$cr"))"
 
 log "ASSERT M1c: Kyma enrichment reached the workload pod"
-wl_labels=$(kubectl -n "$NS_DEFAULT" get pod -l "openshell.ai/boundary-pair=${pair},openshell.ai/boundary-role=workload" \
-	-o jsonpath='{.items[0].metadata.labels}')
+wl_labels=$(kubectl -n "$NS_DEFAULT" get pod -l "$wl_sel" -o jsonpath='{.items[0].metadata.labels}') \
+	|| fail "could not read the labels of the workload pod"
 grep -q '"sidecar.istio.io/inject":"false"' <<<"$wl_labels" || fail "workload pod lacks sidecar.istio.io/inject=false: ${wl_labels}"
 grep -q '"kagenti.io/type":"agent"' <<<"$wl_labels" || fail "workload pod lacks kagenti.io/type=agent: ${wl_labels}"
 
+# The driver's stop deletes the supervisor pod, suspends the Sandbox CR so the
+# controller deletes the workload pod, and only returns once that pod is gone
+# (driver.rs stop_sandbox_inner). Both pods carry the boundary-pair label, so
+# none may be left. The start recreates them and the workload pod must come
+# back Ready.
 log "ASSERT M1d: stop and start round-trip"
 osh sandbox stop "$cr" || fail "stop ${cr} failed"
 wait_phase_not "$cr" Ready 180 || fail "${cr} never left Ready after stop"
+wait_pods_gone 120 "openshell.ai/boundary-pair=${pair}" \
+	|| fail_pods "pods of ${cr} (boundary-pair=${pair}) still exist after stop"
 osh sandbox start "$cr" || fail "start ${cr} failed"
-wait_phase "$cr" Ready 300 || fail "${cr} did not return to Ready after start (phase: $(sandbox_phase "$cr"))"
+wait_phase "$cr" Ready 300 || fail_pods "${cr} did not return to Ready after start (phase: $(sandbox_phase "$cr"))"
+wait_workload_ready
+
+# The gateway's watch loop (openshell-server compute/mod.rs watch_loop,
+# v0.1.2) logs a warning for each way the driver's watch stream can break and
+# retries after 2s, which hides the break from every assertion above. Look for
+# the warnings themselves, in the whole log.
+log "ASSERT M1e: the gateway's compute watch stream stayed healthy"
+gw_all=$(kubectl -n "$NS" logs "deploy/${RELEASE}-openshell-driver-kyma" -c gateway --tail=-1 2>&1) \
+	|| fail "could not read gateway logs: ${gw_all}"
+gw_all=$(strip_ansi <<<"$gw_all")
+for msg in \
+	"Compute driver watch stream failed to start" \
+	"Compute driver watch stream errored" \
+	"Compute driver watch stream ended unexpectedly" \
+	"Failed to apply compute driver event"
+do
+	if grep -qF "$msg" <<<"$gw_all"; then
+		fail "the gateway logged '${msg}':
+$(grep -F "$msg" <<<"$gw_all" | tail -3)"
+	fi
+done
 
 log "ASSERT M-psa: the managed namespace carries the configured Pod Security level"
 level=$(kubectl get namespace "$NS_DEFAULT" -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce}')
@@ -403,8 +472,8 @@ level=$(kubectl get namespace "$NS_DEFAULT" -o jsonpath='{.metadata.labels.pod-s
 # Instead: `workspace create` registers "decoy" with the gateway (needed so
 # `--workspace decoy` below and `workspace delete decoy` further down are
 # valid RPCs rather than 404s), then a real sandbox create scoped to that
-# workspace -- mirroring ASSERT M1's idiom of polling for the CR rather
-# than waiting on the CLI to return, since it never will -- is what
+# workspace -- created like ASSERT M1's, with `--detach`, so it is Ready and
+# not half-bootstrapped when it is deleted below -- is what
 # actually makes the driver bootstrap and label $NS_DECOY. Once the
 # ownership labels are confirmed, the sandbox is deleted again (polling for
 # the CR to disappear, then confirming $NS_DECOY itself is untouched -- a
@@ -417,19 +486,9 @@ level=$(kubectl get namespace "$NS_DEFAULT" -o jsonpath='{.metadata.labels.pod-s
 log "ASSERT M2: an UNOWNED namespace is NOT deleted (ownership guardrail)"
 osh workspace create --name decoy || fail "workspace create decoy failed"
 
-osh sandbox create --workspace decoy --name m2 --from ghcr.io/nvidia/openshell-community/sandboxes/base:latest \
-	-- sleep infinity >/tmp/create-m2.log 2>&1 &
-CREATE_PID=$!
-cr=""
-for _ in $(seq 1 40); do
-	if kubectl -n "$NS_DECOY" get sandbox m2 >/dev/null 2>&1; then
-		cr=m2
-		break
-	fi
-	sleep 3
-done
-kill "$CREATE_PID" 2>/dev/null || true
-[[ -n $cr ]] || { cat /tmp/create-m2.log >&2; fail "sandbox CR 'm2' never appeared in ${NS_DECOY}"; }
+create_sandbox_ready m2 --workspace decoy
+kubectl -n "$NS_DECOY" get sandbox m2 >/dev/null 2>&1 \
+	|| fail "sandbox CR 'm2' not found in ${NS_DECOY} although create returned"
 
 kubectl get ns "$NS_DECOY" >/dev/null 2>&1 || fail "managed namespace $NS_DECOY was not created"
 
@@ -445,8 +504,10 @@ done
 # it and poll for the CR to disappear rather than assuming the delete is
 # synchronous.
 osh sandbox delete --workspace decoy m2 || fail "sandbox delete m2 failed"
+# The sandbox is running now, so there are pods to tear down: allow 300s
+# (100 x 3s) for the CR to go, not 120s.
 gone=0
-for _ in $(seq 1 40); do
+for _ in $(seq 1 100); do
 	if ! kubectl -n "$NS_DECOY" get sandbox m2 >/dev/null 2>&1; then
 		gone=1
 		break
@@ -492,7 +553,7 @@ phase=$(kubectl get ns "$NS_DECOY" -o jsonpath='{.status.phase}')
 # "decoy" either, since that workspace's ownership labels were deliberately
 # stripped -- exercising this assertion against it would prove nothing.
 # So this gets its own workspace, "owned", built exactly like "decoy" was
-# in ASSERT M2 (create workspace, create+poll a scoped sandbox to force
+# in ASSERT M2 (create workspace, create a scoped sandbox to Ready to force
 # the bootstrap, delete+poll that sandbox to empty the workspace again)
 # but skipping the label strip -- the one difference that makes this the
 # positive case: an owned, empty namespace really does get deleted.
@@ -503,19 +564,9 @@ phase=$(kubectl get ns "$NS_DECOY" -o jsonpath='{.status.phase}')
 log "ASSERT M3: an OWNED namespace IS deleted"
 osh workspace create --name owned || fail "workspace create owned failed"
 
-osh sandbox create --workspace owned --name m3 --from ghcr.io/nvidia/openshell-community/sandboxes/base:latest \
-	-- sleep infinity >/tmp/create-m3.log 2>&1 &
-CREATE_PID=$!
-cr=""
-for _ in $(seq 1 40); do
-	if kubectl -n "$NS_OWNED" get sandbox m3 >/dev/null 2>&1; then
-		cr=m3
-		break
-	fi
-	sleep 3
-done
-kill "$CREATE_PID" 2>/dev/null || true
-[[ -n $cr ]] || { cat /tmp/create-m3.log >&2; fail "sandbox CR 'm3' never appeared in ${NS_OWNED}"; }
+create_sandbox_ready m3 --workspace owned
+kubectl -n "$NS_OWNED" get sandbox m3 >/dev/null 2>&1 \
+	|| fail "sandbox CR 'm3' not found in ${NS_OWNED} although create returned"
 
 kubectl get ns "$NS_OWNED" >/dev/null 2>&1 || fail "managed namespace $NS_OWNED was not created"
 
@@ -529,8 +580,9 @@ done
 # ASSERT M2 applies here too, and this assertion is meant to prove the
 # ownership path succeeds, not get blocked earlier by leftover resources.
 osh sandbox delete --workspace owned m3 || fail "sandbox delete m3 failed"
+# Running sandbox, pods to tear down: 300s (100 x 3s), as for m2.
 gone=0
-for _ in $(seq 1 40); do
+for _ in $(seq 1 100); do
 	if ! kubectl -n "$NS_OWNED" get sandbox m3 >/dev/null 2>&1; then
 		gone=1
 		break
