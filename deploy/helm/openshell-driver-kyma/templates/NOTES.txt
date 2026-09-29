@@ -1,3 +1,23 @@
+{{- if .Values.inferenceProvider.enabled }}
+
+═══════════════════════════════════════════════════════════════════
+Inference provider
+═══════════════════════════════════════════════════════════════════
+
+The post-install hook registers a provider profile and creates a provider
+on the in-pod gateway:
+
+  profile:  {{ include "openshell-driver-kyma.inferenceProfileId" . }}
+  provider: {{ include "openshell-driver-kyma.inferenceProviderName" . }}
+
+Attach the provider when you create a sandbox:
+
+  openshell sandbox create --provider {{ include "openshell-driver-kyma.inferenceProviderName" . }} ...
+
+The sandbox then has ANTHROPIC_BASE_URL and ANTHROPIC_MODEL in its
+environment, and its supervisor injects the API key into requests to
+the endpoint of `inferenceProvider.baseUrl`.
+{{- end }}
 {{- if .Values.bedrockBridge.enabled }}
 
 ═══════════════════════════════════════════════════════════════════
@@ -7,17 +27,19 @@ SAP AI Core translation bridge is deployed.
 The bridge speaks the Anthropic Messages API on the inside
 (`POST /v1/messages`) and translates outbound to SAP AI Core's
 deployed Bedrock InvokeModel endpoints. Sandbox pods do NOT need
-Bedrock-mode env, AWS creds, or a per-pod policy carve-out — they
-talk to `inference.local` exactly as today, and the gateway routes
-to the bridge.
+Bedrock-mode env or AWS creds: the bridge is a normal Anthropic
+endpoint. The provider profile names its host and port, sandboxes are
+created with `--provider <name>`, and the sandbox's supervisor injects
+the provider's credential into requests to it. Only sandboxes in this
+release's namespace can reach the bridge.
 
-In-cluster bridge URL (gateway-side):
+In-cluster bridge URL:
   http://{{ include "openshell-driver-kyma.bedrockBridgeFullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:8787
 
 To wire claude-code through it: set the chart's
 `inferenceProvider.baseUrl` to that URL and `inferenceProvider.type`
 to `anthropic` (the bridge is a normal Anthropic upstream from the
-gateway's POV — `x-api-key` is accepted and ignored, since SAP auth
+sandbox's POV — `x-api-key` is accepted and ignored, since SAP auth
 is XSUAA-bearer-side, on the bridge):
 
   inferenceProvider:

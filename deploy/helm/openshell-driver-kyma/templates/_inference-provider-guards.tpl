@@ -79,7 +79,7 @@ gets immediate feedback. */}}
 {{- fail "bedrockBridge.enabled=true with an empty modelMap requires bedrockBridge.singleDeploymentId so every inbound model id resolves to that deployment." -}}
 {{- end -}}
 {{- if not .Values.gateway.enabled -}}
-{{- fail "bedrockBridge.enabled=true requires gateway.enabled=true. The bridge is wired into the chart by pointing inferenceProvider.baseUrl at it; sandbox pods reach the bridge via inference.local through the gateway's L7 router." -}}
+{{- fail "bedrockBridge.enabled=true requires gateway.enabled=true. The bridge is wired into the chart by pointing inferenceProvider.baseUrl at it, and the provider hook registers that endpoint with the in-pod gateway." -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

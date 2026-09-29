@@ -2,9 +2,12 @@
 # Override with `helm install ... -f my-values.yaml --set ...`.
 
 # Sandbox provisioning namespace. The driver creates Sandbox CRs here.
-# Cluster-admin must label this namespace
-# `pod-security.kubernetes.io/enforce: privileged` because the supervisor
-# inside each sandbox needs SYS_ADMIN/NET_ADMIN/SYS_PTRACE/SYSLOG capabilities.
+# Cluster-admin should label this namespace
+# `pod-security.kubernetes.io/enforce: privileged`, the level the chart's CI
+# runs at. Upstream v0.1.2's sandbox pods request no privileges (non-root, all
+# capabilities dropped, RuntimeDefault seccomp), so a stricter level may admit
+# them, but only `privileged` is verified here. The provider hook runs as
+# root, which `restricted` refuses.
 namespace: openshell-system
 
 image:
@@ -275,38 +278,13 @@ podLabels: {}
 gateway:
   enabled: false
   image:
-    # Image pinned to upstream `0.1.2` — the newest tag for which upstream
-    # has published gateway/supervisor container images as of this pin.
-    #
-    # Upstream's image publishing is INTERMITTENT, not absent — verified
-    # tag by tag on 2026-08-31 (as of the prior `0.0.116` pin):
-    #
-    #   0.0.112  no images        0.0.115  published
-    #   0.0.113  published        0.0.116  published
-    #   0.0.114  no images
-    #
-    # So "tagged without images" is only true of 0.0.112 and 0.0.114. That
-    # matters for how staleness is read: `scripts/check-pin-status.sh` only
-    # resolves the NEWEST tag, so while 0.0.114 was newest it reported a pin
-    # as still justified even though 0.0.113 had usable images. Do not infer
-    # "every tag since lacks images" from that output.
-    #
-    # A GATEWAY_REF pin was held at 0.0.111 through 2026-09-01 for a
-    # different reason, now resolved: the PyPI `openshell` wheel stopped
-    # carrying the CLI binary from 0.0.113 (8.18 MB -> 0.10 MB), so the
-    # smokes could not install a CLI. That was never a regression to wait
-    # out — NVIDIA/OpenShell#2321 removed it deliberately and added a test
-    # asserting it cannot return, because the CLI now ships as a standalone
-    # release artifact. The smokes fetch
-    # `openshell-x86_64-unknown-linux-musl.tar.gz` from the release instead,
-    # and the pin is lifted.
-    #
-    # Pin the digest of the gateway image published for `upstream.version`.
-    # Keep this in lockstep with the `openshell` CLI version operators
-    # install — a newer CLI against an older gateway can fail on
-    # commands whose response shape changed (e.g. `inference get`).
-    # Bump via
-    # https://github.com/NVIDIA/OpenShell/pkgs/container/openshell%2Fgateway
+    # Pinned by digest to the gateway image upstream published for `v0.1.2`,
+    # the same release as `upstream.version`, the Cargo.toml tag, the
+    # supervisor and sandbox runtime images above, and the `openshell` CLI the
+    # provider hook downloads. Re-pin them together when `upstream.version`
+    # moves: a CLI newer than the gateway can fail on commands whose response
+    # shape changed. Resolve a digest with `docker buildx imagetools inspect`
+    # on https://github.com/NVIDIA/OpenShell/pkgs/container/openshell%2Fgateway
     repository: ghcr.io/nvidia/openshell/gateway
     tag: "sha256:2fe4dad9118e14ab80a8258b545ea6e6cd74c3469e24ad4e6610f964d98913a2"
     pullPolicy: IfNotPresent
@@ -354,10 +332,10 @@ gateway:
     limits:
       cpu: 500m
       memory: 1Gi
-  # Gateway DB persistence. The gateway stores provider/inference configs
-  # in its DB (set via gRPC RPC by the post-install Job, not via TOML).
-  # Without persistence, every gateway pod restart wipes the configs and
-  # every sandbox's bundle fetch fails until reconfigured.
+  # Gateway DB persistence. The gateway stores provider profiles and providers
+  # in its DB (set via gRPC by the post-install Job, not via TOML). Without
+  # persistence, a gateway pod restart wipes them, and sandboxes cannot be
+  # created with `--provider` until the next `helm upgrade` re-runs the hook.
   #
   # Default: disabled (ephemeral) — safe for the e2e harness, NOT safe
   # for production. Two persistence modes:
@@ -469,24 +447,26 @@ inferenceProvider:
 # Optional: deploy an in-cluster bridge that translates Claude Code's
 # AWS Bedrock requests to SAP AI Core's deployed-Bedrock format.
 #
-# Architecture: agent (Bedrock mode) -> https://inference.local/saic-aws-bedrock/...
-#   -> supervisor's L7 router -> in-pod gateway -> bridge pod -> SAP AI Core.
+# Architecture: sandbox workload -> its supervisor pod (which holds the
+# provider credential and has the egress) -> this bridge -> SAP AI Core.
 # The bridge is the SOLE process holding the SAP service key — sandbox
 # pods never see SAP credentials.
 #
 # When `enabled: true`, the chart deploys:
 #   - A standalone Deployment + Service for the bridge (POST /v1/messages).
-#   - A NetworkPolicy on the bridge pod (DNS + 0.0.0.0/0:443 with RFC1918
-#     excluded — for the public SAP endpoints).
+#   - A NetworkPolicy on the bridge pod: ingress only from OpenShell pods in
+#     this namespace, egress DNS + 0.0.0.0/0:443 with RFC1918 excluded (for
+#     the public SAP endpoints).
 #
 # The bridge speaks the Anthropic Messages API on the inside and
 # translates outbound to SAP AI Core's deployed Bedrock InvokeModel
 # endpoints. It is registered into the chart by pointing
 # `inferenceProvider.baseUrl` at the bridge's in-cluster Service URL
-# (with `inferenceProvider.type: anthropic`). Sandbox pods reach the
-# bridge via `inference.local` through the gateway's L7 router exactly
-# the same way they reach any other Anthropic upstream — no Bedrock
-# env, no AWS creds, no per-pod policy carve-out.
+# (with `inferenceProvider.type: anthropic`). The provider profile then
+# names the bridge's host and port as the credential's endpoint, and sandboxes
+# reach it like any other Anthropic upstream — no Bedrock env, no AWS creds,
+# no per-pod policy carve-out. Only sandboxes in this release's namespace can
+# reach it (the shared workspace mode); managed-mode namespaces cannot.
 #
 # Operator pre-creates a Secret holding the SAP service-key JSON:
 #   kubectl -n <release-ns> create secret generic my-sap-aicore-key \

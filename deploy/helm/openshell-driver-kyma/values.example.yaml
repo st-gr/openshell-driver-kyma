@@ -15,9 +15,11 @@
 #     -f my-values.yaml
 #
 # Pre-flight checklist (the chart's own pre-install hook fails fast on these):
-#   1. agent-sandbox controller installed cluster-wide:
-#        kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.4.6/manifest.yaml
-#   2. Sandbox namespace exists with PSA=privileged:
+#   1. agent-sandbox controller installed cluster-wide (v0.5.2 is the release
+#      the chart's CI runs against):
+#        kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.5.2/sandbox.yaml
+#   2. Sandbox namespace exists with PSA=privileged (the level the chart's CI
+#      runs at):
 #        kubectl create namespace openshell-system
 #        kubectl label namespace openshell-system \
 #          pod-security.kubernetes.io/enforce=privileged \
@@ -32,21 +34,19 @@
 namespace: openshell-system
 
 # ─── Driver image ─────────────────────────────────────────────────────────
-# Both image.tag and gateway.image.tag should be PINNED BY DIGEST in
-# production. Tag examples below are illustrative.
+# image.tag should be PINNED BY DIGEST in production. The gateway, supervisor
+# and sandbox-runtime images default to digests of upstream v0.1.2 and must
+# move together with `upstream.version`; leave them unset here.
 image:
   repository: ghcr.io/st-gr/openshell-driver-kyma
   tag: ""                # "" = .Chart.AppVersion. Override with v0.x.y or @sha256:…
   pullPolicy: IfNotPresent
 
-# ─── Driver flags ─────────────────────────────────────────────────────────
+# ─── Driver options ───────────────────────────────────────────────────────
+# Every key under `driver:` becomes an environment variable of the driver
+# container; see values.yaml for the full list. The supervisor and sandbox
+# runtime images are digest-pinned there for upstream v0.1.2.
 driver:
-  # Pin the supervisor image for production. To resolve the digest:
-  #   docker buildx imagetools inspect \
-  #     ghcr.io/nvidia/openshell/supervisor:latest \
-  #     --format '{{json .Manifest.Digest}}'
-  supervisorImage: ghcr.io/nvidia/openshell/supervisor:latest
-
   # Set true when your in-cluster LLM gateway can't service Anthropic's
   # optional telemetry endpoints. Independent of inference routing.
   disableClaudeTelemetry: true
@@ -82,10 +82,8 @@ imagePullSecrets: []
 # never reaches Ready.
 gateway:
   enabled: true
-  image:
-    repository: ghcr.io/nvidia/openshell/gateway
-    tag: latest          # PIN BY DIGEST for production
-    pullPolicy: IfNotPresent
+  # The gateway image defaults to a digest of upstream v0.1.2 (values.yaml).
+  # Leave `image` unset unless you are moving `upstream.version` too.
 
   # OIDC for client auth (the openshell CLI authenticates via OIDC).
   # Leave issuer empty for in-cluster-only deployments behind a service mesh.
@@ -101,8 +99,9 @@ gateway:
     enabled: true
     ttlSecs: 3600
 
-  # Gateway DB persistence. Without this, every gateway pod restart wipes
-  # provider/inference configs and breaks every sandbox's bundle fetch.
+  # Gateway DB persistence. Without this, a gateway pod restart wipes the
+  # provider profile and provider, so sandboxes cannot be created with
+  # `--provider` until the next `helm upgrade` re-runs the hook.
   # Two modes:
   #   - PVC-SQLite (dbUrl=""): chart renders a PVC at /var/lib/openshell.
   #   - External DB: set dbUrl, no PVC rendered.
@@ -135,23 +134,22 @@ gatewayApirule:
         #   - issuer: https://my-tenant.accounts.ondemand.com
         #     jwksUri: https://my-tenant.accounts.ondemand.com/oauth2/certs
 
-# ─── In-cluster LLM gateway routing (sandbox model traffic) ──────────────
-# Architecture (per https://docs.nvidia.com/openshell/about/how-it-works
-# and NVIDIA/OpenShell#998 — "No subprocess, no loopback hop"):
-#   - The agent application (user code in the agent container) sees only
-#     `ANTHROPIC_BASE_URL=https://inference.local/v1`. It cannot read the
-#     real upstream URL or API key.
-#   - The supervisor process (same pod, separate process ns) holds the
-#     bundle in memory, terminates `inference.local` TLS using the
-#     sandbox CA, strips caller creds, and dials the upstream itself.
-#   - The gateway sidecar serves `GetInferenceBundle` (config plane only).
-#     It does NOT forward inference request bytes.
-#
-# When this block is enabled, the chart renders a provider profile and a
-# post-install Job registers it and creates the provider (`openshell provider
-# profile import` + `openshell provider create`) against the in-pod gateway. The
-# Anthropic API key is mounted into the Job from the Secret you created
-# in the pre-flight checklist — the chart never sees it.
+# ─── Inference provider (sandbox model traffic) ───────────────────────────
+# Architecture (upstream OpenShell v0.1.2's provider-profile model):
+#   - The chart renders a provider profile: the endpoint host and port of
+#     `baseUrl`, and the `binaries` allowed to reach it.
+#   - A post-install Job imports the profile and creates the provider from it
+#     (`openshell provider profile import` + `openshell provider create`)
+#     against the in-pod gateway, with the API key from the Secret you created
+#     in the pre-flight checklist — the chart never sees it.
+#   - Sandboxes are created with `openshell sandbox create --provider <name>`
+#     and receive ANTHROPIC_BASE_URL (`baseUrl`) and ANTHROPIC_MODEL (`modelId`)
+#     in their environment. The agent holds only a placeholder for the key; the
+#     sandbox's supervisor substitutes the real key in requests to the
+#     profile's endpoint, and dials the upstream itself.
+#   - The key is bound to that host and port. `binaries` gates which processes
+#     may reach the endpoint; upstream v0.1.2 does not yet restrict the key by
+#     calling binary.
 inferenceProvider:
   enabled: true
   type: anthropic
@@ -173,10 +171,10 @@ inferenceProvider:
 #      InvokeModel endpoints.
 #   2. You point `inferenceProvider.baseUrl` (above) at the bridge's
 #      in-cluster Service URL with `inferenceProvider.type: anthropic`.
-#      The gateway treats the bridge as a normal Anthropic upstream.
+#      The provider profile names the bridge as the credential's endpoint.
 #   3. Sandbox env stays IDENTICAL to the standard Anthropic walkthrough
-#      (`ANTHROPIC_BASE_URL=https://inference.local`). No Bedrock env,
-#      no AWS creds, no per-pod policy carve-out.
+#      (`ANTHROPIC_BASE_URL` is the bridge's URL). No Bedrock env, no AWS
+#      creds. Only sandboxes in this release's namespace can reach the bridge.
 #
 # Pre-flight (one-time):
 #   kubectl -n openshell-system create secret generic my-sap-aicore-key \
@@ -185,7 +183,7 @@ inferenceProvider:
 # The chart never reads the Secret. The bridge pod mounts it at
 # /etc/sap-aicore/service-key.json (read-only, defaultMode 0o400) and
 # uses XSUAA `client_credentials` to mint outbound tokens. Sandbox pods
-# never see SAP credentials — they see only `inference.local`.
+# never see SAP credentials.
 #
 # Wiring example (adapt the inferenceProvider block above):
 #   inferenceProvider:
