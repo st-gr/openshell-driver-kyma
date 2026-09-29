@@ -24,6 +24,8 @@ tokio = { workspace = true }
 clap = { workspace = true }
 miette = { workspace = true }
 tracing = { workspace = true }
+axum = { workspace = true }
 
 [dev-dependencies]
 futures = { workspace = true }
+tower = { workspace = true, features = ["util"] }

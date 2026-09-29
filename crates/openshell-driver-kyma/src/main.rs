@@ -21,7 +21,7 @@ use openshell_driver_kyma::service::KymaComputeDriver;
 use openshell_driver_kyma::upstream_args::{
     compute_config, parse_managed_ssh_gateway_pod_selector, UpstreamArgs,
 };
-use tracing::info;
+use tracing::{error, info};
 
 // `about`/`long_about = None` keep `--help` without a description line, like
 // upstream's: clap would otherwise show a flattened struct's doc comment
@@ -84,6 +84,23 @@ async fn main() -> Result<()> {
     let bind_address = upstream.bind_address;
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut health_shutdown = shutdown_tx.subscribe();
+    let health_port = kyma.kyma_health_port;
+    // The task is only ever aborted, never awaited, so a failed bind (port in
+    // use) must be logged here or it would vanish silently.
+    let health = tokio::spawn({
+        let ready = Arc::clone(&ready);
+        async move {
+            if let Err(err) = openshell_driver_kyma::health::serve(health_port, ready, async move {
+                let _ = health_shutdown.wait_for(|stopping| *stopping).await;
+            })
+            .await
+            {
+                error!(port = health_port, error = %err, "health server failed");
+            }
+        }
+    });
     let driver = KubernetesComputeDriver::new(compute_config(upstream, selector), shutdown_rx)
         .await
         .into_diagnostic()?;
@@ -96,11 +113,12 @@ async fn main() -> Result<()> {
         let _ = shutdown_tx.send(true);
     };
 
-    if let Some(socket_path) = bind_socket {
+    let served = if let Some(socket_path) = bind_socket {
         let listener = openshell_core::external_driver_socket::bind_private(&socket_path)
             .map_err(|err| miette::miette!("{err}"))?;
         let _cleanup =
             openshell_core::external_driver_socket::SocketCleanup::new(socket_path.clone());
+        ready.store(true, std::sync::atomic::Ordering::Release);
         info!(socket = %socket_path.display(), "Starting Kyma compute driver");
         tonic::transport::Server::builder()
             .layer(openshell_otel::compute_driver_rpc_layer())
@@ -113,11 +131,14 @@ async fn main() -> Result<()> {
             .into_diagnostic()
     } else {
         info!(address = %bind_address, "Starting Kyma compute driver");
+        ready.store(true, std::sync::atomic::Ordering::Release);
         tonic::transport::Server::builder()
             .layer(openshell_otel::compute_driver_rpc_layer())
             .add_service(service)
             .serve_with_shutdown(bind_address, shutdown)
             .await
             .into_diagnostic()
-    }
+    };
+    health.abort();
+    served
 }

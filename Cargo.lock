@@ -2006,6 +2006,7 @@ dependencies = [
 name = "openshell-driver-kyma"
 version = "0.8.0"
 dependencies = [
+ "axum",
  "clap",
  "futures",
  "miette",
@@ -2014,6 +2015,7 @@ dependencies = [
  "openshell-otel",
  "tokio",
  "tonic",
+ "tower",
  "tracing",
 ]
 

@@ -7,6 +7,7 @@
 //! small Kyma layer. See `docs/superpowers/specs/2026-09-29-upstream-driver-parity-design.md`.
 
 pub mod enrich;
+pub mod health;
 pub mod hooks;
 pub mod kyma_args;
 pub mod service;
