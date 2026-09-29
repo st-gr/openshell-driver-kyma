@@ -23,6 +23,9 @@ pub enum DriverError {
     #[error("permission denied: {0}")]
     PermissionDenied(String),
 
+    #[error("unauthenticated: {0}")]
+    Unauthenticated(String),
+
     #[error("unavailable: {0}")]
     Unavailable(String),
 
@@ -42,6 +45,7 @@ impl From<DriverError> for tonic::Status {
             DriverError::AlreadyExists(m) => Status::new(Code::AlreadyExists, m),
             DriverError::FailedPrecondition(m) => Status::new(Code::FailedPrecondition, m),
             DriverError::PermissionDenied(m) => Status::new(Code::PermissionDenied, m),
+            DriverError::Unauthenticated(m) => Status::new(Code::Unauthenticated, m),
             DriverError::Unavailable(m) => Status::new(Code::Unavailable, m),
             DriverError::Kube(kube::Error::Api(s)) if s.code == 404 => {
                 Status::new(Code::NotFound, s.message.clone())

@@ -94,7 +94,7 @@ const GPU_RESOURCE: &str = "nvidia.com/gpu";
 // control path a caller's driver_config mount must not overlap.
 pub(crate) const SA_TOKEN_VOLUME: &str = "openshell-sa-token";
 pub(crate) const SA_TOKEN_MOUNT_PATH: &str = "/var/run/secrets/openshell";
-const SA_TOKEN_AUDIENCE: &str = "openshell-gateway";
+pub(crate) const SA_TOKEN_AUDIENCE: &str = "openshell-gateway";
 const SA_TOKEN_TTL_SECS: i64 = 3600;
 
 /// `KymaProvisioner` implements `SandboxProvisioner` for SAP BTP Kyma.
