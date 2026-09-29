@@ -5,7 +5,9 @@
 //! Upstream copies `template.labels` onto the workload and merges
 //! `template.environment` into its environment (`build_sandbox_env`), so
 //! editing the request is enough — no pod patching, no webhook. Keys the caller
-//! already set are never overwritten.
+//! already set are never overwritten. Upstream applies `spec.environment` after
+//! `template.environment`, so a caller's spec environment also outranks
+//! enrichment.
 
 use openshell_core::proto::compute::v1::DriverSandbox;
 
@@ -114,6 +116,7 @@ mod tests {
         enrich(&mut sandbox, &config());
         let template = sandbox.spec.unwrap().template.unwrap();
         assert_eq!(template.labels[ISTIO_INJECT_LABEL], "true");
+        assert_eq!(template.labels[KAGENTI_TYPE_LABEL], KAGENTI_TYPE_VALUE);
         assert_eq!(template.environment["ANTHROPIC_BASE_URL"], "http://mine");
     }
 

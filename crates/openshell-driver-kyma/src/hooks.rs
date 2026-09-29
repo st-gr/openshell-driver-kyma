@@ -31,3 +31,23 @@ impl KymaHooks for KymaHookSet {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::enrich::{ISTIO_INJECT_LABEL, KAGENTI_TYPE_LABEL, KAGENTI_TYPE_VALUE};
+
+    #[test]
+    fn enrich_hook_applies_the_configured_enrichment() {
+        let hooks = KymaHookSet::new(EnrichConfig {
+            istio_inject: true,
+            environment: vec![("KEY".to_string(), "value".to_string())],
+        });
+        let mut sandbox = DriverSandbox::default();
+        KymaHooks::enrich(&hooks, &mut sandbox);
+        let template = sandbox.spec.unwrap().template.unwrap();
+        assert_eq!(template.labels[ISTIO_INJECT_LABEL], "true");
+        assert_eq!(template.labels[KAGENTI_TYPE_LABEL], KAGENTI_TYPE_VALUE);
+        assert_eq!(template.environment["KEY"], "value");
+    }
+}
