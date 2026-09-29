@@ -280,7 +280,9 @@ TOML values in the gateway's config and as JSON values in the driver's
 admission policy. Given the string "false", the TOML still reads as the boolean
 false but the JSON carries the string "false", which the driver rejects. Each
 must be a real boolean. driver.resourceAdmission.requiredLabels is a map of
-label to value, or null for upstream's built-in set.
+label to value, or null for upstream's built-in set; an empty map is refused
+while admission is enabled, as upstream refuses it at startup
+(ResourceAdmissionConfig::validate, src/resource_admission.rs:135-140).
 */}}
 {{- define "openshell-driver-kyma.driverValueGuards" -}}
 {{- $allow := .Values.driver.allowDriverConfig -}}
@@ -294,6 +296,9 @@ label to value, or null for upstream's built-in set.
 {{- $labels := .Values.driver.resourceAdmission.requiredLabels -}}
 {{- if not (or (kindIs "invalid" $labels) (kindIs "map" $labels)) -}}
 {{- fail (printf "driver.resourceAdmission.requiredLabels must be a map of label to value (or null for upstream's built-in labels), got %s." (kindOf $labels)) -}}
+{{- end -}}
+{{- if and $admission (kindIs "map" $labels) (eq (len $labels) 0) -}}
+{{- fail "driver.resourceAdmission.enabled=true with driver.resourceAdmission.requiredLabels={} (empty) cannot start: upstream refuses an empty required-label set while admission is enabled (\"resource_admission.required_labels must not be empty while enabled\", openshell-core src/resource_admission.rs:136 at v0.1.2). Set requiredLabels to null for upstream's built-in labels or to a non-empty map, or set driver.resourceAdmission.enabled=false to turn the approval check off." -}}
 {{- end -}}
 {{- end -}}
 

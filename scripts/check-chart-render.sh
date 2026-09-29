@@ -15,10 +15,11 @@
 #      time instead, naming the value, and the values they accept still render:
 #      3b driver.sandboxEnv entries, 3c the managed-mode gateway id, 3d the
 #      operator-mode namespace selectors, 3e managed SSH ingress, 3f the sandbox
-#      UID/GID, 3g driver.allowDriverConfig and driver.resourceAdmission; and 3h
+#      UID/GID, 3g driver.allowDriverConfig and driver.resourceAdmission (types, and
+#      no empty label set while admission is enabled); and 3h
 #      gateway settings that cannot work: the in-pod gateway without the Service
 #      sandboxes dial or without sandbox-JWT keys, and the provider hook without
-#      the gateway's Service or against an OIDC gateway it cannot authenticate to;
+#      the gateway's Service or against an OIDC or TLS gateway it cannot reach;
 #   4. the chart's NetworkPolicies: exactly one selects OpenShell sandbox pods, the
 #      mirror of upstream's SSH-ingress restriction, present in shared mode with the
 #      in-pod gateway only; in managed mode the driver applies it instead, so the
@@ -162,6 +163,17 @@ try good-3f-unset '' t
 try bad-3g-string 'driver.allowDriverConfig' t --set-string driver.allowDriverConfig=false
 try bad-3g-admission-string 'driver.resourceAdmission.enabled' t --set-string driver.resourceAdmission.enabled=false
 try bad-3g-labels-list 'driver.resourceAdmission.requiredLabels' t --set-json 'driver.resourceAdmission.requiredLabels=["a=b"]'
+# ...and upstream refuses an empty label set while admission is enabled
+# (resource_admission.rs:136), in three series: enabled with {} fails; enabled with
+# null (upstream's built-in labels) or a non-empty map renders; disabled with {}
+# renders, and reaches both sides as empty (check 2).
+try bad-3g-admission-empty-labels 'driver.resourceAdmission.requiredLabels' t \
+	--set driver.resourceAdmission.enabled=true --set-json 'driver.resourceAdmission.requiredLabels={}'
+try good-3g-admission-null-labels '' t --set driver.resourceAdmission.enabled=true --set-json 'driver.resourceAdmission.requiredLabels=null'
+try good-3g-admission-some-labels '' t --set driver.resourceAdmission.enabled=true \
+	--set-json 'driver.resourceAdmission.requiredLabels={"example.com/approved":"yes"}'
+try good-3g-admission-off-empty-labels '' t --set driver.resourceAdmission.enabled=false \
+	--set-json 'driver.resourceAdmission.requiredLabels={}'
 
 # 3h. Gateway settings that cannot work. Sandboxes dial the release's Service unless
 # driver.gatewayEndpoint names another address, and their supervisors cannot
@@ -216,6 +228,13 @@ inference_try bad-3h-inference-no-gateway 'gateway.enabled' --set "inferenceProv
 	--set gateway.enabled=false
 inference_try bad-3h-inference-oidc 'gateway.oidc.issuer' --set "inferenceProvider.baseUrl=$inference_url" \
 	--set gateway.oidc.issuer=https://issuer.example --set gateway.oidc.audience=openshell
+# ...and the hook dials http:// with no client certificate, so it cannot reach a gateway
+# with TLS: in three series, both together fail; TLS alone and the provider alone render.
+inference_try bad-3h-inference-tls 'gateway.tls.enabled' --set "inferenceProvider.baseUrl=$inference_url" \
+	--set gateway.tls.enabled=true
+try good-3h-tls-no-inference '' t --set gateway.tls.enabled=true
+try good-3h-inference-no-tls '' t "${inference_common[@]}" --set "inferenceProvider.baseUrl=$inference_url" \
+	--set "inferenceProvider.modelId=$inference_model" --set gateway.tls.enabled=false
 # The endpoint and model join what driver.sandboxEnv already sets, in that order.
 try good-7-env '' t "${inference_common[@]}" --set "inferenceProvider.baseUrl=$inference_url" \
 	--set "inferenceProvider.modelId=$inference_model" --set-json 'driver.sandboxEnv=["OPTS=a=b"]'
@@ -470,6 +489,9 @@ if env is not None and (env.get("OPENSHELL_OPERATOR_NAMESPACE_FILE") != "/etc/op
     failures.append("operator mode with only a ConfigMap did not emit only OPENSHELL_OPERATOR_NAMESPACE_FILE")
 
 rendered("good-3e-shared-unchecked")
+for name in ("good-3g-admission-null-labels", "good-3g-admission-some-labels", "good-3g-admission-off-empty-labels",
+             "good-3h-tls-no-inference", "good-3h-inference-no-tls"):
+    rendered(name)
 env = rendered("good-3h-gateway-endpoint")
 if env is not None and env.get("OPENSHELL_GRPC_ENDPOINT") != "http://gateway.example:8080":
     failures.append(f"driver.gatewayEndpoint did not reach the driver: {env.get('OPENSHELL_GRPC_ENDPOINT')!r}")

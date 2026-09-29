@@ -69,6 +69,13 @@ the install. */ -}}
 {{- if .Values.gateway.oidc.issuer -}}
 {{- fail "inferenceProvider.enabled=true cannot be combined with gateway.oidc.issuer: the provider hook calls the gateway without a token, and a gateway with OIDC refuses unauthenticated calls. Leave inferenceProvider disabled and register the profile and provider from an authenticated CLI session (docs/production-deployment.md)." -}}
 {{- end -}}
+{{- /* The hook dials the gateway at http:// (GATEWAY_URL and GATEWAY_HEALTH_URL in
+inference-provider-hook.yaml, whatever gateway.tls.enabled says) and mounts no
+client certificate, so against a gateway that terminates TLS every call fails
+and so does the install. */ -}}
+{{- if .Values.gateway.tls.enabled -}}
+{{- fail "inferenceProvider.enabled=true cannot be combined with gateway.tls.enabled=true: the provider hook always dials the gateway over http:// and presents no client certificate, so it cannot reach a gateway that terminates TLS. Set inferenceProvider.enabled=false and register the profile and provider from a CLI session that trusts the gateway's CA (docs/production-deployment.md), or set gateway.tls.enabled=false." -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 

@@ -156,8 +156,9 @@ driver:
     # upstream's built-in set: openshell.ai/sandbox-attachable: "true" and
     # openshell.ai/sandbox-attachable-workspace: "${workspace}". A map replaces
     # that set; a value of exactly "${workspace}" must equal the sandbox's
-    # workspace. Upstream refuses at startup an empty map while enabled, a map
-    # whose values are all "${workspace}", and its own reserved label keys.
+    # workspace. Upstream refuses at startup an empty map while enabled (the
+    # chart refuses to render it too), a map whose values are all
+    # "${workspace}", and its own reserved label keys.
     requiredLabels: null
   # --- Upstream openshell-driver-kubernetes options (same names upstream's
   # chart uses; each maps to the upstream environment variable in
