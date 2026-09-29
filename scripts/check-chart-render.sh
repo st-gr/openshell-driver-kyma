@@ -16,7 +16,8 @@
 #      operator-mode namespace selectors, 3e managed SSH ingress, 3f the sandbox
 #      UID/GID, 3g driver.allowDriverConfig;
 #   4. the chart's NetworkPolicies: exactly one selects OpenShell sandbox pods, the
-#      mirror of upstream's SSH-ingress restriction, present in shared mode only;
+#      mirror of upstream's SSH-ingress restriction, present in shared mode with the
+#      in-pod gateway only;
 #      the rest select only the chart's own pods. Upstream fences sandboxes per
 #      namespace and NetworkPolicies are additive, so any other policy could only
 #      widen that fence;
@@ -153,8 +154,10 @@ render_as t --set driver.workspaceMode=managed --set gateway.sandboxJwt.gatewayI
 	"${secret_values[@]}" >"$WORK/rbac-managed-secrets.yaml"
 render_as t --set driver.workspaceMode=operator --set driver.operatorNamespaceLabel=team=a \
 	"${secret_values[@]}" >"$WORK/rbac-operator-secrets.yaml"
-# NetworkPolicies off, and the bedrock bridge, which has a NetworkPolicy of its own.
+# NetworkPolicies off; an external gateway (the chart's default gateway.enabled=false,
+# which render_as overrides); and the bedrock bridge, which has a NetworkPolicy of its own.
 render_as t --set networkPolicy.enabled=false >"$WORK/rbac-shared-no-netpol.yaml"
+render_as t --set gateway.enabled=false >"$WORK/rbac-shared-no-gateway.yaml"
 render_as t --set bedrockBridge.enabled=true --set bedrockBridge.sap.serviceKeySecret.name=sap-key \
 	--set bedrockBridge.singleDeploymentId=deployment >"$WORK/rbac-bedrock-bridge.yaml"
 
@@ -299,12 +302,16 @@ def driver_deployment(documents, where):
 # NetworkPolicies are additive, so a chart policy selecting them can only widen the
 # fence. The exception is upstream's own SSH-ingress restriction, which the chart
 # mirrors in shared mode (deploy/helm/openshell/templates/networkpolicy.yaml at the
-# pinned tag, lines 4-35; managed mode gets it from the driver). Every other policy
-# must select the chart's own pods: never an empty selector, never openshell.ai/*.
+# pinned tag, lines 4-35; managed mode gets it from the driver). Its one peer is the
+# release's own gateway pod, so an external gateway (gateway.enabled=false) is left to
+# its own deployment. Every other policy must select the chart's own pods: never an
+# empty selector, never openshell.ai/*.
 chart_name = (yaml.safe_load((chart / "Chart.yaml").read_text()) or {})["name"]
 own_pods = [{"app.kubernetes.io/name": chart_name, "app.kubernetes.io/instance": "t"},
             {"app.kubernetes.io/name": chart_name + "-bedrock-bridge", "app.kubernetes.io/instance": "t"}]
-NETPOL_OFF = {"rbac-shared-no-netpol.yaml"}   # renders made with networkPolicy.enabled=false
+# Shared-mode renders in which the SSH-ingress restriction must be absent, and why.
+NO_SSH_RESTRICTION = {"rbac-shared-no-netpol.yaml": "networkPolicy.enabled=false",
+                      "rbac-shared-no-gateway.yaml": "gateway.enabled=false"}
 
 def ssh_restriction(release_namespace):
     return {"podSelector": {"matchLabels": {"openshell.ai/managed-by": "openshell"}},
@@ -323,10 +330,11 @@ for render in sorted(work.glob("r*.yaml")) + [work / "good-all-options.yaml"]:
         "OPENSHELL_WORKSPACE_MODE")
     policies = [d for d in documents if d.get("kind") == "NetworkPolicy"]
     ssh = [d for d in policies if d["metadata"]["name"].endswith("-sandbox-ssh")]
-    want = 1 if mode == "shared" and render.name not in NETPOL_OFF else 0
+    want = 1 if mode == "shared" and render.name not in NO_SSH_RESTRICTION else 0
     if len(ssh) != want:
-        failures.append(f"{render.name}: {len(ssh)} SSH-ingress restrictions in {mode} mode with "
-                        f"networkPolicy {'off' if render.name in NETPOL_OFF else 'on'}, want {want}")
+        failures.append(f"{render.name}: {len(ssh)} SSH-ingress restrictions in {mode} mode"
+                        + (f" with {NO_SSH_RESTRICTION[render.name]}" if render.name in NO_SSH_RESTRICTION else "")
+                        + f", want {want}")
     for d in policies:
         name, spec = d["metadata"]["name"], d.get("spec") or {}
         if d in ssh:
@@ -441,6 +449,7 @@ EXPECTED = {
     "render-shared-true": (SHARED, SHARED_CLUSTER),
     "render-shared-false": ([b for b in SHARED if b is not PVC_GET], SHARED_CLUSTER),      # no allowDriverConfig, no PVC get
     "rbac-shared-no-netpol": (SHARED, SHARED_CLUSTER),
+    "rbac-shared-no-gateway": (SHARED, SHARED_CLUSTER),                                    # an external gateway changes no RBAC
     "rbac-apirule": (SHARED + [KYMA_EXPOSURE], SHARED_CLUSTER),
     "rbac-shared-secrets": (SHARED, SHARED_CLUSTER),                                       # shared mode stages no Secret
     "render-managed-true": ([], MANAGED),
