@@ -401,9 +401,13 @@ gateway:
   #   - the `[openshell.gateway.gateway_jwt]` table in the gateway TOML
   #     ConfigMap (the ConfigMap itself, with `[openshell.drivers.kyma]`,
   #     is rendered whenever `gateway.enabled` is true)
-  #   - extra RBAC: `tokenreviews:create` (cluster) + `pods:get` (sandbox ns)
-  #   - mounts on the gateway container (Secret at /etc/openshell-jwt,
-  #     ConfigMap at /etc/openshell)
+  #   - a mount of the signing-key Secret at /etc/openshell-jwt on the
+  #     gateway container
+  # The `tokenreviews:create` (cluster) and `pods:get` (sandbox ns) RBAC,
+  # and the gateway-config ConfigMap mounted at /etc/openshell, are NOT
+  # gated on this flag: the driver performs the TokenReview itself
+  # (AuthenticateSandbox), and the ConfigMap renders whenever
+  # `gateway.enabled` is true.
   sandboxJwt:
     enabled: false
     # Names below default to auto-derived values; override only if you have

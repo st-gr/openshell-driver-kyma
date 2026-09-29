@@ -352,6 +352,21 @@ impl ComputeDriver for Driver {
     /// Added upstream in v0.0.106 as the counterpart to `StopSandbox`
     /// (resume a stopped sandbox's platform resources). Delegates to
     /// `SandboxProvisioner::start_sandbox`, mirroring `stop_sandbox` above.
+    ///
+    /// Three v0.1.2 request fields are deliberately not read:
+    /// - `expected_runtime_identity`: its contract is that a driver
+    ///   advertising runtime-identity binding must preserve the stable
+    ///   resource the identity names and replace only the
+    ///   generation-specific runtime component. This driver satisfies that
+    ///   by construction: `start_sandbox`/`stop_sandbox` PATCH the Sandbox
+    ///   CR's operating mode (`patch_operating_state`) instead of deleting
+    ///   and recreating it, so the CR's `metadata.uid` (the only variable
+    ///   part of the identity besides the namespace) survives, and the pod
+    ///   is the generation-specific component that gets replaced. The
+    ///   identity format deliberately excludes the pod UID for this reason.
+    /// - `launch_authentication` and `generation_id`: not read. They are
+    ///   the analogue of the likewise unread `sandbox_token` (see
+    ///   `provisioner.rs`).
     async fn start_sandbox(
         &self,
         req: Request<StartSandboxRequest>,

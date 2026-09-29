@@ -50,10 +50,12 @@ use crate::workspace::WorkspaceMode;
 
 const LABEL_KAGENTI: &str = "kagenti.io/type";
 const LABEL_ISTIO_INJECT: &str = "sidecar.istio.io/inject";
-// Pod annotation read by the gateway after a successful TokenReview to
-// resolve a projected SA token's pod identity to a sandbox identity.
+// Pod annotation recording the sandbox id. It currently has no reader: the
+// gateway's TokenReview authenticator that consumed it was deleted in
+// v0.1.2, and this driver's own authentication path reads the LABEL
+// `openshell.ai/sandbox-id` (LABEL_SANDBOX_ID) instead. Kept as-is.
 // Note the differing TLD vs LABEL_SANDBOX_ID: that's intentional, the
-// upstream gateway uses `.io/` for annotations and `.ai/` for labels.
+// upstream gateway used `.io/` for annotations and `.ai/` for labels.
 const ANNOTATION_SANDBOX_ID: &str = "openshell.io/sandbox-id";
 /// Driver-injected variables the AGENT needs, as opposed to supervisor
 /// plumbing. Only these ride along in OPENSHELL_USER_ENVIRONMENT; see the
@@ -938,11 +940,11 @@ impl KymaProvisioner {
         }
         let labels = merge_maps(&user_labels, &driver_labels);
 
-        // Annotations: the gateway's K8s SA bootstrap authenticator
-        // resolves the supervisor's projected SA token to a sandbox-id
-        // by reading this annotation on the pod after TokenReview. It
-        // is set once at pod create and immutable for the lifetime of
-        // the sandbox.
+        // Annotations: records the sandbox-id on the pod. Set once at pod
+        // create and immutable for the lifetime of the sandbox. It has no
+        // reader since v0.1.2 deleted the gateway's SA bootstrap
+        // authenticator; the driver's AuthenticateSandbox path resolves
+        // the sandbox from the `openshell.ai/sandbox-id` label instead.
         let mut annotations: HashMap<String, String> = HashMap::new();
         annotations.insert(ANNOTATION_SANDBOX_ID.into(), sb.id.clone());
 

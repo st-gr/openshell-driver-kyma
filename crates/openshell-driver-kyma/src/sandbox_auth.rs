@@ -6,6 +6,12 @@
 //! Everything here is pure — no Kubernetes API calls — so the whole module is
 //! unit-testable. `provisioner.rs` owns the I/O and calls into this.
 
+use crate::error::DriverError;
+use crate::provisioner::SA_TOKEN_AUDIENCE;
+use k8s_openapi::api::authentication::v1::{TokenReviewStatus, UserInfo};
+use serde::Serialize;
+use std::collections::BTreeMap;
+
 /// URI scheme for this driver's runtime identities.
 ///
 /// Upstream's Kubernetes driver uses `kubernetes://{ns}/{cr_uid}/{pod_uid}`.
@@ -25,12 +31,6 @@ pub const RUNTIME_IDENTITY_SCHEME: &str = "kyma";
 pub fn runtime_identity(namespace: &str, sandbox_uid: &str) -> String {
     format!("{RUNTIME_IDENTITY_SCHEME}://{namespace}/{sandbox_uid}")
 }
-
-use crate::error::DriverError;
-use crate::provisioner::SA_TOKEN_AUDIENCE;
-use k8s_openapi::api::authentication::v1::{TokenReviewStatus, UserInfo};
-use serde::Serialize;
-use std::collections::BTreeMap;
 
 /// Kubernetes-populated TokenReview extras identifying the presenting Pod.
 pub const POD_NAME_EXTRA: &str = "authentication.kubernetes.io/pod-name";

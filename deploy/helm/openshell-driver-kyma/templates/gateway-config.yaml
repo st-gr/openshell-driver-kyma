@@ -40,8 +40,9 @@ data:
     # rejected with Unauthenticated/missing-authorization-header — including
     # `openshell sandbox create` from the CLI. Allow unauthenticated user
     # calls in that case so the chart is usable in-cluster behind a port-
-    # forward or a Service-mesh-controlled APIRule. The supervisor->gateway
-    # path is still gated by the sandbox-JWT issuer (configured below).
+    # forward or a Service-mesh-controlled APIRule. This setting covers user
+    # calls only; supervisor->gateway calls authenticate separately, via the
+    # driver's AuthenticateSandbox and (when enabled) the sandbox-JWT issuer.
     {{- if .Values.gateway.oidc.issuer }}
     allow_unauthenticated_users = false
     {{- else }}
