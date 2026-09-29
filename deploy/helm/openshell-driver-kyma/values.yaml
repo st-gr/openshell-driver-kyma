@@ -66,8 +66,9 @@ driver:
   # binaries. Re-pin both together when bumping upstream.
   supervisorImage: ghcr.io/nvidia/openshell/supervisor@sha256:d7b5264bb6bc56f4796e6fa3617b8e4a8d785be0b7293542efd8cc250b0fb67a
   # The gateway endpoint sandboxes dial (OPENSHELL_GRPC_ENDPOINT). Empty
-  # defaults to this release's Service when gateway.enabled is true, and
-  # otherwise leaves it to upstream.
+  # defaults to this release's Service when gateway.enabled is true, https://
+  # when gateway.tls.enabled and http:// otherwise, as upstream's chart derives
+  # it from its disableTls; without the gateway it is left to upstream.
   gatewayEndpoint: ""
   istioInjectSandboxes: false
   # Expose each sandbox's port 8080 through a Kyma APIRule, on a host under
@@ -180,6 +181,13 @@ driver:
   bindAddress: ""
   otlpEndpoint: ""
   gatewayName: ""
+  # Secret with the client certificate sandboxes present to a TLS gateway
+  # (OPENSHELL_CLIENT_TLS_SECRET_NAME). Empty defaults, when gateway.tls.enabled,
+  # to the one the chart's PKI hook creates (gateway.sandboxJwt.
+  # clientTlsSecretName, default <fullname>-client-tls), as upstream's chart
+  # passes its own when TLS is on; without TLS it is not passed. The hook writes
+  # it to the release namespace, where shared-mode sandboxes find it only if
+  # `namespace` is the release namespace.
   clientTlsSecretName: ""
   hostGatewayIp: ""
   providerSpiffeWorkloadApiSocket: ""

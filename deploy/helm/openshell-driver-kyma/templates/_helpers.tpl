@@ -135,13 +135,34 @@ Stable identifier baked into every gateway-minted sandbox JWT (claim "iss").
 {{/*
 The gateway endpoint sandboxes dial (upstream --grpc-endpoint). An explicit
 driver.gatewayEndpoint wins; with the gateway sidecar enabled it defaults to
-this release's Service. Empty lets upstream decide.
+this release's Service, https:// when the gateway serves TLS
+(gateway.tls.enabled) and http:// otherwise, as upstream's openshell.grpcEndpoint
+takes the scheme from its disableTls (deploy/helm/openshell/templates/
+_helpers.tpl:256-262 at the pinned tag). Empty lets upstream decide.
 */}}
 {{- define "openshell-driver-kyma.grpcEndpoint" -}}
 {{- if .Values.driver.gatewayEndpoint -}}
 {{- .Values.driver.gatewayEndpoint -}}
 {{- else if .Values.gateway.enabled -}}
-{{- printf "http://%s.%s.svc.cluster.local:%v" (include "openshell-driver-kyma.fullname" .) .Release.Namespace .Values.gateway.grpcPort -}}
+{{- $scheme := ternary "https" "http" (default false .Values.gateway.tls.enabled) -}}
+{{- printf "%s://%s.%s.svc.cluster.local:%v" $scheme (include "openshell-driver-kyma.fullname" .) .Release.Namespace .Values.gateway.grpcPort -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+The client TLS Secret the driver mounts into sandboxes (upstream
+--client-tls-secret-name). An explicit driver.clientTlsSecretName wins; when the
+in-pod gateway serves TLS (gateway.tls.enabled) it defaults to the Secret the
+chart's PKI hook creates (openshell-driver-kyma.clientTlsSecretName), as
+upstream's chart passes server.tls.clientTlsSecretName whenever TLS is on
+(deploy/helm/openshell/templates/gateway-config.yaml:152-154). Empty otherwise,
+so the variable is not passed.
+*/}}
+{{- define "openshell-driver-kyma.driverClientTlsSecretName" -}}
+{{- if .Values.driver.clientTlsSecretName -}}
+{{- .Values.driver.clientTlsSecretName -}}
+{{- else if and .Values.gateway.enabled .Values.gateway.tls.enabled -}}
+{{- include "openshell-driver-kyma.clientTlsSecretName" . -}}
 {{- end -}}
 {{- end -}}
 
@@ -185,16 +206,18 @@ Secrets in the sandbox namespace whose contents the driver stages into
 workspace namespaces, as a JSON array; empty in shared mode. Mirrors upstream's
 openshell.workspaceSecretSourceNames (deploy/helm/openshell/templates/_helpers.tpl
 at the pinned tag). The client TLS Secret is staged in managed and operator
-mode, when driver.clientTlsSecretName names one (upstream's chart always has a
-name and skips it when TLS is off; here an empty name is that case). The
-image-pull Secrets are staged in managed mode only. driver.sandboxImagePullSecrets
-is a list of Secret names, as the driver's environment takes it.
+mode, when the driver is given one (openshell-driver-kyma.driverClientTlsSecretName:
+upstream's chart always has a name and skips it when TLS is off; here an empty
+name is that case). The image-pull Secrets are staged in managed mode only.
+driver.sandboxImagePullSecrets is a list of Secret names, as the driver's
+environment takes it.
 */}}
 {{- define "openshell-driver-kyma.workspaceSecretSourceNames" -}}
 {{- $mode := .Values.driver.workspaceMode -}}
 {{- $names := list -}}
-{{- if and (ne $mode "shared") .Values.driver.clientTlsSecretName -}}
-{{- $names = append $names .Values.driver.clientTlsSecretName -}}
+{{- $clientTls := include "openshell-driver-kyma.driverClientTlsSecretName" . -}}
+{{- if and (ne $mode "shared") $clientTls -}}
+{{- $names = append $names $clientTls -}}
 {{- end -}}
 {{- if eq $mode "managed" -}}
 {{- range .Values.driver.sandboxImagePullSecrets -}}

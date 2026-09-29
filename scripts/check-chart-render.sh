@@ -28,7 +28,9 @@
 #      upstream's rules plus the Kyma layer's for that render: nothing missing and
 #      nothing extra, per scope, in every workspace mode and option combination the
 #      table names, including the Secrets the driver may read;
-#   6. values.yaml's upstream.version equals the tag Cargo.toml pins;
+#   6. values.yaml's upstream.version equals the tag Cargo.toml pins, and 6b the
+#      gateway endpoint sandboxes dial takes its scheme from gateway.tls.enabled, with
+#      the PKI hook's client TLS Secret as the driver's default under TLS;
 #   7. providers follow upstream's profile model: no template calls the removed
 #      `openshell inference`; the chart renders a provider profile with exactly the
 #      configured endpoint and binaries; the hook installs the pinned CLI, checks it
@@ -238,6 +240,14 @@ render_as t --set driver.workspaceMode=managed --set gateway.sandboxJwt.gatewayI
 	"${secret_values[@]}" >"$WORK/rbac-managed-secrets.yaml"
 render_as t --set driver.workspaceMode=operator --set driver.operatorNamespaceLabel=team=a \
 	"${secret_values[@]}" >"$WORK/rbac-operator-secrets.yaml"
+# Gateway TLS: the endpoint turns https and the driver defaults to the PKI hook's client
+# TLS Secret, which managed and operator mode stage into workspaces; an explicit
+# driver.clientTlsSecretName still wins.
+render_as t --set gateway.tls.enabled=true >"$WORK/rbac-shared-tls.yaml"
+render_as t --set gateway.tls.enabled=true --set driver.workspaceMode=managed \
+	--set gateway.sandboxJwt.gatewayId=gw >"$WORK/rbac-managed-tls.yaml"
+render_as t --set gateway.tls.enabled=true --set driver.workspaceMode=operator \
+	--set driver.operatorNamespaceLabel=team=a --set driver.clientTlsSecretName=own-tls >"$WORK/rbac-operator-tls.yaml"
 # NetworkPolicies off; an external gateway (the chart's default gateway.enabled=false,
 # which render_as overrides); and the bedrock bridge, which has a NetworkPolicy of its own.
 render_as t --set networkPolicy.enabled=false >"$WORK/rbac-shared-no-netpol.yaml"
@@ -485,6 +495,7 @@ MANAGED_SSH = {
     "rbac-managed-no-netpol": None,                              # networkPolicy.enabled=false, as upstream
     "rbac-managed-no-gateway": None,                             # an external gateway: nothing derived
     "rbac-managed-ssh-off": None,                                # driver.managedSshIngress.enabled=false
+    "rbac-managed-tls": (None, own_pods[0]),
     "good-all-options.yaml": ("example-gateway", {"app": "gateway"}),
 }
 
@@ -658,6 +669,10 @@ EXPECTED = {
     "rbac-managed-secrets": ([secret_sources("client-tls", "pull-a", "pull-b")], MANAGED + [SSH_INGRESS_POLICY]),
     "rbac-operator-apirule": ([], OPERATOR + [KYMA_EXPOSURE]),
     "rbac-operator-secrets": ([secret_sources("client-tls")], OPERATOR),                   # TLS Secret only, no pull Secrets
+    # Gateway TLS: the PKI hook's client TLS Secret is the driver's by default.
+    "rbac-shared-tls": (SHARED, SHARED_CLUSTER),                                           # shared mode stages no Secret
+    "rbac-managed-tls": ([secret_sources("t-openshell-driver-kyma-client-tls")], MANAGED + [SSH_INGRESS_POLICY]),
+    "rbac-operator-tls": ([secret_sources("own-tls")], OPERATOR),                          # an explicit name wins
     "good-all-options": ([all_options_secrets], MANAGED + [PVC_GET, SSH_INGRESS_POLICY, KYMA_EXPOSURE, KYMA_PSA_LABEL]),
 }
 
@@ -682,6 +697,24 @@ pinned = (work / "pinned-tag.txt").read_text().strip()
 chart_version = (yaml.safe_load(values) or {}).get("upstream", {}).get("version")
 if chart_version != pinned:
     failures.append(f"values upstream.version={chart_version!r}, Cargo.toml pins {pinned!r}")
+
+# 6b. The endpoint sandboxes dial is https:// exactly when the in-pod gateway serves TLS
+# (upstream's openshell.grpcEndpoint takes the scheme from disableTls), and the driver
+# then mounts the PKI hook's client TLS Secret unless driver.clientTlsSecretName names one.
+TLS_ENDPOINT = {  # render -> (scheme, OPENSHELL_CLIENT_TLS_SECRET_NAME)
+    "render-shared-true": ("http", None),
+    "rbac-shared-tls": ("https", "t-openshell-driver-kyma-client-tls"),
+    "rbac-managed-tls": ("https", "t-openshell-driver-kyma-client-tls"),
+    "rbac-operator-tls": ("https", "own-tls"),
+    "rbac-managed-secrets": ("http", "client-tls"),
+}
+for name, (scheme, secret) in TLS_ENDPOINT.items():
+    env = {e["name"]: e.get("value") for e in driver_container(docs(work / f"{name}.yaml")).get("env", [])}
+    endpoint = env.get("OPENSHELL_GRPC_ENDPOINT") or ""
+    want = f"{scheme}://t-openshell-driver-kyma."
+    if not endpoint.startswith(want) or env.get("OPENSHELL_CLIENT_TLS_SECRET_NAME") != secret:
+        failures.append(f"{name}: OPENSHELL_GRPC_ENDPOINT={endpoint!r} and OPENSHELL_CLIENT_TLS_SECRET_NAME="
+                        f"{env.get('OPENSHELL_CLIENT_TLS_SECRET_NAME')!r}, want {want}... and {secret!r}")
 
 # 7. providers use upstream's profile model, the pinned CLI, and reach sandboxes
 templates = "\n".join(p.read_text() for p in sorted((chart / "templates").iterdir()) if p.is_file())

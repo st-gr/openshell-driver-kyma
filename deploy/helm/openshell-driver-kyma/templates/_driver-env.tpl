@@ -83,7 +83,7 @@ scripts/check-chart-render.sh fails CI when an upstream option is missing here.
 - name: OPENSHELL_SANDBOX_SSH_SOCKET_PATH
   value: {{ . | quote }}
 {{- end }}
-{{- with $d.clientTlsSecretName }}
+{{- with include "openshell-driver-kyma.driverClientTlsSecretName" . }}
 - name: OPENSHELL_CLIENT_TLS_SECRET_NAME
   value: {{ . | quote }}
 {{- end }}
