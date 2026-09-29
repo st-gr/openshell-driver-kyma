@@ -15,8 +15,14 @@
 #      3b driver.sandboxEnv entries, 3c the managed-mode gateway id, 3d the
 #      operator-mode namespace selectors, 3e managed SSH ingress, 3f the sandbox
 #      UID/GID, 3g driver.allowDriverConfig;
+#   4. no NetworkPolicy the chart renders selects OpenShell sandbox pods:
+#      upstream fences them per namespace, and NetworkPolicies are additive, so a
+#      chart policy could only widen that fence;
+#   5. RBAC bound to the driver's ServiceAccount covers upstream's rules for each
+#      workspace mode plus the Kyma layer's (APIRule exposure, namespace labelling),
+#      and the workspace-secret-source Role grants `get` on exactly the Secrets the
+#      driver stages, in the modes upstream stages them;
 #   6. values.yaml's upstream.version equals the tag Cargo.toml pins.
-# Checks 4 and 5 (NetworkPolicies, RBAC) are added with the RBAC work.
 # Needs helm, python3 with PyYAML, and network access (for check 1).
 set -euo pipefail
 
@@ -119,6 +125,30 @@ try good-3f-unset '' t
 # 3g. driver.allowDriverConfig is a real boolean: a string would render the JSON
 # policy as "false", which the driver rejects.
 try bad-3g-string 'driver.allowDriverConfig' t --set-string driver.allowDriverConfig=false
+
+# 5. RBAC renders. Named rbac-*, so check 2's render-*.yaml glob skips them.
+# Exposure on, in shared mode and in managed mode (which also labels namespaces).
+render_as t --set driver.enableApirule=true --set driver.clusterDomain=example.org \
+	>"$WORK/rbac-apirule.yaml"
+render_as t --set driver.workspaceMode=managed --set gateway.sandboxJwt.gatewayId=gw \
+	--set driver.enableApirule=true --set driver.clusterDomain=example.org \
+	--set driver.workspacePsaLevel=baseline >"$WORK/rbac-managed-apirule.yaml"
+# Managed SSH ingress, which makes the driver write a NetworkPolicy in every workspace.
+render_as t --set driver.workspaceMode=managed --set gateway.sandboxJwt.gatewayId=gw \
+	--set driver.managedSshIngress.enabled=true --set driver.managedSshIngress.gatewayNamespace=gw-ns \
+	--set 'driver.managedSshIngress.gatewayPodSelector[0]=app=gateway' >"$WORK/rbac-managed-ssh.yaml"
+# The Secrets the driver stages into workspace namespaces: a client TLS Secret and
+# image-pull Secrets. The pull list repeats a name, repeats the TLS name and holds
+# an empty entry, so each render also proves the deduplication and the skip.
+secret_values=(--set driver.clientTlsSecretName=client-tls
+	--set-json 'driver.sandboxImagePullSecrets=["pull-a","pull-b","client-tls","pull-a",""]')
+render_as t "${secret_values[@]}" >"$WORK/rbac-shared-secrets.yaml"
+render_as t --set driver.workspaceMode=managed --set gateway.sandboxJwt.gatewayId=gw \
+	"${secret_values[@]}" >"$WORK/rbac-managed-secrets.yaml"
+render_as t --set driver.workspaceMode=operator --set driver.operatorNamespaceLabel=team=a \
+	"${secret_values[@]}" >"$WORK/rbac-operator-secrets.yaml"
+render_as t --set driver.workspaceMode=managed --set gateway.sandboxJwt.gatewayId=gw \
+	>"$WORK/rbac-managed-no-secrets.yaml"
 
 python3 - "$WORK" "$CHART" "$KYMA_ARGS" <<'PY'
 import glob, json, pathlib, re, sys
@@ -244,6 +274,131 @@ if env is not None and (env.get("OPENSHELL_K8S_SANDBOX_UID"), env.get("OPENSHELL
 env = rendered("good-3f-unset")
 if env is not None and ("OPENSHELL_K8S_SANDBOX_UID" in env or "OPENSHELL_K8S_SANDBOX_GID" in env):
     failures.append("an unset sandbox UID/GID was still passed to the driver")
+
+# 4. no chart NetworkPolicy selects OpenShell sandbox pods. The all-options render
+# switches on every optional NetworkPolicy the chart has.
+for render in sorted(work.glob("r*.yaml")) + [work / "good-all-options.yaml"]:
+    for d in docs(render):
+        if d.get("kind") != "NetworkPolicy":
+            continue
+        selector = (d.get("spec") or {}).get("podSelector") or {}
+        keys = list((selector.get("matchLabels") or {}).keys())
+        keys += [e.get("key", "") for e in selector.get("matchExpressions") or []]
+        if any(k.startswith("openshell.ai/") for k in keys):
+            failures.append(f"{render.name}: NetworkPolicy {d['metadata']['name']} selects sandbox "
+                            "pods and would add to upstream's workload fence")
+
+# 5. RBAC covers upstream's rules plus the Kyma layer's. Only rules that reach the
+# driver count: those of a Role or ClusterRole that a binding names for the
+# ServiceAccount the driver pod runs as (hook Roles are bound to their own).
+sandbox_namespace = (yaml.safe_load(values) or {}).get("namespace")
+
+def bound_rules(documents, kind):
+    """The rules of every Role (in the sandbox namespace) or ClusterRole that a binding
+    names for the driver pod's ServiceAccount."""
+    pod = next(d for d in documents if d.get("kind") == "Deployment"
+               and any(c["name"] == "driver" for c in d["spec"]["template"]["spec"]["containers"]))
+    account = (pod["metadata"].get("namespace"), pod["spec"]["template"]["spec"]["serviceAccountName"])
+    scope = sandbox_namespace if kind == "Role" else None
+    bound = {d["roleRef"]["name"] for d in documents
+             if d.get("kind") == kind + "Binding" and d["roleRef"]["kind"] == kind
+             and d["metadata"].get("namespace") == scope
+             and any(s.get("kind") == "ServiceAccount" and (s.get("namespace"), s.get("name")) == account
+                     for s in d.get("subjects") or [])}
+    return [r for d in documents if d.get("kind") == kind and d["metadata"].get("namespace") == scope
+            and d["metadata"]["name"] in bound for r in d.get("rules") or []]
+
+def covers(rules, group, resource, verb):
+    return any(group in r.get("apiGroups", []) and resource in r.get("resources", [])
+               and (verb in r.get("verbs", []) or "*" in r.get("verbs", [])) for r in rules)
+
+def need(rules, where, group, resources, verbs):
+    for resource in resources:
+        for verb in verbs:
+            if not covers(rules, group, resource, verb):
+                failures.append(f"{where}: missing {verb} on {group or 'core'}/{resource}")
+
+WORKLOAD = [("agents.x-k8s.io", ["sandboxes", "sandboxes/status"],
+             ["create", "delete", "get", "list", "patch", "update", "watch"]),
+            ("", ["events"], ["get", "list", "watch"]),
+            ("", ["pods"], ["create", "delete", "get", "list", "patch", "watch"]),
+            ("", ["services"], ["create", "get"]),
+            ("networking.k8s.io", ["networkpolicies"], ["create", "get"])]
+CLUSTER = [("node.k8s.io", ["runtimeclasses"], ["get"]),
+           ("scheduling.k8s.io", ["priorityclasses"], ["get"]),
+           ("authentication.k8s.io", ["tokenreviews"], ["create"]),
+           ("", ["nodes"], ["get", "list", "watch"]),
+           ("", ["namespaces"], ["get"])]
+KYMA = [("", ["services"], ["patch"]), ("networking.k8s.io", ["networkpolicies"], ["patch"]),
+        ("gateway.kyma-project.io", ["apirules"], ["create", "get", "patch"]),
+        ("", ["events"], ["create"])]
+
+shared = docs(work / "render-shared-true.yaml")
+for group, resources, verbs in WORKLOAD + [("", ["secrets"], ["create", "delete"]),
+                                           ("", ["persistentvolumeclaims"], ["get"])]:
+    need(bound_rules(shared, "Role"), "shared Role", group, resources, verbs)
+for group, resources, verbs in CLUSTER:
+    need(bound_rules(shared, "ClusterRole"), "shared ClusterRole", group, resources, verbs)
+for group, resources, verbs in KYMA:
+    need(bound_rules(docs(work / "rbac-apirule.yaml"), "Role"), "shared Role with APIRule",
+         group, resources, verbs)
+
+managed = docs(work / "rbac-managed-apirule.yaml")
+for group, resources, verbs in WORKLOAD + CLUSTER + KYMA + [
+        ("", ["namespaces"], ["list", "watch", "create", "delete", "patch"]),
+        ("", ["secrets"], ["create", "delete"]),
+        ("", ["serviceaccounts"], ["create", "get"])]:
+    need(bound_rules(managed, "ClusterRole"), "managed ClusterRole", group, resources, verbs)
+# Managed SSH ingress: the driver server-side applies a NetworkPolicy in each
+# workspace it creates (patch, update; create and get come with the workload rights).
+need(bound_rules(docs(work / "rbac-managed-ssh.yaml"), "ClusterRole"), "managed ClusterRole with SSH ingress",
+     "networking.k8s.io", ["networkpolicies"], ["get", "create", "patch", "update"])
+
+# What the driver's rights must not include unless asked for: the Kyma layer's
+# exposure rights without APIRule exposure, namespace patching without a PSA level,
+# NetworkPolicy writes without managed SSH ingress, any namespaced Role outside
+# shared mode, and cluster-wide workspace rights in shared mode (a shared install
+# gains only upstream's node-reader ClusterRole).
+def forbid(rules, where, grants):
+    for group, resource, verb in grants:
+        if covers(rules, group, resource, verb):
+            failures.append(f"{where} grants {verb} on {group or 'core'}/{resource}")
+
+EXPOSURE = [("gateway.kyma-project.io", "apirules", "create"), ("", "services", "patch"),
+            ("", "events", "create"), ("networking.k8s.io", "networkpolicies", "patch")]
+managed_plain = docs(work / "render-managed-true.yaml")
+forbid(bound_rules(shared, "Role"), "shared Role without APIRule exposure", EXPOSURE)
+NP_WRITE = [("networking.k8s.io", "networkpolicies", "update")]
+forbid(bound_rules(managed_plain, "ClusterRole"),
+       "managed ClusterRole without APIRule exposure, a PSA level or SSH ingress",
+       EXPOSURE + NP_WRITE + [("", "namespaces", "patch")])
+forbid(bound_rules(managed, "ClusterRole"), "managed ClusterRole without SSH ingress", NP_WRITE)
+forbid(bound_rules(shared, "ClusterRole"), "shared ClusterRole",
+       [("agents.x-k8s.io", "sandboxes", "get"), ("", "pods", "get"), ("", "secrets", "create"),
+        ("", "namespaces", "list"), ("", "services", "get"), ("networking.k8s.io", "networkpolicies", "get")])
+if bound_rules(managed_plain, "Role"):
+    failures.append("managed mode with no staged Secrets still binds a namespaced Role to the driver")
+
+# The workspace-secret-source Role: `get` on exactly the Secrets the driver stages
+# into workspace namespaces, in the modes where it stages them (upstream's
+# openshell.workspaceSecretSourceNames). The TLS Secret is staged in managed and
+# operator mode, image-pull Secrets in managed mode only; shared stages nothing. A
+# `get` on secrets with no resourceNames would be every Secret, so it shows up as
+# a name no render sets.
+def secret_source_names(name):
+    names = []
+    for r in bound_rules(docs(work / f"{name}.yaml"), "Role"):
+        if covers([r], "", "secrets", "get"):
+            names += r.get("resourceNames") or ["<every secret>"]
+    return names
+
+for name, want in (("rbac-shared-secrets", []),
+                   ("rbac-managed-no-secrets", []),
+                   ("rbac-managed-secrets", ["client-tls", "pull-a", "pull-b"]),
+                   ("rbac-operator-secrets", ["client-tls"])):
+    got = secret_source_names(name)
+    if got != want:
+        failures.append(f"{name}: the driver may get Secrets {got}, want {want}")
 
 # 6. the chart's upstream version is the pinned tag
 pinned = (work / "pinned-tag.txt").read_text().strip()

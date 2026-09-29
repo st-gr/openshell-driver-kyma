@@ -1,0 +1,108 @@
+{{- $mode := .Values.driver.workspaceMode }}
+# Cluster-scoped rights for the driver: upstream's ClusterRole for the same
+# driver (deploy/helm/openshell/templates/clusterrole.yaml at the pinned tag),
+# plus the Kyma layer's needs in the multi-namespace modes. Shared mode keeps
+# only upstream's node-reader part; role.yaml holds the namespaced rest.
+# scripts/check-chart-render.sh asserts both.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "openshell-driver-kyma.fullname" . }}-driver-{{ .Release.Namespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["node.k8s.io"]
+    resources: ["runtimeclasses"]
+    verbs: ["get"]
+  - apiGroups: ["scheduling.k8s.io"]
+    resources: ["priorityclasses"]
+    verbs: ["get"]
+  {{- if and (ne $mode "shared") .Values.driver.allowDriverConfig }}
+  # Metadata-only admission of caller-selected PVCs requires get permission.
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get"]
+  {{- end }}
+  # The driver authenticates sandbox bootstrap credentials itself.
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  # get reads namespace annotations for OpenShift SCC UID/GID range resolution.
+  # The multi-namespace modes also list and watch namespaces to discover
+  # workspaces, and managed mode creates and deletes them (patch labels them with
+  # driver.workspacePsaLevel, the Kyma layer's one addition).
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs:
+      - get
+      {{- if ne $mode "shared" }}
+      - list
+      - watch
+      {{- end }}
+      {{- if eq $mode "managed" }}
+      - create
+      - delete
+      {{- if .Values.driver.workspacePsaLevel }}
+      - patch
+      {{- end }}
+      {{- end }}
+  {{- if ne $mode "shared" }}
+  # Cluster-wide workload rights, for sandboxes in namespaces other than
+  # .Values.namespace.
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["sandboxes", "sandboxes/status"]
+    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "delete", "get", "list", "patch", "watch"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["create", "get"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["create", "get"]
+  {{- end }}
+  {{- if eq $mode "managed" }}
+  # Bootstrap and image-pull Secrets are generation-scoped; recovery deletes them
+  # by exact name. Operator-mode namespaces get their Secret rights from a Role
+  # the namespace's owner binds to the driver, not from here (upstream's
+  # openshell-workspace chart provides one).
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "delete"]
+  # ServiceAccount creation in managed namespaces.
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["create", "get"]
+  {{- if .Values.driver.managedSshIngress.enabled }}
+  # Apply the gateway-only SSH ingress policy in each managed namespace.
+  # Upstream gates this on its networkPolicy.enabled, the value that sets
+  # managed_ssh_ingress.enabled in its gateway config; here that option is
+  # driver.managedSshIngress.enabled, so the rule follows it.
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "create", "patch", "update"]
+  {{- end }}
+  {{- end }}
+  {{- if and (ne $mode "shared") .Values.driver.enableApirule }}
+  # Kyma layer: APIRule exposure in whichever namespace a sandbox lives, as in
+  # role.yaml.
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["patch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["patch"]
+  - apiGroups: ["gateway.kyma-project.io"]
+    resources: ["apirules"]
+    verbs: ["create", "get", "patch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create"]
+  {{- end }}

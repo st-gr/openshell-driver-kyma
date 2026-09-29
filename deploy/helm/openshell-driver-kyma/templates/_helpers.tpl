@@ -144,3 +144,29 @@ this release's Service. Empty lets upstream decide.
 {{- printf "http://%s.%s.svc.cluster.local:%v" (include "openshell-driver-kyma.fullname" .) .Release.Namespace .Values.gateway.grpcPort -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+Secrets in the sandbox namespace whose contents the driver stages into
+workspace namespaces, as a JSON array; empty in shared mode. Mirrors upstream's
+openshell.workspaceSecretSourceNames (deploy/helm/openshell/templates/_helpers.tpl
+at the pinned tag). The client TLS Secret is staged in managed and operator
+mode, when driver.clientTlsSecretName names one (upstream's chart always has a
+name and skips it when TLS is off; here an empty name is that case). The
+image-pull Secrets are staged in managed mode only. driver.sandboxImagePullSecrets
+is a list of Secret names, as the driver's environment takes it.
+*/}}
+{{- define "openshell-driver-kyma.workspaceSecretSourceNames" -}}
+{{- $mode := .Values.driver.workspaceMode -}}
+{{- $names := list -}}
+{{- if and (ne $mode "shared") .Values.driver.clientTlsSecretName -}}
+{{- $names = append $names .Values.driver.clientTlsSecretName -}}
+{{- end -}}
+{{- if eq $mode "managed" -}}
+{{- range .Values.driver.sandboxImagePullSecrets -}}
+{{- if . -}}
+{{- $names = append $names . -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- uniq $names | toJson -}}
+{{- end }}
