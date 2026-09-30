@@ -41,7 +41,12 @@ sandboxServiceAccount:
 # templates/_driver-env.tpl. Upstream openshell-driver-kubernetes's options use
 # upstream's own OPENSHELL_* names; the Kyma layer's use OPENSHELL_KYMA_*.
 driver:
-  socket: /var/run/openshell-driver.sock
+  # Unix socket the driver serves and the gateway sidecar dials. It must sit
+  # at least two directories deep: upstream's driver refuses to start unless
+  # the socket's PARENT directory is owned by its own uid (65532), so the
+  # chart mounts the shared emptyDir at the grandparent and the driver creates
+  # the parent itself. `/var/run/openshell-driver.sock` (0.8.0) no longer works.
+  socket: /var/run/openshell/driver.sock
   # Supervisor OCI image, PINNED BY DIGEST. Upstream runs it in each sandbox's
   # supervisor pod (non-root, all capabilities dropped), where it holds the
   # provider credentials and the sandbox's egress, so a rolling `:latest` would
@@ -319,10 +324,11 @@ podLabels: {}
 
 # Gateway sidecar configuration. When enabled, the chart deploys the
 # upstream NVIDIA OpenShell gateway (openshell-server) container
-# alongside the driver in the same pod. They share the socket-dir
-# emptyDir; the driver writes the UDS at .Values.driver.socket, the gateway
-# reads it via --compute-driver-socket. No separate socketPath value — the
-# driver.socket is the single source of truth.
+# alongside the driver in the same pod. They share the socket-dir emptyDir
+# (mounted at the socket's grandparent, see driver.socket); the driver writes
+# the UDS at .Values.driver.socket, the gateway reads it via
+# --compute-driver-socket. No separate socketPath value — driver.socket is the
+# single source of truth.
 gateway:
   enabled: false
   image:

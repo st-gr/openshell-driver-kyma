@@ -171,6 +171,7 @@ upgrade. To upgrade from 0.8.0 with only this section in front of you:
 | `driver.driverConfigAllowVolumes` | `driver.allowDriverConfig` — caller volumes are now checked by upstream's resource admission |
 | `driver.gatewayId` | `gateway.sandboxJwt.gatewayId` — the gateway and driver now always share one id, as upstream's chart does |
 | `gatewayUpstreamEgress.*` | removed — upstream's supervisor pods carry their own egress policy (allow-all); workloads have none |
+| `driver.socket` default `/var/run/openshell-driver.sock` | `/var/run/openshell/driver.sock` — upstream's driver refuses to start unless its own uid owns the socket's parent directory, so the socket now sits one level below the shared emptyDir; an override must keep at least three directories (the chart refuses less) |
 | `inferenceProvider` via `openshell inference set` | provider profiles; create sandboxes with `--provider <name>`. The default provider name is `<release>-<type>` (was `<fullname>-<type>`) |
 
 ### Added

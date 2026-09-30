@@ -158,6 +158,14 @@ try bad-3f-not-a-number 'driver.sandboxUid' t --set-string driver.sandboxUid=abc
 try good-3f-bounds '' t --set driver.sandboxUid=1 --set driver.sandboxGid=4294967294
 try good-3f-unset '' t
 
+# 3i. driver.socket must be two directories deep: upstream's bind_private requires
+# the driver's uid to own the socket's parent, which the driver creates inside
+# the emptyDir mounted at the grandparent.
+try bad-3i-socket-one-level 'driver.socket' t --set driver.socket=/var/run/openshell-driver.sock
+try bad-3i-socket-relative 'driver.socket' t --set driver.socket=run/openshell/driver.sock
+try bad-3i-socket-top-level 'driver.socket' t --set driver.socket=/run/openshell/driver.sock
+try good-3i-socket-deep '' t --set driver.socket=/run/openshell/sockets/driver.sock
+
 # 3g. driver.allowDriverConfig is a real boolean: a string would render the JSON
 # policy as "false", which the driver rejects.
 try bad-3g-string 'driver.allowDriverConfig' t --set-string driver.allowDriverConfig=false
@@ -456,7 +464,29 @@ still = [k for k in removed if k in driver_values]
 if still:
     failures.append("removed values still in values.yaml: " + ", ".join(still))
 
-# 3b-3h and 7b. values upstream or the driver would refuse fail the render, naming the value
+# 3i. the socket's grandparent is the shared emptyDir in BOTH containers: upstream's
+# bind_private makes the driver create and own the parent (chmod 0700), and the
+# gateway (same uid) dials the socket through it.
+for d in docs(work / "render-shared-true.yaml"):
+    if d.get("kind") != "Deployment":
+        continue
+    pod = d["spec"]["template"]["spec"]
+    env = {e["name"]: e.get("value") for e in driver_container([d]).get("env", [])}
+    sock = env.get("OPENSHELL_COMPUTE_DRIVER_SOCKET") or ""
+    grand = str(pathlib.PurePosixPath(sock).parent.parent)
+    if sock.count("/") < 4:
+        failures.append(f"OPENSHELL_COMPUTE_DRIVER_SOCKET={sock!r} is not three directories deep")
+    for c in pod["containers"]:
+        if c["name"] not in ("driver", "gateway"):
+            continue
+        mounts = {m["name"]: m["mountPath"] for m in c.get("volumeMounts", [])}
+        if mounts.get("socket-dir") != grand:
+            failures.append(f"{c['name']} mounts socket-dir at {mounts.get('socket-dir')!r}, "
+                            f"expected the socket's grandparent {grand!r}")
+    if not any(v.get("name") == "socket-dir" and "emptyDir" in v for v in pod.get("volumes", [])):
+        failures.append("socket-dir is not an emptyDir")
+
+# 3b-3i and 7b. values upstream or the driver would refuse fail the render, naming the value
 bad_cases = sorted(pathlib.Path(p).stem for p in glob.glob(str(work / "bad-*.rc")))
 if not bad_cases:
     failures.append("no refused-value cases were rendered")

@@ -285,6 +285,11 @@ while admission is enabled, as upstream refuses it at startup
 (ResourceAdmissionConfig::validate, src/resource_admission.rs:135-140).
 */}}
 {{- define "openshell-driver-kyma.driverValueGuards" -}}
+{{- $sock := toString .Values.driver.socket -}}
+{{- $parts := splitList "/" (trimPrefix "/" $sock) -}}
+{{- if or (not (hasPrefix "/" $sock)) (hasSuffix "/" $sock) (lt (len $parts) 4) (has "" $parts) -}}
+{{- fail (printf "driver.socket %q must be an absolute path with at least three directories (e.g. /var/run/openshell/driver.sock; 0.8.0's /var/run/openshell-driver.sock no longer works): upstream's driver refuses to start unless its own uid owns the socket's parent directory, so the chart mounts the shared emptyDir at the grandparent (which must not be a top-level directory) and the driver creates the parent." $sock) -}}
+{{- end -}}
 {{- $allow := .Values.driver.allowDriverConfig -}}
 {{- if not (kindIs "bool" $allow) -}}
 {{- fail (printf "driver.allowDriverConfig must be a boolean (true or false), got %s %v. It renders into the gateway's TOML and the driver's admission JSON, and a string breaks the JSON." (kindOf $allow) $allow) -}}

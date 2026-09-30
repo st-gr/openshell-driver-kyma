@@ -10,7 +10,7 @@ gateway:
   sandboxJwt:
     gatewayId: all-options
 driver:
-  socket: /var/run/openshell-driver.sock
+  socket: /var/run/openshell/driver.sock
   workspaceMode: managed
   allowDriverConfig: true
   logLevel: debug
