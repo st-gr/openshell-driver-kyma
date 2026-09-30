@@ -14,12 +14,12 @@
 #
 # Advisory only. It must NEVER fail CI -- exit status is always 0, even
 # when the network is unreachable or the pin looks stale. A stale pin is
-# a nag for a human, not a build failure; check-proto-drift.sh is the
+# a nag for a human, not a build failure; check-upstream-pin.sh is the
 # actual gate, this is only its sibling in output shape.
 #
 # Emits `KEY: value` lines a workflow step can pick out with e.g.
 # `sed -n 's/^PIN_REASON_EVAPORATED: //p'`, the same convention
-# check-proto-drift.sh uses for its VENDOR_TARGET_TAG line. Keys used:
+# check-upstream-pin.sh uses for its VENDOR_TARGET_TAG line. Keys used:
 #
 #   PIN_STATUS               unpinned | pinned | unknown
 #   PINNED_REF                the pinned tag, when pinned

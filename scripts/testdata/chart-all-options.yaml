@@ -1,0 +1,66 @@
+# Every driver option set to a non-empty or true value. scripts/check-chart-render.sh
+# renders the chart with this file and requires the driver container to carry every
+# upstream OPENSHELL_* and every OPENSHELL_KYMA_* environment variable, which proves
+# each option is reachable from values. The values are placeholders, never deployed.
+#
+# workspaceMode is managed so that managedSshIngress is valid. The operator namespace
+# label and ConfigMap are both set on purpose: upstream refuses that pair only in
+# operator mode, and this is the one render that has to emit both variables.
+gateway:
+  sandboxJwt:
+    gatewayId: all-options
+driver:
+  socket: /var/run/openshell/driver.sock
+  workspaceMode: managed
+  allowDriverConfig: true
+  logLevel: debug
+  supervisorImage: registry.example/supervisor@sha256:0000000000000000000000000000000000000000000000000000000000000000
+  sandboxRuntimeImage: registry.example/sandbox@sha256:1111111111111111111111111111111111111111111111111111111111111111
+  sandboxRuntimeImagePullPolicy: IfNotPresent
+  supervisorImagePullPolicy: IfNotPresent
+  sandboxImage: registry.example/agent:1
+  sandboxImagePullPolicy: Always
+  sandboxImagePullSecrets: [pull-a, pull-b]
+  sandboxRuntimeBoundaryPort: 5501
+  saTokenTtlSecs: 7200
+  runtimeClassName: example-runtime
+  sandboxSshSocketPath: /run/example-ssh.sock
+  bindAddress: 127.0.0.1:50062
+  otlpEndpoint: http://collector.example:4317
+  gatewayName: all-options
+  clientTlsSecretName: example-client-tls
+  hostGatewayIp: 192.0.2.1
+  gatewayEndpoint: http://gateway.example:8080
+  providerSpiffeWorkloadApiSocket: /run/example-spiffe.sock
+  operatorNamespaceLabel: example.org/team=a
+  operatorNamespaceConfigMap:
+    name: example-namespaces
+    key: namespaces
+  managedSshIngress:
+    enabled: true
+    gatewayNamespace: example-gateway
+    gatewayPodSelector: [app=gateway]
+  upstreamProxy:
+    url: https://proxy.example:3128
+    noProxy: example.org
+    authSecretName: example-proxy-auth
+    authSecretKey: token
+    allowInsecure: true
+    connectByHostname: true
+    caBundleConfigMap:
+      name: example-proxy-ca
+      key: ca.crt
+  enableUserNamespaces: true
+  # Ten digits, so a values-file float64 prints as digits, not 1.00074e+09.
+  sandboxUid: 1000740000
+  sandboxGid: 1000740001
+  sandboxStorageSize: 5Gi
+  sandboxStorageClass: example-class
+  istioInjectSandboxes: true
+  disableClaudeTelemetry: true
+  enableApirule: true
+  clusterDomain: example.org
+  ingressNamespace: example-ingress
+  workspacePsaLevel: baseline
+  healthPort: 9191
+  sandboxEnv: [EXAMPLE=1]

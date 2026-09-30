@@ -63,16 +63,23 @@ data:
     # Schema-v2 access path for an external compute driver reached over
     # --compute-driver-socket. The gateway also derives its resource-admission
     # policy from this table and requires the driver to acknowledge the same
-    # policy, so these values are the single source of truth for both
-    # sides; the driver reads them from its own flags of the same name.
+    # policy, so both sides render from one value; the driver receives its
+    # side as OPENSHELL_DRIVER_ADMISSION_CONFIG_JSON.
     socket_path         = {{ .Values.driver.socket | quote }}
-    # Defaults to false upstream, which would reject every caller
-    # driver_config this driver supports (node selector, runtime class,
-    # resource overrides). Rendered from driver.allowDriverConfig, which the
-    # driver container also receives as --allow-driver-config, so the two
-    # sides cannot disagree.
-    allow_driver_config = {{ .Values.driver.allowDriverConfig }}
-    # resource_admission is deliberately omitted: the driver's
-    # --resource-admission-enabled flag is left unset too, so both sides fall
-    # back to upstream's secure defaults and still agree.
+    # The admission policy below and the driver's admission JSON render from
+    # one helper (openshell-driver-kyma.admissionPolicy), so the two sides
+    # cannot disagree. allow_driver_config comes from driver.allowDriverConfig,
+    # false by default as in upstream's chart; resource_admission from
+    # driver.resourceAdmission, as upstream renders it for its own driver.
+    {{- $policy := include "openshell-driver-kyma.admissionPolicy" . | fromJson }}
+    allow_driver_config = {{ $policy.allow_driver_config }}
+
+    [openshell.drivers.kyma.resource_admission]
+    enabled = {{ $policy.resource_admission.enabled }}
+    {{- if hasKey $policy.resource_admission "required_labels" }}
+    [openshell.drivers.kyma.resource_admission.required_labels]
+    {{- range $key, $value := $policy.resource_admission.required_labels }}
+    {{ $key | quote }} = {{ $value | quote }}
+    {{- end }}
+    {{- end }}
 {{- end }}

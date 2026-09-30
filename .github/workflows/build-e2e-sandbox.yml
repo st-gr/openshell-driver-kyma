@@ -1,6 +1,6 @@
 name: build-e2e-sandbox
-# Builds and publishes the minimal sandbox-base image used by the
-# `make e2e-cli` end-to-end test. The image carries the `sandbox` user
+# Builds and publishes the minimal sandbox-base image that
+# e2e/sandbox-claude builds on. The image carries the `sandbox` user
 # + iproute2 + nftables that the OpenShell supervisor requires.
 #
 # Triggered on push to main when the e2e Dockerfile or this workflow

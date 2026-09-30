@@ -1,9 +1,9 @@
-{{- if .Values.driver.enableNetworkPolicy -}}
+{{- if .Values.networkPolicy.enabled -}}
 # NetworkPolicy for the driver+gateway pod.
 #
 # Default-deny ingress except:
-#   - the driver's /metrics + /healthz port (any pod can scrape; tighten
-#     to a specific Prometheus namespace via your own overlay if needed)
+#   - the driver's /healthz + /readyz port (the kubelet's probes; any pod
+#     can reach it, tighten via your own overlay if needed)
 #   - the gateway's gRPC + health + metrics ports when gateway.enabled
 #     (so port-forward, sidecar mesh, or APIRule reverse proxy can
 #     reach them)
@@ -19,8 +19,16 @@
 #     a namespaceSelector breaks all kube-rs/client-go calls. Operators
 #     who want a tighter rule can pin the apiserver Service IP via a
 #     custom overlay.
+#   - with driver.otlpEndpoint, the driver's trace export on that
+#     endpoint's port (openshell-driver-kyma.otlpPort) to anywhere, as for
+#     the apiserver: the chart does not know the collector's address.
 #
-# Sandbox pods are governed by a separate NetworkPolicy below.
+# Sandbox pods are fenced by upstream's own per-namespace NetworkPolicies
+# (openshell-sandbox-workloads, openshell-sandbox-supervisors). NetworkPolicies
+# are additive, so any chart policy that selects them could only widen that
+# fence. The one the chart adds, in networkpolicy-sandbox-ssh.yaml, mirrors
+# upstream's SSH ingress restriction and grants nothing beyond it.
+# scripts/check-chart-render.sh enforces both.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -56,133 +64,25 @@ spec:
     - ports:
         - port: 443
           protocol: TCP
----
-# NetworkPolicy for sandbox pods.
-#
-# The driver creates Sandbox CRs in `.Values.namespace`; the agent-sandbox
-# controller materializes them into pods carrying the labels we stamp via
-# build_sandbox_spec (provisioner.rs). This selector targets those pods.
-#
-# Sandboxes run user / agent code under privileged + UID 0 + dangerous
-# capabilities (the supervisor needs SYS_ADMIN/NET_ADMIN/SYS_PTRACE/SYSLOG
-# to install Landlock and manage network namespaces). With no
-# NetworkPolicy in place, a compromised sandbox could pivot to internal
-# services (cluster-internal HTTP, kubelet, other pods on the host
-# network). This policy is the cheapest defense against that pivot.
-#
-# Ingress: none. The supervisor's gateway control stream is supervisor-
-# originated (long-lived gRPC stream out to the gateway), so no inbound
-# connections are required.
-#
-# Egress allow-list:
-#   1. DNS (53/UDP+TCP) to anywhere.
-#   2. The driver+gateway pod's gateway-gRPC port. The supervisor needs
-#      this for IssueSandboxToken / supervisor_session / log push.
-#   3. Anywhere on 443/TCP, with RFC1918 explicitly excluded so a
-#      compromised sandbox cannot use this rule to reach internal
-#      services. This is what enables the "agentic workflow" use case
-#      (sandbox curls anthropic.com, github.com, npm, pypi, etc.).
-#   4. (Opt-in via gatewayUpstreamEgress) the operator's in-cluster LLM
-#      upstream. The supervisor's in-process inference router (NVIDIA's
-#      design — see https://docs.nvidia.com/openshell/about/how-it-works
-#      and issue #998 "No subprocess, no loopback hop") terminates
-#      `inference.local` TLS using the sandbox CA at /etc/openshell-tls/,
-#      strips caller-supplied creds, injects the real upstream URL + key
-#      from GetInferenceBundle, and dials the upstream from this pod's
-#      eth0. So the egress hole has to live HERE on the sandbox NP, not
-#      on the driver+gateway pod NP — the gateway sidecar is bundle/config
-#      plane only and never forwards inference request bytes.
-#      Prerequisite (Kyma/Gardener): operators must label their LLM
-#      upstream namespace with kubernetes.io/metadata.name=<value> at
-#      install time, as Kyma/Gardener does not auto-apply this label.
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: {{ include "openshell-driver-kyma.fullname" . }}-sandbox
-  namespace: {{ .Values.namespace }}
-  labels:
-    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
-spec:
-  podSelector:
-    matchLabels:
-      openshell.ai/managed-by: openshell
-  policyTypes:
-    - Ingress
-    - Egress
-  ingress: []
-  egress:
+    {{- with include "openshell-driver-kyma.otlpPort" . }}
+    # OTLP trace export to driver.otlpEndpoint: its port only, any destination.
     - ports:
-        - port: 53
-          protocol: UDP
-        - port: 53
-          protocol: TCP
-    {{- if .Values.gateway.enabled }}
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: {{ .Release.Namespace }}
-          podSelector:
-            matchLabels:
-              {{- include "openshell-driver-kyma.selectorLabels" . | nindent 14 }}
-      ports:
-        - port: {{ .Values.gateway.grpcPort }}
-          protocol: TCP
-    {{- else if .Values.driver.gatewayEndpoint }}
-    # No in-pod gateway sidecar; the supervisor calls out to whatever
-    # `driver.gatewayEndpoint` points at. We can't statically express
-    # that endpoint as a NetworkPolicy peer, so leave the operator to
-    # add a tightening rule. Public TCP/443 below already covers the
-    # case where the endpoint is HTTPS.
-    {{- end }}
-    - to:
-        - ipBlock:
-            cidr: 0.0.0.0/0
-            except:
-              - 10.0.0.0/8
-              - 172.16.0.0/12
-              - 192.168.0.0/16
-              - 169.254.0.0/16
-      ports:
-        - port: 443
-          protocol: TCP
-    {{- if .Values.gatewayUpstreamEgress.enabled }}
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: {{ .Values.gatewayUpstreamEgress.namespace }}
-          {{- with .Values.gatewayUpstreamEgress.podSelector }}
-          podSelector:
-            matchLabels:
-              {{- toYaml . | nindent 14 }}
-          {{- end }}
-      ports:
-        - port: {{ .Values.gatewayUpstreamEgress.port }}
-          protocol: TCP
-    {{- end }}
-    {{- if .Values.bedrockBridge.enabled }}
-    # Sandbox-pod -> in-cluster bedrock-bridge. The supervisor's L7
-    # router (in the sandbox pod) dials the bridge from sandbox-pod's
-    # eth0 — same flow as gatewayUpstreamEgress, but pointing at our
-    # in-cluster bridge Service rather than an external upstream.
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: {{ .Release.Namespace }}
-          podSelector:
-            matchLabels:
-              app.kubernetes.io/name: {{ include "openshell-driver-kyma.name" . }}-bedrock-bridge
-              app.kubernetes.io/instance: {{ .Release.Name }}
-      ports:
-        - port: 8787
+        - port: {{ . }}
           protocol: TCP
     {{- end }}
 {{- end }}
-{{- if and .Values.driver.enableNetworkPolicy .Values.bedrockBridge.enabled }}
+{{- if and .Values.networkPolicy.enabled .Values.bedrockBridge.enabled }}
 ---
-# NetworkPolicy for the bedrock-bridge pod.
+# NetworkPolicy for the bedrock-bridge pod (rendered only with
+# networkPolicy.enabled).
 #
-# Ingress: only from sandbox pods on 8787. The bridge is the SAP-
-# AI-Core translator and has no other in-cluster callers.
+# Ingress: only from OpenShell pods (`openshell.ai/managed-by=openshell`) in
+# this namespace, on 8787. The bridge is the SAP-AI-Core translator and has no
+# other in-cluster callers. Upstream labels its supervisor pods with that, and
+# they are the ones that dial upstream connections (the selector also matches
+# the workload pods, but upstream's fence gives those no egress). Sandboxes of
+# managed-mode workspaces live in other namespaces, so they cannot reach the
+# bridge.
 #
 # Egress:
 #   1. DNS (53/UDP+TCP) — required for SAP hostname resolution.

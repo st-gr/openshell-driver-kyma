@@ -1,21 +1,19 @@
-//! openshell-driver-kyma — Rust port of the OpenShell ComputeDriver gRPC
-//! service for SAP BTP Kyma clusters.
-//!
-//! Module layout mirrors the reference Go OpenShift driver. Each module is
-//! documented inline; see `docs/superpowers/specs/` and `docs/superpowers/plans/`
-//! for the design rationale and implementation order.
+// SPDX-License-Identifier: Apache-2.0
 
-pub mod config;
-pub mod driver;
-pub mod driver_config;
-pub mod enricher;
-pub mod error;
-pub mod helpers;
-pub mod interfaces;
-pub mod lifecycle;
-pub mod main_process;
-pub mod metrics;
-pub mod provisioner;
-pub mod sandbox_auth;
-pub mod vendor;
-pub mod workspace;
+//! OpenShell compute driver for SAP BTP Kyma.
+//!
+//! Upstream NVIDIA OpenShell's Kubernetes driver does all the compute work;
+//! this crate mirrors its option surface and wraps its gRPC service with a
+//! small Kyma layer. See `docs/superpowers/specs/2026-09-29-upstream-driver-parity-design.md`.
+
+pub mod enrich;
+pub mod exposure;
+pub mod health;
+pub mod hooks;
+pub mod kyma_args;
+pub mod namespaces;
+pub mod service;
+#[cfg(test)]
+pub(crate) mod test_support;
+pub mod upstream_args;
+pub mod workspaces;

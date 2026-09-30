@@ -8,15 +8,12 @@ the bits your operator owns, `helm install -f`.
 For the **full hands-on flow** — Kyma bootstrap, install, sandbox
 create, file upload, Claude inference that creates a new file, file
 download, teardown — see
-[`walkthrough-claude-files.md`](walkthrough-claude-files.md). Every
-step is verified against a real cluster.
+[`walkthrough-claude-files.md`](walkthrough-claude-files.md).
 
 If you want the underlying mechanics (driver + gateway sidecar
 architecture, NetworkPolicy posture, etc.) read
 [`production-deployment.md`](production-deployment.md) after you finish
-here. If anything diverges from what you see, the source-of-truth is
-`scripts/e2e-cli.sh` — that script runs the same flow against a real
-cluster on every push.
+here.
 
 ## 1. Prerequisites
 
@@ -24,20 +21,22 @@ cluster on every push.
   Tier all work). `kubectl get ns` succeeds against it.
 - `helm` v3.12+, `kubectl` v1.27+.
 - The `openshell` CLI — see [`install-cli.md`](install-cli.md).
-- The `kubernetes-sigs/agent-sandbox` controller installed cluster-wide:
+- The `kubernetes-sigs/agent-sandbox` controller installed cluster-wide.
+  v0.5.2 is the release the chart's CI runs against:
 
   ```bash
-  kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.4.6/manifest.yaml
+  kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.5.2/sandbox.yaml
   kubectl -n agent-sandbox-system rollout status deployment/agent-sandbox-controller --timeout=120s
   ```
 
 ## 2. Bootstrap the sandbox namespace
 
-The OpenShell supervisor needs the `privileged`
+Label the sandbox namespace `privileged` under
 [Pod Security Admission](https://kubernetes.io/docs/concepts/security/pod-security-admission/)
-(PSA) level on its namespace because it sets up Landlock + seccomp + a
-network namespace for each agent. The chart's pre-install hook fails
-fast with an actionable error if the label is missing.
+(PSA). That is the level the chart's CI runs at. Upstream's sandbox pods
+themselves run unprivileged (non-root, all capabilities dropped), so a
+stricter level may admit them, but only `privileged` is verified here; the
+provider hook also runs as root, which `restricted` refuses.
 
 ```bash
 NS=openshell-system
@@ -50,17 +49,12 @@ kubectl label namespace "$NS" \
 ```
 
 If you'll route model traffic through an in-cluster LLM gateway (the
-recommended Claude setup), pre-create the API-key Secret and label the
-upstream namespace:
+recommended Claude setup), pre-create the API-key Secret:
 
 ```bash
 # Operator-managed Secret. The chart never sees the API key.
 kubectl -n "$NS" create secret generic my-anthropic-creds \
   --from-literal=api-key=sk-ant-…
-
-# Kyma/Gardener doesn't auto-apply this label; the gateway egress
-# NetworkPolicy needs it to match the upstream namespace.
-kubectl label namespace your-llm-ns kubernetes.io/metadata.name=your-llm-ns
 ```
 
 ## 3. Copy the example values file, edit, install
@@ -69,6 +63,13 @@ kubectl label namespace your-llm-ns kubernetes.io/metadata.name=your-llm-ns
 cp deploy/helm/openshell-driver-kyma/values.example.yaml my-values.yaml
 ${EDITOR:-vi} my-values.yaml      # plug in your upstream URL, secret name, OIDC issuer
 ```
+
+If you add an OIDC issuer (`gateway.oidc.issuer`) to the example file, also
+turn `inferenceProvider.enabled` off: the chart refuses to render the two
+together, because the provider hook calls the gateway without a token, which a
+gateway with OIDC refuses. Register the profile and provider yourself from an
+authenticated CLI session instead; the OIDC path, values overlay and step 3b
+are in [`production-deployment.md`](production-deployment.md).
 
 Then install:
 
@@ -94,14 +95,21 @@ What this lands in your cluster:
 - A two-container pod (driver + gateway) sharing a Unix socket via emptyDir.
 - A pre-install Job that mints the sandbox-JWT signing key (when
   `gateway.sandboxJwt.enabled`).
-- A post-install Job that calls `openshell provider create` + `openshell
-  inference set` against the in-pod gateway (when
-  `inferenceProvider.enabled`).
-- Two NetworkPolicies (driver+gateway-pod default-deny + sandbox-pod
-  egress to DNS, gateway VIP, and 0.0.0.0/0:443 with RFC1918 excluded).
-- A ClusterRole + Role pair for `tokenreviews:create` + `pods:get` so
-  the driver can validate the supervisor's projected SA token (the
-  driver performs the TokenReview in its `AuthenticateSandbox` RPC).
+- A post-install Job that registers a provider profile and creates the
+  provider from it on the in-pod gateway (`openshell provider profile
+  import` + `openshell provider create`; when `inferenceProvider.enabled`).
+- The driver+gateway pod's NetworkPolicy (default-deny ingress except the
+  probe and gateway ports, egress to DNS and 443) and, in shared mode with
+  the in-pod gateway, `<fullname>-sandbox-ssh`, which admits SSH to sandbox
+  pods only from the gateway pod. The sandbox pods
+  themselves are fenced by upstream's own per-namespace policies,
+  `openshell-sandbox-workloads` and `openshell-sandbox-supervisors`, which
+  the driver creates; the chart adds nothing to them.
+- RBAC for the driver's ServiceAccount, mirroring upstream's chart: a Role
+  in the sandbox namespace and a ClusterRole for cluster-scoped rights.
+  It includes `tokenreviews:create`, so the driver can validate the
+  supervisor's projected ServiceAccount token (the driver performs the
+  TokenReview in its `AuthenticateSandbox` RPC).
 - An optional PVC for gateway DB persistence.
 
 ## 4. Verify, exec a sandbox
@@ -112,11 +120,14 @@ kubectl -n "$NS" get pods
 # ods-openshell-driver-kyma-...                2/2     Running   0          30s
 
 kubectl -n "$NS" logs deploy/ods-openshell-driver-kyma -c driver --tail=5
-# Look for: "PSA enforce=privileged confirmed"  / "driver ready"
+# Look for: "Starting Kyma compute driver"
 
-kubectl -n "$NS" logs deploy/ods-openshell-driver-kyma -c gateway --tail=5
-# Look for: "Server listening address=0.0.0.0:8080"
+kubectl -n "$NS" logs deploy/ods-openshell-driver-kyma -c gateway --tail=50
+# Look for: "Compute driver connected"
 ```
+
+The last line proves the gateway is talking to the driver over the shared
+Unix socket. If it is missing, check the driver container's logs.
 
 Reach the gateway, create a sandbox, exec into it:
 
@@ -125,7 +136,8 @@ kubectl -n "$NS" port-forward svc/ods-openshell-driver-kyma 8080:8080 &
 
 openshell --gateway-endpoint http://localhost:8080 sandbox create \
   --name hello \
-  --from ghcr.io/st-gr/e2e-sandbox:latest \
+  --from ghcr.io/nvidia/openshell-community/sandboxes/base:latest \
+  --detach \
   -- sleep infinity
 
 openshell --gateway-endpoint http://localhost:8080 sandbox exec \
@@ -133,55 +145,77 @@ openshell --gateway-endpoint http://localhost:8080 sandbox exec \
   -- echo "hello from inside the sandbox"
 ```
 
-`sandbox create` blocks until the sandbox reaches `phase=Ready`. That
-involves the CLI calling `CreateSandbox` on the gateway → gateway
-dispatching to the driver over the in-pod UDS → driver creating a
-`Sandbox` CR → agent-sandbox controller scheduling a pod with the
-supervisor sideloaded via the binary's `copy-self` subcommand
-(see [`why-init-container.md`](why-init-container.md)) → supervisor
-exchanging its projected SA token for a sandbox JWT via
-`IssueSandboxToken` → readiness probe flips Ready=true.
+`sandbox create --detach` returns once the gateway reports the sandbox
+`Ready`. Behind that: the CLI calls `CreateSandbox` on the gateway → the
+gateway dispatches to the driver over the in-pod Unix socket → upstream's
+driver creates the `Sandbox` CR, a hardened supervisor pod
+(`os-supervisor-<sandbox id>`) and per-sandbox bootstrap Secrets → the
+agent-sandbox controller starts the workload pod → the supervisor bootstraps
+against the gateway, exchanging its projected ServiceAccount token for a
+sandbox JWT via `IssueSandboxToken` (the driver authenticates the token) →
+the gateway reports `Ready`.
 
-If your overlay has `inferenceProvider.enabled`, you can also run Claude
-inside a sandbox — the upstream CLI ships a `--claude` flag that
-provisions an image with the agent installed:
+### Run Claude with an inference provider
+
+> **Verified on v0.9.0** (`claude -p "reply with ok"` answers `ok` through the
+> provider). The commands below call `/usr/bin/claude` directly so they also
+> work with `sandbox-claude` images built before v0.9.0, whose `claude` wrapper
+> unset `ANTHROPIC_API_KEY`; with an image built from v0.9.0 or later, plain
+> `claude` works too.
+
+If your overlay has `inferenceProvider.enabled`, the chart's post-install
+Job has created a provider on the gateway. Its name is
+`inferenceProvider.name`, by default `<release>-<type>` (`ods-anthropic` for
+the release above). Create sandboxes with `--provider <name>` to give them
+that provider:
 
 ```bash
+openshell --gateway-endpoint http://localhost:8080 provider list
+
 openshell --gateway-endpoint http://localhost:8080 sandbox create \
   --name claude-demo \
-  --claude
+  --provider ods-anthropic \
+  --from ghcr.io/st-gr/sandbox-claude:latest \
+  --detach
 
 openshell --gateway-endpoint http://localhost:8080 sandbox exec \
-  --name claude-demo -- claude "say hi"
+  --name claude-demo -- env | grep ANTHROPIC
 ```
 
+The driver gives every sandbox `ANTHROPIC_BASE_URL`
+(`inferenceProvider.baseUrl`) and `ANTHROPIC_MODEL`
+(`inferenceProvider.modelId`). A sandbox created with `--provider` also has a
+placeholder for `ANTHROPIC_API_KEY`. Leave the placeholder in place: do not
+export your own key. A sandbox created without `--provider` is not given the
+key, nor the network rule that admits the endpoint.
+
 How the routing works (per
-[NVIDIA's docs](https://docs.nvidia.com/openshell/about/how-it-works) —
-"No subprocess, no loopback hop"):
+[NVIDIA's docs](https://docs.nvidia.com/openshell/how-it-works/inference)):
 
-- The agent application (your Claude code in the agent container) sees
-  only `ANTHROPIC_BASE_URL=https://inference.local` in its env (no
-  `/v1` suffix — the Anthropic SDK and `claude-code` append
-  `/v1/messages` themselves; with a `/v1` suffix the request would
-  land at `/v1/v1/messages` and the supervisor's L7 router rejects it).
-  It cannot read the real upstream URL or the API key.
-- The supervisor (same pod, separate process namespace, runs privileged)
-  fetches a bundle from the gateway via `GetInferenceBundle`. The
-  bundle carries the resolved upstream URL + API key the chart's
-  post-install Job loaded into the gateway DB from your Secret.
-- The supervisor terminates `inference.local` TLS using a per-SNI cert
-  from the sandbox CA at `/etc/openshell-tls/`, strips the agent's
-  placeholder credentials, injects the real ones, and dials the
-  upstream itself from the sandbox pod's eth0.
-- The gateway sidecar's role is bundle/config plane only — it never
-  forwards inference request bytes.
+- The chart renders a **provider profile**: the endpoint is the host and
+  port of `inferenceProvider.baseUrl`, and `binaries` lists the executables
+  allowed to reach it. The Job imports the profile and creates the provider
+  from it with the API key from your Secret. The chart never sees the key.
+- `--provider` attaches the provider to the sandbox. The agent sees only a
+  placeholder key. Upstream fences the workload pod so that it has no network
+  of its own; its traffic goes through its supervisor pod, which substitutes
+  the real key in requests to the profile's endpoint and dials the upstream
+  itself. The attached provider also contributes the network rule that admits
+  that endpoint.
+- The key is bound to the endpoint's host and port (the path of `baseUrl` is
+  not part of the binding). `binaries` gates which processes may reach the
+  endpoint; upstream v0.1.2 does not yet restrict the key by calling
+  binary, so treat the endpoint as the scope.
+- An in-cluster upstream needs no NetworkPolicy from this chart. Upstream
+  gives each supervisor pod its own egress policy (allow-all) and gives
+  workload pods none. There is no `gatewayUpstreamEgress` value any more.
 
-The `gatewayUpstreamEgress` block in your values file is what unblocks
-that final outbound hop on the sandbox-pod NetworkPolicy. Without it,
-the supervisor can't reach the in-cluster upstream and `inference.local`
-requests time out.
+`claude-code` runs under `node`, so the default `binaries` list names
+`node` and `claude` under `/usr/bin` and `/usr/local/bin`. Add the
+interpreter of any other SDK your sandbox image uses to
+`inferenceProvider.binaries`.
 
-### Two operational notes from the live E2E
+### Two operational notes
 
 **Upload/download needs `rsync` + `openssh-client` on the host.**
 `openshell sandbox upload` and `openshell sandbox download` shell out
@@ -197,48 +231,39 @@ sudo apt-get install -y rsync openssh-client
 apk add --no-cache rsync openssh-client
 ```
 
-**`claude-code` works end-to-end with a couple of env knobs.**
-The supervisor runs exec/SSH children under `env_clear()` for isolation, so
-a sandbox's pod env does not reach them by itself. The driver therefore
-also sends `OPENSHELL_USER_ENVIRONMENT` — a JSON copy of your
-`spec.environment` plus the agent-facing variables the chart injects
-(`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`,
-`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`) — which the supervisor
-re-injects into each child. Those no longer need exporting by hand:
+**Run `claude` as a plain command, with `HOME` on a writable path.**
+`/sandbox` is the sandbox's writable workspace. The provider's placeholder
+is already in `ANTHROPIC_API_KEY`; the `claude` wrapper in the
+`sandbox-claude` image unsets it, so call the real binary:
 
 ```bash
-openshell sandbox exec --name <sandbox> -- sh -c '
-  export HOME=/sandbox \
-         ANTHROPIC_API_KEY=sk-ant-placeholder000000000000000000000000000000000000000000000000
-  claude -p --bare --allow-dangerously-skip-permissions \
-         --model <your-configured-model> "say hi"'
+openshell sandbox exec --name claude-demo -- sh -c '
+  export HOME=/sandbox
+  /usr/bin/claude -p --bare --allow-dangerously-skip-permissions "say hi"'
 ```
 
-`HOME=/sandbox` because `/home/sandbox` is Landlock-restricted in the
-exec session — that one is not an environment-propagation problem and still
-has to be set. `ANTHROPIC_API_KEY` must look like an Anthropic key
-(`sk-ant-` prefix); the supervisor's L7 router strips it and injects the
-real one from the gateway bundle, so it is a placeholder rather than a
-secret and is deliberately not sent for you.
-
-> **Divergence from upstream.** Upstream's drivers put only the caller's own
-> `spec.environment` in `OPENSHELL_USER_ENVIRONMENT`. This driver also
-> includes the three agent-facing injected variables above, because with
-> strict parity every exec session would still have to re-export them by
-> hand. Supervisor plumbing (`OPENSHELL_*`) is deliberately excluded — those
-> configure the supervisor itself, and leaking them into child processes
-> invites nested tooling to misread them.
-`--model` must match the model configured on the gateway via
-`inferenceProvider.modelId` — the supervisor refuses model swaps
-because that's a credential boundary.
+`ANTHROPIC_MODEL` should already name the configured model, so `--model` is
+not needed; if you pass one, it must be the model you set in
+`inferenceProvider.modelId`.
 
 ## Inspect
 
 ```bash
 openshell --gateway-endpoint http://localhost:8080 sandbox get hello
-kubectl -n "$NS" get sandbox hello -o yaml         # the raw CR
-kubectl -n "$NS" logs hello -c agent --tail=10     # supervisor logs
+
+# The Sandbox CR is named <workspace>--<name>, e.g. default--hello.
+kubectl -n "$NS" get sandbox -l openshell.ai/sandbox-name=hello -o yaml
+
+# Each sandbox is a pair of pods that share a sandbox id: the supervisor
+# pod os-supervisor-<id> and the workload pod (container `agent`).
+ID=$(kubectl -n "$NS" get sandbox -l openshell.ai/sandbox-name=hello \
+  -o jsonpath='{.items[0].metadata.labels.openshell\.ai/sandbox-id}' | tr '[:upper:]' '[:lower:]')
+kubectl -n "$NS" get pods -l "openshell.ai/boundary-pair=$ID"
+kubectl -n "$NS" logs "os-supervisor-$ID" --all-containers --tail=20
 ```
+
+`openshell sandbox stop hello` deletes both pods and keeps the sandbox;
+`openshell sandbox start hello` recreates them.
 
 ## Tear down
 
@@ -249,8 +274,8 @@ helm uninstall ods -n "$NS"
 kubectl delete namespace "$NS"
 ```
 
-The agent-sandbox controller cleans up the sandbox pod automatically;
-the chart removes everything else. The JWT Secret survives in `$NS`
+Deleting a sandbox cleans up the sandbox's own objects; the chart removes
+everything else. The JWT Secret survives in `$NS`
 until the namespace deletion (intentional — it survives `helm upgrade`
 so the sandbox-Ready promise holds across releases).
 
@@ -290,17 +315,15 @@ helm upgrade --install ods deploy/helm/openshell-driver-kyma \
   --set inferenceProvider.modelId=claude-opus-4-7 \
   --set inferenceProvider.credentialSecret.name=my-anthropic-creds \
   --set inferenceProvider.credentialSecret.key=api-key \
-  --set gatewayUpstreamEgress.enabled=true \
-  --set gatewayUpstreamEgress.namespace=your-llm-ns \
-  --set gatewayUpstreamEgress.port=8080 \
   --set driver.disableClaudeTelemetry=true
 ```
 
-After install the post-install Job runs once. Verify:
+After install the post-install Job runs once. On success Helm deletes it;
+on failure it stays, so its logs show why:
 
 ```bash
 kubectl -n "$NS" get jobs | grep inference-provider-hook
-kubectl -n "$NS" logs job/<release>-inference-provider-hook
+kubectl -n "$NS" logs job/<release>-openshell-driver-kyma-inference-provider-hook
 ```
 
 The Job is idempotent (re-runs cleanly on `helm upgrade`). The chart
@@ -318,90 +341,55 @@ setup.
 
 ## Troubleshooting
 
-**`Sandbox CR is not installed` from the chart's pre-install hook.**
-Install the agent-sandbox controller per Step 1.
+**`agents.x-k8s.io/v1alpha1/Sandbox CRD is not installed` from the chart's
+pre-install hook.** Install the agent-sandbox controller per Step 1.
 
-**`PSA enforce=privileged not confirmed` in driver logs.**
-The namespace label is wrong or missing — re-run Step 2.
+**Sandbox pods are never created, and the namespace events say `violates
+PodSecurity`.** The namespace label is wrong or missing — re-run Step 2.
 
 **Sandbox stuck `Pending` with `Failed to pull image …` in the pod
-events.** The chart references `ghcr.io/nvidia/openshell/supervisor:latest`
-by default, which is public. Other images (especially private ones)
-need an `imagePullSecrets` — set `imagePullSecrets[0].name=<your-secret>`
-in your overlay.
+events.** The chart pins upstream's supervisor, sandbox-runtime and gateway
+images by digest from `ghcr.io/nvidia/openshell/`, which is public. A private
+sandbox image needs an image pull Secret: set
+`driver.sandboxImagePullSecrets` for the sandbox pods, and
+`imagePullSecrets[0].name` for the driver+gateway pod.
 
-**`openshell sandbox exec` returns `Unavailable: supervisor session
-not connected`.** The driver injects `OPENSHELL_SSH_SOCKET_PATH`; if
-you see this error, the supervisor either crashed (check its logs) or
-the network policy is too tight (verify the sandbox NetworkPolicy
-allows egress to the in-pod gateway).
+**`openshell sandbox exec` returns `Unavailable: supervisor session not
+connected`.** The sandbox's supervisor pod crashed or cannot reach the
+gateway. Read its logs (`kubectl -n "$NS" logs os-supervisor-<id>
+--all-containers`, see "Inspect") and check that the driver+gateway pod's
+NetworkPolicy is not blocking the gateway port.
 
 **`IssueSandboxToken bootstrap exchange failed` repeating in the
 supervisor logs.** Either `gateway.sandboxJwt.enabled=false` (the chart
 should have failed at install in this case — check for
 `allow_unauthenticated_users = true` in
-`kubectl -n "$NS" get cm <release>-gateway-config -o yaml` only if you
-set an OIDC issuer) or the driver's TokenReview RBAC is missing (check
-`kubectl get clusterrole <release>-tokenreview -o yaml`).
+`kubectl -n "$NS" get cm <release>-openshell-driver-kyma-gateway-config -o yaml`
+only if you set an OIDC issuer) or the driver's ClusterRole lacks
+`tokenreviews:create` (check
+`kubectl get clusterrole -l app.kubernetes.io/instance=<release> -o yaml`).
 
-**`inference-provider-hook` Job stuck.**
-With `gateway.oidc.issuer` set (the gateway runs in OIDC-authenticated
-mode), the Job needs an admin token to call the gateway — not yet
-wired. Either run the `openshell provider create` + `openshell
-inference set` steps manually post-install, or leave OIDC unset for
-in-cluster-only deployments (the gateway runs
-`allow_unauthenticated_users=true` and the Job needs no extra auth).
+**`inference-provider-hook` Job stuck or failed.** Read its log
+(`kubectl -n "$NS" logs job/<release>-openshell-driver-kyma-inference-provider-hook`).
+The chart refuses to render `inferenceProvider.enabled` together with
+`gateway.oidc.issuer`: the Job calls the gateway without a token, which a
+gateway with OIDC refuses. With OIDC, register the profile and provider from
+an authenticated CLI session instead; see
+[`production-deployment.md`](production-deployment.md), step 3b.
 
-**Existing sandboxes return `503 cluster inference is not configured`
-after a gateway upgrade.** Gateway `0.0.91` introduced a **workspace**
-concept. Sandboxes created by an older gateway carry an empty
-workspace and can no longer resolve an inference bundle, so every
-inference call fails — even though `openshell inference get` reports a
-healthy route and `sandbox list` shows them `Ready`. The gateway log
-names it:
+If the Job's log says the provider "exists with type …", a provider of that
+name was created under another profile (for example by 0.8.0). A provider's
+type cannot be changed: delete it (`openshell provider delete <name>`;
+sandboxes attached to it lose it) and run `helm upgrade` again, or set
+`inferenceProvider.name`.
 
-```bash
-kubectl -n "$NS" logs deploy/<release>-openshell-driver-kyma -c gateway \
-  | grep -i "non-empty workspace"
-# WARN Store reconciliation sweep failed
-#      error=encode error: sandbox requires a non-empty workspace
-```
+**`openshell sandbox create --provider <name>` says the provider or its
+profile is missing.** With `gateway.dbPersistence.enabled=false`, a gateway
+restart wipes the provider and profile. Run `helm upgrade` again to re-run
+the hook, or enable persistence.
 
-There is no in-place migration — **recreate each affected sandbox**
-(`openshell sandbox delete <name>`, then create it again with the same
-flags). Sandboxes created after the upgrade are unaffected. Worth
-planning for whenever you bump `gateway.image.tag` across `0.0.91`.
-
-**Existing sandboxes disappear after upgrading the driver past the
-v0.0.91 contract sync.** The same workspace concept also changed how the
-driver names Kubernetes objects: a Sandbox CR is now
-`{workspace}--{name}` (for example `default--hello`) rather than just
-`hello`, so that two sandboxes with the same name in different
-workspaces cannot collide. Sandboxes created by an older driver have
-unqualified names and are no longer found — `openshell sandbox list`
-stops showing them, though the CRs are still on the cluster:
-
-```bash
-kubectl -n "$NS" get sandbox
-# NAME    AGE      <- no `--` in the name means it predates the rename
-# hello   3d
-```
-
-**Delete your sandboxes before rolling out the new driver**, not after —
-once the driver is upgraded, `openshell sandbox delete` can no longer
-find them and you are left removing the CRs by hand:
-
-```bash
-openshell sandbox delete hello        # BEFORE helm upgrade
-helm upgrade ...                      # roll out the new driver
-openshell sandbox create --name hello ...
-```
-
-If you upgraded first, clean up directly and recreate:
-
-```bash
-kubectl -n "$NS" delete sandbox hello
-```
-
-Because this lands in the same release as the workspace change above,
-one maintenance window covers both.
+**Sandboxes from before an upgrade to 0.9.0 do not come up.** A sandbox
+created by 0.8.0 cannot bootstrap on the new runtime. Delete it
+(`openshell sandbox delete <name>`, or `kubectl -n "$NS" delete sandbox
+<name>` if the gateway no longer finds it) and create it again. The CHANGELOG
+lists the upgrade steps.

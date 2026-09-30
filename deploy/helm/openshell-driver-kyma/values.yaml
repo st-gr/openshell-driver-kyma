@@ -2,9 +2,12 @@
 # Override with `helm install ... -f my-values.yaml --set ...`.
 
 # Sandbox provisioning namespace. The driver creates Sandbox CRs here.
-# Cluster-admin must label this namespace
-# `pod-security.kubernetes.io/enforce: privileged` because the supervisor
-# inside each sandbox needs SYS_ADMIN/NET_ADMIN/SYS_PTRACE/SYSLOG capabilities.
+# Cluster-admin should label this namespace
+# `pod-security.kubernetes.io/enforce: privileged`, the level the chart's CI
+# runs at. Upstream v0.1.2's sandbox pods request no privileges (non-root, all
+# capabilities dropped, RuntimeDefault seccomp), so a stricter level may admit
+# them, but only `privileged` is verified here. The provider hook runs as
+# root, which `restricted` refuses.
 namespace: openshell-system
 
 image:
@@ -25,23 +28,30 @@ serviceAccount:
   name: openshell-driver
 
 # Sandbox pods (created by the agent-sandbox controller) attach this
-# ServiceAccount via spec.podSpec.serviceAccountName. The name is
-# hard-coded in the driver (provisioner.rs::SANDBOX_SERVICE_ACCOUNT)
-# and changing it requires a code change. The SA has no RBAC and
+# ServiceAccount via spec.podSpec.serviceAccountName. The driver receives
+# the name as OPENSHELL_K8S_SANDBOX_SERVICE_ACCOUNT. The SA has no RBAC and
 # automountServiceAccountToken=false — sandbox code must not reach
 # the K8s API.
 sandboxServiceAccount:
   create: true
   name: openshell-sandbox
 
-# CLI flags exposed to operators. Each maps 1:1 to a `--<flag>` on the
-# binary; see openshell-driver-kyma --help for the authoritative list.
+# Driver configuration. The driver container takes no command-line arguments:
+# every key below renders as an environment variable in
+# templates/_driver-env.tpl. Upstream openshell-driver-kubernetes's options use
+# upstream's own OPENSHELL_* names; the Kyma layer's use OPENSHELL_KYMA_*.
 driver:
-  socket: /var/run/openshell-driver.sock
-  # Supervisor OCI image, PINNED BY DIGEST. The supervisor runs as root
-  # with SYS_ADMIN inside every sandbox, so a rolling `:latest` would let
-  # every new sandbox pick up an unreviewed privileged binary. The driver
-  # passes `--supervisor-image` straight through to the Sandbox CR, so any
+  # Unix socket the driver serves and the gateway sidecar dials. It must sit
+  # at least two directories deep: upstream's driver refuses to start unless
+  # the socket's PARENT directory is owned by its own uid (65532), so the
+  # chart mounts the shared emptyDir at the grandparent and the driver creates
+  # the parent itself. `/var/run/openshell-driver.sock` (0.8.0) no longer works.
+  socket: /var/run/openshell/driver.sock
+  # Supervisor OCI image, PINNED BY DIGEST. Upstream runs it in each sandbox's
+  # supervisor pod (non-root, all capabilities dropped), where it holds the
+  # provider credentials and the sandbox's egress, so a rolling `:latest` would
+  # let every new sandbox pick up an unreviewed binary in that seat. The driver
+  # hands it to upstream's driver as OPENSHELL_SUPERVISOR_IMAGE, so any
   # reference (`:tag` or `@sha256:...`) the kubelet accepts works here.
   # To re-resolve after a deliberate upstream bump:
   #   docker buildx imagetools inspect \
@@ -61,134 +71,210 @@ driver:
   # in one week, so sandboxes were silently picking up new privileged
   # binaries. Re-pin both together when bumping upstream.
   supervisorImage: ghcr.io/nvidia/openshell/supervisor@sha256:d7b5264bb6bc56f4796e6fa3617b8e4a8d785be0b7293542efd8cc250b0fb67a
-  supervisorBinaryPath: /openshell-sandbox
-  supervisorMountPath: /opt/openshell/bin
+  # The gateway endpoint sandboxes dial (OPENSHELL_GRPC_ENDPOINT). Empty
+  # defaults to this release's Service when gateway.enabled is true, https://
+  # when gateway.tls.enabled and http:// otherwise, as upstream's chart derives
+  # it from its disableTls; without the gateway it is left to upstream.
   gatewayEndpoint: ""
   istioInjectSandboxes: false
+  # Expose each sandbox's port 8080 through a Kyma APIRule, on a host under
+  # clusterDomain. Requires clusterDomain; the chart refuses to render without
+  # it.
   enableApirule: false
   clusterDomain: ""
-  # Gates the node-capacity precheck in ValidateSandboxCreate. Since the
-  # v0.0.91 contract sync this is NOT advertised via GetCapabilities — that
-  # response field was reserved upstream. With this false, any sandbox that
-  # requests a GPU is rejected at create time.
-  gpuSupport: true
-  # Must be false when workspaceMode is "managed" -- see the note under
-  # workspaceMode below. The chart refuses that combination at install
-  # time rather than silently downgrading isolation.
-  enableNetworkPolicy: true
-  # When true, the driver injects `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`
-  # into every sandbox pod's env. Pair with an in-cluster LLM gateway that
+  # When true, the driver adds `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`
+  # to every sandbox's environment (an explicit sandboxEnv entry for the same
+  # key wins). Pair with an in-cluster LLM gateway that
   # cannot service Anthropic's optional telemetry endpoints. Independent
-  # of inferenceProvider/gatewayUpstreamEgress — flip on its own when
-  # you want to silence telemetry without rerouting model calls.
+  # of inferenceProvider — flip on its own when you want to silence
+  # telemetry without rerouting model calls.
   disableClaudeTelemetry: false
-  # Drop `privileged: true` from sandbox agent containers by enabling
-  # Linux user namespaces (Kubernetes `hostUsers: false`). The pod's
-  # UID 0 is then remapped to a non-root host UID by the kubelet, so
-  # the supervisor keeps its inside-the-container root privileges
-  # (Landlock + netns setup) without holding actual host root.
+  # Run sandbox pods in Linux user namespaces (Kubernetes `hostUsers: false`),
+  # so the pod's UID 0 is remapped to a non-root host UID by the kubelet.
   #
-  # Requires K8s 1.30+ with the `UserNamespacesSupport` feature gate
-  # enabled (default-on in 1.33+; alpha in 1.30-1.32). Confirm with
+  # Requires K8s 1.33+ with user namespace support available (beta through
+  # 1.35, GA in 1.36+), as upstream's chart states, plus Linux 5.12+. Confirm with
   # `kubectl get nodes -o jsonpath='{.items[*].status.nodeInfo.kubeletVersion}'`
   # and that your CRI (containerd >= 1.7, cri-o >= 1.30) has user-ns
   # support enabled.
-  # Telemetry stance propagated to every sandbox supervisor as
-  # OPENSHELL_TELEMETRY_ENABLED.
-  #
-  # This driver emits no telemetry of its own, and upstream's Kubernetes
-  # driver compiles telemetry out and effectively sends "false" too, so
-  # false is both the faithful default and the safe one.
-  #
-  # It is sent EXPLICITLY rather than omitted, which matters: a supervisor
-  # image built with the telemetry feature treats an ABSENT variable as
-  # ENABLED. Omitting it would silently opt such an image in.
-  telemetryEnabled: false
   enableUserNamespaces: false
-  # Numeric identity the supervisor drops the agent process to.
-  #
-  # Leave BOTH empty (the default) to keep the behaviour this chart has
-  # always had: the driver supplies no identity metadata, and the
-  # supervisor resolves the *name* `sandbox` from the image's
-  # /etc/passwd. That is fine for images built to carry that user --
-  # including this repo's own e2e images.
-  #
-  # Set sandboxUid to run images that have NO `sandbox` passwd entry.
-  # Supplying it puts the supervisor on upstream's resolved-identity
-  # path, where it setuid()s to the number directly. sandboxGid defaults
-  # to sandboxUid when omitted.
-  #
-  # Must be in [1, 4294967294]; 0 (root) is rejected, and the driver
-  # refuses to start on an out-of-range value rather than failing later
-  # per sandbox. Setting sandboxGid alone is also refused -- the
-  # supervisor only uses a resolved identity when both are present, so
-  # a lone gid would be silently ignored.
+  # Numeric identity for sandbox workloads (OPENSHELL_K8S_SANDBOX_UID/GID).
+  # Leave both empty for upstream's own resolution: an OpenShift SCC
+  # namespace annotation if present, otherwise upstream's default UID
+  # (10001). sandboxGid defaults to sandboxUid when omitted. A set value must
+  # be a whole number from 1 to 4294967294, upstream's range; the chart refuses
+  # to render 0 or anything else out of range.
   sandboxUid: ""
   sandboxGid: ""
-  # Per-sandbox workspace PVC mounted at `/sandbox`. Empty string (default)
-  # disables persistent workspaces — sandbox /sandbox is pod-local and
-  # erased on pod restart. Any non-empty value enables PVC creation; the
-  # value is passed through to the rendered PVC's
-  # `resources.requests.storage` (e.g. `5Gi`, `200Mi`).
-  # Survives pod rescheduling. Cleaned up by the driver on sandbox delete.
+  # Default size of the per-sandbox workspace PVC mounted at `/sandbox`
+  # (OPENSHELL_K8S_WORKSPACE_DEFAULT_STORAGE_SIZE), e.g. `5Gi`. Empty is
+  # upstream's default (2Gi).
   sandboxStorageSize: ""
-  # StorageClassName for the workspace PVC. Empty = cluster default.
-  # Only consulted when sandboxStorageSize is non-empty.
+  # StorageClassName for the workspace PVC. Empty = cluster default. Set it
+  # on a cluster with no default StorageClass, or the PVC stays Pending.
   sandboxStorageClass: ""
+  # Port for the driver's /healthz and /readyz (OPENSHELL_KYMA_HEALTH_PORT).
+  # The container port and both probes use the same value.
   healthPort: 9090
   logLevel: info
-  # How long stop_sandbox waits for the sandbox's pod to terminate before
-  # giving up. Raise it for workloads with long graceful-shutdown handlers.
-  stopTimeoutSecs: 120
-  # Workspace tenancy model. Leave at "shared" unless you have read
-  # docs/superpowers/specs/2026-08-18-workspace-modes-design.md.
+  # Workspace tenancy model (upstream's OPENSHELL_WORKSPACE_MODE). Leave at
+  # "shared" unless you need a namespace per workspace or namespaces that a
+  # platform team owns; the two other modes change where sandboxes live and
+  # what RBAC the driver needs (see the modes below).
   #
-  #   shared   - every sandbox in .Values.namespace, object names are
-  #              {workspace}--{name}. The only mode before v0.0.107 and the
-  #              only one that renders no cluster-scoped RBAC (see
-  #              templates/clusterrole-workspaces.yaml).
-  #   managed  - one driver-created namespace per workspace (Phase 3)
-  #   operator - pre-existing allowlisted namespaces (Phase 4)
+  #   shared   - every sandbox in .Values.namespace.
+  #   managed  - one driver-created namespace per workspace, named
+  #              openshell-{gatewayId}-{workspace}. The gateway id is
+  #              gateway.sandboxJwt.gatewayId (default: the release's
+  #              fullname) and must be a DNS-1123 label of at most 33
+  #              characters, so a long release name needs an explicit,
+  #              shorter gatewayId. managedSshIngress (below) is on by
+  #              default with the in-pod gateway.
+  #   operator - namespaces the operator selects: set exactly one of
+  #              operatorNamespaceLabel or operatorNamespaceConfigMap below.
   #
-  # SWITCHING MODES IS BREAKING. Both the namespace and the object names
-  # change, so existing sandboxes become unreachable. Delete every sandbox
-  # before switching, then recreate.
-  #
-  # "managed" ALSO REQUIRES enableNetworkPolicy: false (see below), because
-  # this chart's stock default for that value is true. That is not a bug in
-  # managed mode being unfinished by accident: managed namespaces receive no
-  # NetworkPolicy today (bootstrap_managed_namespace deliberately does not
-  # create one -- see provisioner.rs), so the driver and the chart both
-  # refuse the combination on purpose, forcing you to consciously accept
-  # losing network isolation before switching. Install fails at `helm
-  # template`/`helm install` with that explanation if you forget.
+  # SWITCHING MODES IS BREAKING. The namespace holding a sandbox changes, so
+  # existing sandboxes become unreachable. Delete every sandbox before
+  # switching, then recreate.
   workspaceMode: shared
-  # Gateway identity baked into managed namespace names
-  # (openshell-{gatewayId}-{workspace}). Required when workspaceMode is
-  # "managed". Must be a DNS-1123 label. Defaults from
-  # gateway.sandboxJwt.gatewayId when that is set.
-  gatewayId: ""
-  # Namespaces the driver may use when workspaceMode is "operator".
-  # Required and must be non-empty in that mode. An empty allowlist denies
-  # every workspace.
-  operatorNamespaceAllowlist: []
-  # Gates driver_config.volumes[] and driver_config.containers.agent.
-  # volume_mounts[] (DriverSandboxTemplate.driver_config, proto field 12).
-  # driver_config.rs validates a PVC claim_name as a DNS-1123 subdomain
-  # and nothing more -- no ownership check, no allowlist. In the default
-  # "shared" workspaceMode every sandbox's workspace PVC lives in ONE
-  # namespace under the predictable name {workspace}--{name}-workspace, so
-  # an unrestricted claim_name lets a sandbox template mount another
-  # sandbox's workspace read-write. Off by default; driver_config support
-  # is new and unreleased, so this is not a regression for anyone. The
-  # other driver_config fields (pod.*, containers.agent.resources) are
-  # unaffected -- they are not the exposure and keep working regardless.
-  driverConfigAllowVolumes: false
-  # Whether callers may pass driver_config at all. Rendered into BOTH the
-  # gateway's [openshell.drivers.kyma] allow_driver_config and the driver's
-  # --allow-driver-config flag: the gateway refuses to start unless the driver
-  # acknowledges the identical policy, so never set them separately.
-  allowDriverConfig: true
+  # Whether callers may pass driver_config at all (node selector, runtime
+  # class, resource overrides, volumes and volume mounts). Default false, as
+  # upstream's chart (server.drivers.kubernetes.allowDriverConfig): a caller's
+  # driver_config is refused until an operator opts in. Set true to keep the
+  # 0.8.0 behaviour; volumes are then still checked by resourceAdmission below.
+  # Rendered into BOTH the gateway's [openshell.drivers.kyma]
+  # allow_driver_config and the driver's OPENSHELL_DRIVER_ADMISSION_CONFIG_JSON:
+  # the gateway refuses to start unless the driver acknowledges the identical
+  # policy, so never set them separately. Must be a real boolean, not a string;
+  # the chart refuses to render otherwise.
+  allowDriverConfig: false
+  # Operator approval of the external resources a sandbox attaches (caller
+  # PVCs): upstream's resource admission (server.drivers.kubernetes.
+  # resourceAdmission). Rendered, like allowDriverConfig, into both the
+  # gateway's [openshell.drivers.kyma.resource_admission] and the driver's
+  # admission JSON.
+  resourceAdmission:
+    # Require the approval labels below on every attached resource. Must be a
+    # real boolean.
+    enabled: true
+    # The labels an attached resource must carry, as a map. null keeps
+    # upstream's built-in set: openshell.ai/sandbox-attachable: "true" and
+    # openshell.ai/sandbox-attachable-workspace: "${workspace}". A map replaces
+    # that set; a value of exactly "${workspace}" must equal the sandbox's
+    # workspace. Upstream refuses at startup an empty map while enabled (the
+    # chart refuses to render it too), a map whose values are all
+    # "${workspace}", and its own reserved label keys.
+    requiredLabels: null
+  # --- Upstream openshell-driver-kubernetes options (same names upstream's
+  # chart uses; each maps to the upstream environment variable in
+  # templates/_driver-env.tpl). Empty/false leaves the variable unset, so
+  # upstream's default applies, except sandboxRuntimeImage,
+  # sandboxRuntimeBoundaryPort and saTokenTtlSecs: the chart always passes
+  # those, the last two at upstream's own defaults. ---
+  # Sandbox runtime (isolation backend) image, digest-pinned. Upstream's
+  # compiled-in default depends on build variables a git-dependency build does
+  # not set, so the chart always passes it.
+  sandboxRuntimeImage: ghcr.io/nvidia/openshell/sandbox@sha256:bf4797b6c511f2d8ba02955dbba4bf76c1f0dd6d83531420c5408d5f1fb9d72f
+  sandboxRuntimeImagePullPolicy: ""
+  supervisorImagePullPolicy: ""
+  # Default sandbox image when a create request names none
+  # (OPENSHELL_SANDBOX_IMAGE). Upstream's chart default, its sandbox.image
+  # repository and tag. Set "" to leave it to upstream's driver.
+  sandboxImage: nvcr.io/nvidia/base/ubuntu:24.04
+  sandboxImagePullPolicy: ""
+  sandboxImagePullSecrets: []
+  sandboxRuntimeBoundaryPort: 5500
+  saTokenTtlSecs: 3600
+  runtimeClassName: ""
+  sandboxSshSocketPath: ""
+  bindAddress: ""
+  # OTLP/gRPC trace collector (OPENSHELL_OTLP_ENDPOINT), e.g.
+  # http://collector.observability:4317. Plain http:// (upstream v0.1.2 builds
+  # its exporter without TLS). With networkPolicy.enabled the driver pod may
+  # then reach that port (80 when none is given), on any address.
+  otlpEndpoint: ""
+  gatewayName: ""
+  # Secret with the client certificate sandboxes present to a TLS gateway
+  # (OPENSHELL_CLIENT_TLS_SECRET_NAME). Empty defaults, when gateway.tls.enabled,
+  # to the one the chart's PKI hook creates (gateway.sandboxJwt.
+  # clientTlsSecretName, default <fullname>-client-tls), as upstream's chart
+  # passes its own when TLS is on; without TLS it is not passed. The hook writes
+  # it to the release namespace, where shared-mode sandboxes find it only if
+  # `namespace` is the release namespace.
+  clientTlsSecretName: ""
+  hostGatewayIp: ""
+  providerSpiffeWorkloadApiSocket: ""
+  # Operator mode: select namespaces by label, or by a file of names mounted
+  # from a ConfigMap, exactly one of the two (replaces the removed
+  # operatorNamespaceAllowlist).
+  operatorNamespaceLabel: ""
+  operatorNamespaceConfigMap:
+    name: ""
+    key: namespaces
+  # Managed mode: the NetworkPolicy the driver applies in each workspace
+  # namespace, restricting SSH ingress (TCP 2222) on sandbox pods to the
+  # gateway pod; the managed-mode counterpart of <fullname>-sandbox-ssh.
+  # Upstream's chart turns it on with networkPolicy.enabled, naming its own
+  # gateway pod. Here, in managed mode with the in-pod gateway
+  # (gateway.enabled) and networkPolicy.enabled, it is on by default, with the
+  # release namespace as gatewayNamespace and this chart's pod labels as
+  # gatewayPodSelector. Each key overrides its part: enabled: false turns it
+  # off. With an external gateway (gateway.enabled=false) nothing is derived:
+  # set enabled: true and both of the others.
+  managedSshIngress:
+    enabled: null            # null = the default above; true or false overrides it
+    gatewayNamespace: ""     # "" = the release namespace, with gateway.enabled
+    gatewayPodSelector: []   # key=value entries; empty = this chart's pod labels, with gateway.enabled
+  upstreamProxy:
+    url: ""
+    noProxy: ""
+    authSecretName: ""
+    authSecretKey: ""
+    allowInsecure: false
+    connectByHostname: false
+    caBundleConfigMap:
+      name: ""
+      key: ca.crt
+  # --- Kyma layer ---
+  # KEY=VALUE environment added to every sandbox. The driver splits the list on
+  # commas, so a value cannot contain one, and it rejects OPENSHELL_* keys other
+  # than OPENSHELL_LOG_LEVEL (upstream strips them); the chart refuses to render
+  # either.
+  sandboxEnv: []
+  # Namespace of the Istio ingress gateway APIRule traffic arrives from.
+  ingressNamespace: istio-system
+  # Pod Security level for namespaces the driver creates in managed mode
+  # (privileged, baseline, restricted, or empty for none). Default chosen on
+  # the v0.9.0 live check: with a sandbox running, a server-side dry run of
+  # `pod-security.kubernetes.io/enforce=restricted` on its namespace printed
+  # no warning (upstream's supervisor and workload pods run non-root, drop all
+  # capabilities and use the RuntimeDefault seccomp profile).
+  workspacePsaLevel: restricted
+
+# The upstream NVIDIA/OpenShell release this chart's driver links. Must equal
+# the tag in the workspace Cargo.toml (scripts/check-chart-render.sh).
+upstream:
+  version: v0.1.2
+
+networkPolicy:
+  # NetworkPolicies the chart renders:
+  #   - one for the driver+gateway pod (its egress: DNS, 443 and, with
+  #     driver.otlpEndpoint, the collector's port);
+  #   - in shared mode with gateway.enabled, `<fullname>-sandbox-ssh` in the
+  #     sandbox namespace, which restricts SSH ingress (TCP 2222) on OpenShell
+  #     sandbox pods to the driver+gateway pod. It mirrors upstream's chart of the
+  #     same name and default, with our gateway sidecar's pod as the peer. With an
+  #     external gateway (gateway.enabled=false) no SSH policy is rendered here:
+  #     the gateway's own deployment owns it, as upstream's chart does for its
+  #     gateway. In managed mode the driver applies the equivalent policy to each
+  #     workspace itself (driver.managedSshIngress, on by default with the in-pod
+  #     gateway and this value);
+  #   - one for the bedrock bridge, when bedrockBridge.enabled.
+  # Nothing else selects sandbox pods. Upstream's driver fences them per
+  # namespace (openshell-sandbox-workloads, openshell-sandbox-supervisors), and
+  # NetworkPolicies are additive, so any other chart policy would widen that
+  # fence. scripts/check-chart-render.sh enforces this.
+  enabled: true
 
 # Driver pod resource requests and limits. Modest defaults that fit any
 # Kyma namespace ResourceQuota out of the box.
@@ -242,93 +328,21 @@ podLabels: {}
 
 # Gateway sidecar configuration. When enabled, the chart deploys the
 # upstream NVIDIA OpenShell gateway (openshell-server) container
-# alongside the driver in the same pod. They share the socket-dir
-# emptyDir; the driver writes the UDS at .Values.driver.socket, the gateway
-# reads it via --compute-driver-socket. No separate socketPath value — the
-# driver.socket is the single source of truth.
+# alongside the driver in the same pod. They share the socket-dir emptyDir
+# (mounted at the socket's grandparent, see driver.socket); the driver writes
+# the UDS at .Values.driver.socket, the gateway reads it via
+# --compute-driver-socket. No separate socketPath value — driver.socket is the
+# single source of truth.
 gateway:
   enabled: false
   image:
-    # Image pinned to upstream `0.1.2` — the newest tag for which upstream
-    # has published gateway/supervisor container images as of this pin.
-    #
-    # Upstream's image publishing is INTERMITTENT, not absent — verified
-    # tag by tag on 2026-08-31 (as of the prior `0.0.116` pin):
-    #
-    #   0.0.112  no images        0.0.115  published
-    #   0.0.113  published        0.0.116  published
-    #   0.0.114  no images
-    #
-    # So "tagged without images" is only true of 0.0.112 and 0.0.114. That
-    # matters for how staleness is read: `scripts/check-pin-status.sh` only
-    # resolves the NEWEST tag, so while 0.0.114 was newest it reported a pin
-    # as still justified even though 0.0.113 had usable images. Do not infer
-    # "every tag since lacks images" from that output.
-    #
-    # A GATEWAY_REF pin was held at 0.0.111 through 2026-09-01 for a
-    # different reason, now resolved: the PyPI `openshell` wheel stopped
-    # carrying the CLI binary from 0.0.113 (8.18 MB -> 0.10 MB), so the
-    # smokes could not install a CLI. That was never a regression to wait
-    # out — NVIDIA/OpenShell#2321 removed it deliberately and added a test
-    # asserting it cannot return, because the CLI now ships as a standalone
-    # release artifact. The smokes fetch
-    # `openshell-x86_64-unknown-linux-musl.tar.gz` from the release instead,
-    # and the pin is lifted.
-    #
-    # The vendored ComputeDriver proto CONTRACT (proto/UPSTREAM.lock) is a
-    # separate pin and currently sits at `0.1.2`, moved there from `0.0.116`
-    # (see scripts/check-proto-drift.sh). Unlike the `0.0.116` move (which
-    # was byte-identical to `0.0.111`), `0.0.116` -> `0.1.2` changed the wire
-    # shape substantially:
-    #   - `GetGatewayListenerRequirements` was REMOVED and replaced with
-    #     `AuthenticateSandbox`. This driver never mints a driver-native
-    #     bootstrap credential (sandboxes use a projected ServiceAccount
-    #     token instead), so it implements the new RPC as `Unimplemented`
-    #     and leaves `GetCapabilitiesResponse.supports_sandbox_authentication`
-    #     false — see driver.rs::authenticate_sandbox.
-    #   - `GetCapabilitiesRequest`/`Response` gained a peer capability/
-    #     protocol-version negotiation scheme (`extension.proto`'s
-    #     `PeerMetadata`) plus `resource_capabilities`, `rootfs_tar_*`, and
-    #     `resource_admission_policy`. This driver advertises no optional
-    #     capabilities and reports `resource_admission_policy` empty (the
-    #     documented "legacy driver" value) — see driver.rs::get_capabilities
-    #     for what is and is not implemented, including two open TODOs.
-    #   - Several `sandbox_name` fields (on `GetSandboxRequest`,
-    #     `StopSandboxRequest`, `StartSandboxRequest`, `DeleteSandboxRequest`,
-    #     `DriverSandboxStatus`) were renamed to `name`, and
-    #     `DriverCondition.last_transition_time` / `DriverPlatformEvent.
-    #     timestamp_ms` became typed `google.protobuf.Timestamp` fields
-    #     (`transition_time` / `event_time`) — see helpers.rs::parse_timestamp
-    #     and provisioner.rs's event watch.
-    #   - `DriverSandboxSpec` gained a `policy` field (SandboxPolicy) and new
-    #     workload-identity / launch-authentication / fence-evidence
-    #     machinery (`WorkloadIdentityRequest`, `ResolvedWorkloadIdentity`,
-    #     `DriverFenceEvidence`) that this driver does not yet act on — none
-    #     of it is required reading for existing behavior, but a driver that
-    #     wants to support the new operator admission system will need it.
-    #   None of the above broke this driver's existing behavior: every new
-    #   field is additive and every renamed/retyped field had exactly one
-    #   call site here, now updated. The prior contract move, `0.0.109` ->
-    #   `0.0.111`, similarly added `GetCapabilitiesResponse.
-    #   gateway_manages_lifecycle` (this driver always returns `false` — a
-    #   Kyma sandbox's compute lives in the cluster independently of the
-    #   driver/gateway process; see driver.rs::get_capabilities) and
-    #   `DriverSandboxSpec.command`/`tty`, both forwarded to the supervisor
-    #   as `OPENSHELL_MAIN_PROCESS_SPEC` (see
-    #   provisioner.rs::build_full_env_list). `StartSandbox` (added vs.
-    #   `0.0.102`) and `StopSandbox` are both implemented by this driver:
-    #   `StopSandbox` patches the Sandbox CR to a stopped state and waits for
-    #   its pod to actually terminate, `StartSandbox` performs the matching
-    #   resume patch; see driver.rs::stop_sandbox / start_sandbox. Still
-    #   carries forward the external-compute-driver work
-    #   (NVIDIA/OpenShell#1703), the AWS Bedrock provider plumbing
-    #   (NVIDIA/OpenShell#1704), and the TUI provider config-key form
-    #   (NVIDIA/OpenShell#2224 / #1798) introduced in earlier releases.
-    # Keep this in lockstep with the `openshell` CLI version operators
-    # install — a newer CLI against an older gateway can fail on
-    # commands whose response shape changed (e.g. `inference get`).
-    # Bump via
-    # https://github.com/NVIDIA/OpenShell/pkgs/container/openshell%2Fgateway
+    # Pinned by digest to the gateway image upstream published for `v0.1.2`,
+    # the same release as `upstream.version`, the Cargo.toml tag, the
+    # supervisor and sandbox runtime images above, and the `openshell` CLI the
+    # provider hook downloads. Re-pin them together when `upstream.version`
+    # moves: a CLI newer than the gateway can fail on commands whose response
+    # shape changed. Resolve a digest with `docker buildx imagetools inspect`
+    # on https://github.com/NVIDIA/OpenShell/pkgs/container/openshell%2Fgateway
     repository: ghcr.io/nvidia/openshell/gateway
     tag: "sha256:2fe4dad9118e14ab80a8258b545ea6e6cd74c3469e24ad4e6610f964d98913a2"
     pullPolicy: IfNotPresent
@@ -337,7 +351,10 @@ gateway:
   healthPort: 9092
   extraArgs: []      # extra flags passed to `openshell-gateway run`
   # OIDC for client auth (the openshell CLI authenticates via OIDC).
-  # Independent of TLS: configure both, neither, or either alone.
+  # Independent of TLS: configure both, neither, or either alone. An issuer
+  # cannot be combined with inferenceProvider.enabled: the provider hook calls
+  # the gateway without a token, so the chart refuses the pair (register the
+  # provider from an authenticated CLI instead; docs/production-deployment.md).
   oidc:
     issuer: ""
     audience: ""
@@ -376,10 +393,10 @@ gateway:
     limits:
       cpu: 500m
       memory: 1Gi
-  # Gateway DB persistence. The gateway stores provider/inference configs
-  # in its DB (set via gRPC RPC by the post-install Job, not via TOML).
-  # Without persistence, every gateway pod restart wipes the configs and
-  # every sandbox's bundle fetch fails until reconfigured.
+  # Gateway DB persistence. The gateway stores provider profiles and providers
+  # in its DB (set via gRPC by the post-install Job, not via TOML). Without
+  # persistence, a gateway pod restart wipes them, and sandboxes cannot be
+  # created with `--provider` until the next `helm upgrade` re-runs the hook.
   #
   # Default: disabled (ephemeral) — safe for the e2e harness, NOT safe
   # for production. Two persistence modes:
@@ -393,9 +410,10 @@ gateway:
     storageSize: 1Gi
     storageClassName: ""    # "" = cluster default StorageClass
   # Sandbox-JWT signing & validation. Required for the supervisor inside
-  # each sandbox to complete its IssueSandboxToken bootstrap (without it,
-  # phase=Ready and `openshell sandbox exec` never succeed). When enabled,
-  # the chart provisions:
+  # each sandbox to complete its IssueSandboxToken bootstrap (upstream answers
+  # it with Unavailable without the keys), so the chart refuses gateway.enabled
+  # without it; upstream's chart has no switch and always configures it. When
+  # enabled, the chart provisions:
   #   - a pre-install Helm hook Job that runs `openshell-gateway
   #     generate-certs` to create the signing-key Secret in this namespace
   #   - the `[openshell.gateway.gateway_jwt]` table in the gateway TOML
@@ -416,12 +434,17 @@ gateway:
     serverTlsSecretName: ""     # default: <fullname>-server-tls (created
                                 # by certgen even when --disable-tls is on)
     clientTlsSecretName: ""     # default: <fullname>-client-tls
+    # Also the driver's OPENSHELL_GATEWAY_ID, and part of every managed
+    # namespace name (openshell-<gatewayId>-<workspace>).
     gatewayId: ""               # default: <fullname>
     ttlSecs: 3600               # gateway-minted sandbox JWT lifetime
 
 # ClusterIP Service exposing the gateway's gRPC + metrics ports.
 # Requires .Values.gateway.enabled. When false, only the driver's
-# health port is exposed (existing behavior).
+# health port is exposed (existing behavior). gateway.enabled requires it,
+# unless driver.gatewayEndpoint names another address sandboxes reach the
+# gateway at: by default they dial this Service. inferenceProvider.enabled
+# requires it too: the provider hook reaches the gateway through it.
 gatewayService:
   enabled: false
 
@@ -445,15 +468,19 @@ gatewayApirule:
         #       jwksUri: https://my-tenant.accounts.ondemand.com/oauth2/certs
         authentications: []
 
-# Optional: declaratively configure the gateway's inference provider via
-# a post-install Job. The Job runs `openshell provider create` and
-# `openshell inference set` against the in-pod gateway, configuring the
-# gateway-side override of the upstream URL.
+# Optional: declaratively configure an inference provider through upstream's
+# provider-profile model. The chart renders a provider profile (a ConfigMap:
+# the endpoint host `baseUrl` names, and the `binaries` allowed to reach it),
+# and a post-install Job registers it with the in-pod gateway
+# (`openshell provider profile import`) and creates the provider from it
+# (`openshell provider create`), using the CLI of `upstream.version`. The
+# sandbox supervisor injects the API key into requests to that host and port;
+# `binaries` only gates which processes may reach it. Sandboxes receive
+# ANTHROPIC_BASE_URL (`baseUrl`) and ANTHROPIC_MODEL (`modelId`) in their
+# environment, and attach the provider with
+# `openshell sandbox create --provider <name>`.
 #
-# Architecture preservation: sandboxes still talk only to the upstream
-# pseudo-endpoint `inference.local`; the gateway sidecar (not the
-# sandbox) holds the real URL + key and rewrites traffic. The chart
-# never sees the API key — supply it via a Secret you manage in
+# The chart never sees the API key — supply it via a Secret you manage in
 # .Release.Namespace before install.
 inferenceProvider:
   enabled: false
@@ -461,6 +488,25 @@ inferenceProvider:
   name: ""                # provider name visible to `openshell provider list`. Defaults to <release>-<type> when empty.
   baseUrl: ""             # e.g. http://gateway.your-llm-ns.svc.cluster.local:8080/anthropic
   modelId: ""             # e.g. claude-opus-4-7
+  # Provider profile id registered with the gateway. Empty = "kyma-<type>".
+  profileId: ""
+  # Executable paths for the profile's `binaries` list: the processes that may reach
+  # the inference endpoint through the sandbox supervisor. The API key itself is
+  # bound to the endpoint's host and port (upstream v0.1.2 does not yet restrict
+  # it by calling binary); the path of `baseUrl` is not part of that binding.
+  # claude-code runs under node, so node must be listed; add the interpreter of
+  # any other SDK your sandbox image uses. Must not be empty.
+  binaries:
+    - /usr/bin/node
+    - /usr/local/bin/node
+    - /usr/bin/claude
+    - /usr/local/bin/claude
+    # The npm-installed claude launcher execs into this native binary, which is
+    # the executable the supervisor sees on the request (v0.9.0 live check:
+    # "DENIED /usr/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe"
+    # until it was listed; upstream's claude-code profile lists only the two
+    # launcher paths).
+    - /usr/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe
   # Operator-managed Secret carrying the API key. Must already exist
   # in .Release.Namespace before install. The chart does NOT create it
   # (chart isolation guarantee #10: never inject pull-secrets into
@@ -469,64 +515,32 @@ inferenceProvider:
     name: ""              # e.g. "my-anthropic-creds"
     key: ""               # e.g. "api-key"
 
-# Optional: NetworkPolicy egress rule allowing the sandbox pod to reach
-# an in-cluster LLM upstream. Required when inferenceProvider.baseUrl
-# points at a *.svc.cluster.local address.
-#
-# Architecture (per NVIDIA's docs.nvidia.com/openshell/about/how-it-works
-# and the rejected-sidecar choice in NVIDIA/OpenShell#998 — "No subprocess,
-# no loopback hop"): the supervisor's in-process inference router inside
-# the sandbox pod is what dials the upstream, NOT the gateway sidecar.
-# The gateway sidecar mints the bundle (provider config + credential
-# lookup); the supervisor reads the bundle, terminates `inference.local`
-# TLS using the sandbox CA at /etc/openshell-tls/, strips caller-supplied
-# creds, injects the real upstream URL + key, and connects out from the
-# sandbox pod's eth0.
-#
-# So this rule lands on the SANDBOX-POD NetworkPolicy, not the
-# driver+gateway pod NP. Today's default sandbox-NP allows DNS, TCP/8080
-# to the in-pod gateway, and 0.0.0.0/0:443 with RFC1918 excluded — none
-# of which match an in-cluster *.svc.cluster.local:8080 destination.
-#
-# Isolation guarantees this rule preserves:
-#   - Agent process (user code in agent container): env shows only
-#     ANTHROPIC_BASE_URL=https://inference.local/v1; cannot read the real
-#     URL or API key. Cannot dial the upstream successfully even with
-#     this NP open, because it doesn't know the URL or hold the key.
-#   - Supervisor process (same pod, separate process namespace, runs as
-#     root): holds the bundle, makes the actual outbound HTTPS request.
-#     This is the process the rule unblocks.
-gatewayUpstreamEgress:
-  enabled: false
-  namespace: ""           # e.g. "your-llm-ns"
-  port: 8080
-  # Optional pod-label selector to tighten the rule to only the upstream
-  # gateway's pods within `namespace`. Empty = whole namespace allowed.
-  # Note the upstream's actual labels (e.g. `app: gateway` is common,
-  # but the canonical `app.kubernetes.io/name` is not always present).
-  podSelector: {}
-
 # Optional: deploy an in-cluster bridge that translates Claude Code's
 # AWS Bedrock requests to SAP AI Core's deployed-Bedrock format.
 #
-# Architecture: agent (Bedrock mode) -> https://inference.local/saic-aws-bedrock/...
-#   -> supervisor's L7 router -> in-pod gateway -> bridge pod -> SAP AI Core.
+# Architecture: sandbox workload -> its supervisor pod (which holds the
+# provider credential and has the egress) -> this bridge -> SAP AI Core.
 # The bridge is the SOLE process holding the SAP service key — sandbox
 # pods never see SAP credentials.
 #
 # When `enabled: true`, the chart deploys:
 #   - A standalone Deployment + Service for the bridge (POST /v1/messages).
-#   - A NetworkPolicy on the bridge pod (DNS + 0.0.0.0/0:443 with RFC1918
-#     excluded — for the public SAP endpoints).
+#   - With `networkPolicy.enabled`, a NetworkPolicy on the bridge pod:
+#     ingress only from OpenShell pods in this namespace, egress DNS +
+#     0.0.0.0/0:443 with RFC1918 excluded (for the public SAP endpoints).
 #
 # The bridge speaks the Anthropic Messages API on the inside and
 # translates outbound to SAP AI Core's deployed Bedrock InvokeModel
 # endpoints. It is registered into the chart by pointing
 # `inferenceProvider.baseUrl` at the bridge's in-cluster Service URL
-# (with `inferenceProvider.type: anthropic`). Sandbox pods reach the
-# bridge via `inference.local` through the gateway's L7 router exactly
-# the same way they reach any other Anthropic upstream — no Bedrock
-# env, no AWS creds, no per-pod policy carve-out.
+# (with `inferenceProvider.type: anthropic`). The provider profile then
+# names the bridge's host and port as the credential's endpoint, and sandboxes
+# reach it like any other Anthropic upstream — no Bedrock env, no AWS creds,
+# no per-pod policy carve-out. With `networkPolicy.enabled`, the bridge's
+# policy admits only OpenShell pods in the release namespace, so a sandbox
+# reaches it only when it runs there (shared mode, with `namespace` equal to the
+# release namespace). Sandboxes elsewhere (managed or operator mode, or another
+# `namespace`) cannot.
 #
 # Operator pre-creates a Secret holding the SAP service-key JSON:
 #   kubectl -n <release-ns> create secret generic my-sap-aicore-key \

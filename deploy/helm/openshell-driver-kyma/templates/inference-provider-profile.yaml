@@ -1,0 +1,50 @@
+{{- if .Values.inferenceProvider.enabled -}}
+{{- include "openshell-driver-kyma.inferenceProviderGuards" . -}}
+{{- /* The guards leave a host name with at most one colon, so what follows it is the port. */ -}}
+{{- $url := urlParse .Values.inferenceProvider.baseUrl }}
+{{- $host := $url.hostname }}
+{{- $explicitPort := "" }}
+{{- if contains ":" $url.host }}
+{{- $explicitPort = last (splitList ":" $url.host) }}
+{{- end }}
+{{- $port := default (ternary "443" "80" (eq $url.scheme "https")) $explicitPort }}
+# Provider profile for upstream's profile model. The endpoint is the inference
+# proxy the sandbox actually calls (inferenceProvider.baseUrl), not
+# api.anthropic.com. The credential is bound to that host and port: the
+# supervisor resolves it only for requests to them. `binaries` gates which
+# processes may reach the endpoint when the profile contributes policy to a
+# sandbox; upstream v0.1.2 does not yet restrict the credential by calling
+# binary, so treat the endpoint as the scope. The baseUrl path is not part of
+# the binding: the endpoint sets no `path:`, so the credential applies to every
+# path on that host and port.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "openshell-driver-kyma.fullname" . }}-inference-profile
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+data:
+  profile.yaml: |
+    id: {{ include "openshell-driver-kyma.inferenceProfileId" . }}
+    display_name: Anthropic via {{ $host }}
+    description: Anthropic inference through the cluster's inference proxy
+    category: inference
+    inference_capable: true
+    credentials:
+      - name: api_key
+        description: Anthropic API key
+        env_vars: [ANTHROPIC_API_KEY]
+        required: true
+        auth_style: header
+        header_name: x-api-key
+    discovery:
+      credentials: [api_key]
+    endpoints:
+      - host: {{ $host }}
+        port: {{ $port }}
+        protocol: rest
+        access: read-write
+        enforcement: enforce
+    binaries: {{ toJson .Values.inferenceProvider.binaries }}
+{{- end }}

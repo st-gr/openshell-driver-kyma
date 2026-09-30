@@ -5,22 +5,27 @@
 # at /workspace/target so cargo's incremental cache survives between runs.
 # Linux/macOS hosts work directly; Windows hosts must use Git Bash or WSL2.
 
+# bash, not /bin/sh: Debian/Ubuntu's /bin/sh is dash, which rejects -o pipefail.
+SHELL := /bin/bash
 .SHELLFLAGS := -eu -o pipefail -c
 
 IMAGE_NAME ?= openshell-driver-kyma
 IMAGE_TAG ?= dev
 DEV_IMAGE ?= openshell-driver-kyma-dev:latest
 HELM_CHART ?= deploy/helm/openshell-driver-kyma
-INTEGRATION_TEST_NAMESPACE ?=
 
 DOCKER_RUN := MSYS_NO_PATHCONV=1 docker run --rm \
     -v "$(CURDIR):/workspace" \
     -v "openshell-cargo-cache:/workspace/target" \
+    -v "openshell-cargo-registry:/usr/local/cargo/registry" \
+    -v "openshell-cargo-git:/usr/local/cargo/git" \
     -w /workspace
 
 DOCKER_RUN_INTERACTIVE := MSYS_NO_PATHCONV=1 docker run --rm -it \
     -v "$(CURDIR):/workspace" \
     -v "openshell-cargo-cache:/workspace/target" \
+    -v "openshell-cargo-registry:/usr/local/cargo/registry" \
+    -v "openshell-cargo-git:/usr/local/cargo/git" \
     -w /workspace
 
 .PHONY: help
@@ -30,16 +35,14 @@ help:
 	@echo "  dev-shell            interactive shell in the dev image"
 	@echo "  dev-shell-with-kube  shell with \$$HOME/.kube mounted read-only"
 	@echo ""
-	@echo "  proto                regenerate tonic/prost bindings (rare)"
-	@echo "  vendor-check         verify vendored driver source matches upstream"
 	@echo "  fmt                  cargo fmt --all"
 	@echo "  fmt-check            cargo fmt --all --check"
 	@echo "  clippy               cargo clippy with pedantic warnings as errors"
 	@echo "  build                cargo build --release --workspace"
 	@echo "  test                 fmt-check + clippy + cargo test --workspace"
-	@echo "  test-integration     Tier-3 live cluster (requires INTEGRATION_TEST_NAMESPACE)"
-	@echo "  test-all             test + test-integration"
 	@echo "  coverage             cargo llvm-cov over the workspace"
+	@echo "  upstream-args-check  verify the mirrored option surface matches upstream"
+	@echo "  upstream-bump        move to a new upstream tag: make upstream-bump TAG=vX.Y.Z"
 	@echo ""
 	@echo "  image                build the production container ($(IMAGE_NAME):$(IMAGE_TAG))"
 	@echo "  helm-lint            helm lint $(HELM_CHART)"
@@ -66,30 +69,30 @@ dev-shell-with-kube:
 # Build / test (run inside the dev container)
 # ---------------------------------------------------------------------------
 
-.PHONY: proto
-proto:
-	$(DOCKER_RUN) $(DEV_IMAGE) cargo build -p computev1
-
-# Verify the vendored protos still match the upstream ref pinned in
-# proto/UPSTREAM.lock. Runs on the host (needs network), not in the container.
-.PHONY: proto-check
-proto-check:
-	./scripts/check-proto-drift.sh
-
-# Re-vendor at a new upstream tag: make proto-vendor TAG=v0.0.91
-.PHONY: proto-vendor
-proto-vendor:
-ifeq ($(strip $(TAG)),)
-	$(error TAG must be set, e.g. make proto-vendor TAG=v0.0.91)
-endif
-	./scripts/vendor-proto.sh $(TAG)
-
-# Verify vendored Rust source (crates/openshell-driver-kyma/src/vendor/)
-# still matches the upstream ref pinned in that directory's UPSTREAM.lock.
+# The mirrored upstream option surface must match upstream at the pinned tag.
 # Runs on the host (needs network), not in the container.
-.PHONY: vendor-check
-vendor-check:
-	./scripts/check-vendor-drift.sh
+.PHONY: upstream-args-check
+upstream-args-check:
+	./scripts/check-upstream-args.sh
+
+# Move the driver to a new upstream release: make upstream-bump TAG=v0.1.3
+# Rewrites the tag on the three openshell-* git dependencies, refreshes
+# Cargo.lock, then prints any option-surface diff to mirror into
+# crates/openshell-driver-kyma/src/upstream_args.rs, and any change to the rest
+# of upstream's main.rs to mirror into src/main.rs and re-acknowledge.
+.PHONY: upstream-bump
+upstream-bump:
+	@test -n "$(TAG)" || { echo "usage: make upstream-bump TAG=vX.Y.Z" >&2; exit 2; }
+	sed -i.bak -E 's#^(openshell-[a-z-]+ = \{ git = "https://github.com/NVIDIA/OpenShell", tag = ")[^"]+(")#\1$(TAG)\2#' Cargo.toml
+	rm -f Cargo.toml.bak
+	@test "$$(grep -E '^openshell-[a-z-]+ = \{ git = "https://github.com/NVIDIA/OpenShell", tag = "' Cargo.toml | grep -cF 'tag = "$(TAG)"')" = 3 \
+		|| { echo "error: upstream-bump: Cargo.toml does not pin all three openshell-* dependencies to $(TAG) after the rewrite; check its formatting (git diff Cargo.toml)" >&2; exit 1; }
+	$(DOCKER_RUN) $(DEV_IMAGE) cargo update -p openshell-driver-kubernetes
+	@echo "note: check-upstream-args.sh also hashes the rest of upstream's main.rs. If it reports"
+	@echo "      UPSTREAM_MAIN_DRIFT, review the diff it prints, mirror it into"
+	@echo "      crates/openshell-driver-kyma/src/main.rs, and only then re-acknowledge the hash"
+	@echo "      by putting the line it prints into scripts/upstream-main-rs.sha256."
+	./scripts/check-upstream-args.sh
 
 .PHONY: fmt
 fmt:
@@ -110,44 +113,6 @@ build:
 .PHONY: test
 test: fmt-check clippy
 	$(DOCKER_RUN) $(DEV_IMAGE) cargo test --workspace --lib --tests
-
-.PHONY: test-integration
-test-integration:
-ifeq ($(strip $(INTEGRATION_TEST_NAMESPACE)),)
-	$(error INTEGRATION_TEST_NAMESPACE must be set, e.g. INTEGRATION_TEST_NAMESPACE=openshell-driver-test)
-endif
-	# Render a static (exec-auth-resolved) kubeconfig on the host once,
-	# then bind-mount it into the dev container at /root/.kube/config.
-	# The dev image lacks `kubectl-oidc_login` and a browser, so it
-	# cannot run exec-based auth itself. Kyma kubeconfigs use OIDC,
-	# so we resolve to a bearer token here and pass that through.
-	# The rendered file lands under .tmp/ (gitignored).
-	mkdir -p .tmp
-	node scripts/render-static-kubeconfig.js > .tmp/kubeconfig
-	$(DOCKER_RUN) -v "$(CURDIR)/.tmp/kubeconfig:/root/.kube/config:ro" \
-		-e INTEGRATION_TEST_NAMESPACE=$(INTEGRATION_TEST_NAMESPACE) \
-		-e INTEGRATION_TEST_NAMESPACE_DENYLIST=$${INTEGRATION_TEST_NAMESPACE_DENYLIST:-} \
-		$(DEV_IMAGE) \
-		cargo test -p openshell-driver-kyma --test live_cluster --features integration -- --test-threads=1
-
-.PHONY: test-all
-test-all: test test-integration
-
-# End-to-end test: drives the upstream openshell CLI against a deployed
-# driver+gateway pod and asserts a sandbox reaches Ready. Requires the
-# chart to be installed in INTEGRATION_TEST_NAMESPACE with
-# gateway.enabled=true and gatewayService.enabled=true.
-.PHONY: e2e-cli
-e2e-cli:
-ifeq ($(strip $(INTEGRATION_TEST_NAMESPACE)),)
-	$(error INTEGRATION_TEST_NAMESPACE must be set, e.g. INTEGRATION_TEST_NAMESPACE=openshell-driver-test)
-endif
-	mkdir -p .tmp
-	node scripts/render-static-kubeconfig.js > .tmp/kubeconfig
-	$(DOCKER_RUN) -v "$(CURDIR)/.tmp/kubeconfig:/root/.kube/config:ro" \
-		-e INTEGRATION_TEST_NAMESPACE=$(INTEGRATION_TEST_NAMESPACE) \
-		$(DEV_IMAGE) \
-		bash scripts/e2e-cli.sh
 
 .PHONY: coverage
 coverage:

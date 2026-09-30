@@ -9,9 +9,16 @@ and three practical patterns for uploading and downloading files.
 > **Scope.** Everything below targets the OpenShell gateway's public
 > surface (`openshell.v1.OpenShell`), which the upstream NVIDIA project
 > publishes under Apache-2.0. The gateway's *internal* contract with
-> compute drivers — `compute_driver.proto`, what
-> `openshell-driver-kyma` itself implements — is documented separately
-> in [`docs/superpowers/specs/2026-05-26-openshell-driver-kyma-design.md`](superpowers/specs/2026-05-26-openshell-driver-kyma-design.md).
+> compute drivers (`compute_driver.proto`) is upstream's too:
+> `openshell-driver-kyma` serves it by running upstream's Kubernetes
+> driver.
+
+> **The Python and TypeScript samples predate upstream v0.1.2's request
+> shapes.** For example, workspace-scoped RPCs now require `workspace_scope`,
+> and `CreateProviderRequest` nests a `provider` message. Treat the samples
+> as the outline of the flow, and take the current field names from
+> [`grpc-without-cli.md`](grpc-without-cli.md) (worked `grpcurl` calls for
+> v0.1.2) and upstream's `openshell.proto` at the tag your gateway runs.
 
 ## Table of contents
 
@@ -90,8 +97,10 @@ or VPN-only routing:
 ### A. Public hostname via Kyma `APIRule`
 
 When the `openshell-driver-kyma` Helm chart is installed with
-`--set driver.enableApirule=true` and a hostname, Kyma's API Gateway
-exposes the gateway at `https://<release>.<cluster-id>.kyma.ondemand.com`.
+`--set gatewayApirule.enabled=true`, a `gatewayApirule.host` and
+`gateway.oidc.issuer`, Kyma's API Gateway exposes the gateway at
+`https://<gatewayApirule.host>` (for example
+`openshell.<cluster-domain>`).
 Lock it down to your VPN egress IPs with an
 `AuthorizationPolicy` on the Istio ingress. Native gRPC clients dial
 the `:443` HTTPS endpoint.
@@ -128,7 +137,7 @@ Then run your language's protoc plugin:
 | Python | `python -m grpc_tools.protoc -I proto --python_out=gen --grpc_python_out=gen proto/openshell-v1/*.proto` |
 | TypeScript | `buf generate --template buf.gen.yaml proto/openshell-v1` (with `@bufbuild/protoc-gen-es` + `@connectrpc/protoc-gen-connect-es`) |
 | Go | `protoc -I proto --go_out=gen --go-grpc_out=gen proto/openshell-v1/*.proto` |
-| Rust | add `tonic-prost-build = "0.14"` to `build.rs` and call `compile_protos` (mirrors what `crates/computev1` does in this repo) |
+| Rust | add `tonic-prost-build = "0.14"` to `build.rs` and call `compile_protos` (as upstream's `openshell-core` crate does; this repo uses its generated types) |
 
 ## Authentication
 
@@ -153,11 +162,16 @@ volume) is enough — the gateway accepts the SA token.
 
 ## Sandbox lifecycle
 
+> Sample predates the v0.1.2 request shapes (`workspace_scope`, the nested
+> `provider`); see [`grpc-without-cli.md`](grpc-without-cli.md).
+
 ### 1. Create the provider once
 
 Each external credential (an Anthropic API key, an OpenAI key, etc.)
-maps to one `Provider` record. The driver injects the credential as
-environment variables into every sandbox the provider is attached to.
+maps to one `Provider` record. Every sandbox the provider is attached to
+gets a placeholder for the credential in its environment; the sandbox's
+supervisor substitutes the real value in requests to the provider profile's
+endpoint.
 
 ```python
 stub.CreateProvider(pb.CreateProviderRequest(
@@ -468,6 +482,9 @@ deletes any leftover entries — defensive against process crashes.
 
 ## Complete worked example: Python
 
+> Sample predates the v0.1.2 request shapes (`workspace_scope`, the nested
+> `provider`); see [`grpc-without-cli.md`](grpc-without-cli.md).
+
 A self-contained script that creates a Claude Code sandbox, uploads a
 prompt file, runs a one-shot prompt against it, downloads the result,
 and tears down. Save as `examples/claude_oneshot.py`:
@@ -576,6 +593,9 @@ python examples/claude_oneshot.py prompt.txt
 
 ## Complete worked example: TypeScript
 
+> Sample predates the v0.1.2 request shapes (`workspace_scope`, the nested
+> `provider`); see [`grpc-without-cli.md`](grpc-without-cli.md).
+
 Equivalent flow using `@connectrpc/connect` for browser/Node:
 
 ```typescript
@@ -634,9 +654,10 @@ await client.deleteSandbox({ name: sandbox!.name });
   server, but the actual sandbox lifecycle is parallelized inside
   Kyma.
 - **Quotas**: respect the namespace ResourceQuota when sizing
-  sandboxes. The driver's `--enable-network-policy` flag adds a
-  default-deny egress that allows only DNS + the gateway service —
-  enable it for any multi-tenant workload.
+  sandboxes. Sandbox pods are fenced by upstream's own NetworkPolicies
+  (workload pods have no egress, and reach the network only through their
+  supervisor pod); the chart's `networkPolicy.enabled` covers the
+  driver+gateway pod.
 - **gRPC max message size**: the gateway sets a default 64 MB cap. For
   files larger than that, use SSH/SCP or TCP-forwarded HTTP — not the
   exec stdin pipe.
@@ -654,7 +675,5 @@ await client.deleteSandbox({ name: sandbox!.name });
 - Upstream README: <https://github.com/NVIDIA/OpenShell>
 - Connect protocol (grpc-web alternative): <https://connectrpc.com>
 - gRPC max-message-size and back-pressure tuning: <https://grpc.io/docs/guides/performance/>
-- This repo's design spec for the compute-driver contract:
-  [`docs/superpowers/specs/2026-05-26-openshell-driver-kyma-design.md`](superpowers/specs/2026-05-26-openshell-driver-kyma-design.md)
 - This repo's Cloud Connector setup:
   [`docs/cloud-connector-setup.md`](cloud-connector-setup.md)

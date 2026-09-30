@@ -11,54 +11,40 @@ flowchart TB
 
     subgraph S1["1 — Cluster bootstrap"]
         direction LR
-        C1["agent-sandbox<br/>controller v0.4.6"]
+        C1["agent-sandbox<br/>controller v0.5.2"]
         C2["namespace openshell-system<br/>PSA privileged"]
         C3["Secret<br/>my-anthropic-creds"]
     end
 
     subgraph S2["2 — Values overlay"]
-        V{"Where is the<br/>upstream endpoint?"}
-        VPUB["public :443<br/>default NetworkPolicy suffices"]
-        VPRIV["in-cluster / RFC1918 / non-443:<br/>MUST enable gatewayUpstreamEgress<br/>or all inference returns 503"]
+        V["inferenceProvider:<br/>baseUrl, modelId, credential Secret"]
     end
 
-    subgraph S3["3 — helm install chart 0.1.2"]
-        POD["driver + gateway pod 2/2<br/>gateway 0.0.91, Unix socket,<br/>--drivers kyma"]
-        HOOK["hook Job: provider create +<br/>inference set (auto-deletes)"]
+    subgraph S3["3 — helm install chart 0.9.0"]
+        POD["driver + gateway pod 2/2<br/>gateway v0.1.2, Unix socket"]
+        HOOK["hook Job: provider profile import +<br/>provider create (auto-deletes)"]
     end
 
-    S45["4-5 — install openshell CLI,<br/>port-forward :8080,<br/>gateway add --local"]
+    S45["4-5 — install openshell CLI v0.1.2,<br/>port-forward :8080,<br/>gateway add --local"]
 
     subgraph S6["6 — run Claude in a sandbox"]
-        CREATE["sandbox create --policy<br/>(egress locked to inference.local)"]
-        PROBE{"6a probe: node POST<br/>inference.local/v1/messages"}
-        OK["HTTP 200 — pipeline works"]
-        E503["HTTP 503 — upstream unreachable,<br/>fix gatewayUpstreamEgress"]
-        RUN["6b claude -p or TUI via wrapper<br/>(do NOT export ANTHROPIC_API_KEY)"]
-        PATH["agent → inference.local →<br/>supervisor injects real key →<br/>upstream"]
+        CREATE["sandbox create --provider ods-anthropic"]
+        RUN["6b claude -p or TUI"]
+        PATH["agent → its supervisor pod →<br/>real key injected at the profile's host:port →<br/>upstream"]
     end
 
     S7["7 — teardown: sandbox delete,<br/>helm uninstall, delete namespace"]
 
     P --> S1
     S1 --> S2
-    V -->|public| VPUB
-    V -->|private| VPRIV
     S2 --> S3
     HOOK -.reads key.-> C3
     S3 --> S45
     S45 --> CREATE
-    CREATE --> PROBE
-    PROBE -->|200| OK
-    OK --> RUN
+    CREATE --> RUN
     RUN === PATH
-    PROBE -->|503| E503
-    E503 -.fix values, retest.-> PROBE
     RUN --> S7
 
-    style VPRIV fill:#f8d7da,stroke:#b02a37,stroke-width:2px
-    style E503 fill:#f8d7da,stroke:#b02a37,stroke-width:2px
-    style OK fill:#d1e7dd,stroke:#146c43
     style PATH fill:#cfe2ff,stroke:#0a58ca
 ```
 
@@ -71,22 +57,22 @@ agent inside never sees either. Four components appear throughout this
 tutorial:
 
 - **gateway** — the control plane. Serves the `openshell` CLI's gRPC
-  API, stores providers/routes/policies, and hands each sandbox its
-  config. It never forwards inference traffic.
-- **driver** (`openshell-driver-kyma`, this repo) — translates the
-  gateway's sandbox-lifecycle calls into Kyma-compatible `Sandbox`
-  custom resources; the two talk over a Unix socket inside a shared
-  pod.
-- **supervisor** — PID 1 inside every sandbox pod. Sets up the
-  isolation (Landlock, seccomp, a network namespace), terminates
-  `inference.local` TLS, strips whatever credentials the agent sends,
-  and injects the real API key it fetches from the gateway.
-- **agent** — your workload (here: Claude Code). It sees exactly one
-  inference endpoint, `https://inference.local`, and a placeholder
-  key. It cannot read the real key or reach the upstream directly.
+  API, stores providers, provider profiles and policies, and hands each
+  sandbox its config. It never forwards inference traffic.
+- **driver** (`openshell-driver-kyma`, this repo) — upstream OpenShell's
+  Kubernetes driver with a thin Kyma layer. It turns the gateway's
+  sandbox-lifecycle calls into `Sandbox` custom resources and pods; the
+  two talk over a Unix socket inside a shared pod.
+- **supervisor** — runs in its own hardened pod next to the agent's pod,
+  one pair per sandbox. It enforces the isolation and network policy,
+  and substitutes the real API key into requests to the provider's
+  endpoint. The agent's traffic goes through it.
+- **agent** — your workload (here: Claude Code), in the workload pod. It
+  sees `ANTHROPIC_BASE_URL` and a placeholder key. It cannot read the
+  real key or reach the upstream directly.
 
 Deeper background: NVIDIA's
-[How it works](https://docs.nvidia.com/openshell/about/how-it-works)
+[Inference](https://docs.nvidia.com/openshell/how-it-works/inference)
 page and the
 ["What's running, what's isolated"](walkthrough-claude-files.md#whats-running-whats-isolated)
 section of the companion walkthrough.
@@ -121,10 +107,11 @@ One-time cluster setup. Skip anything you've already done.
 
 ### 1a. Install the agent-sandbox controller
 
-The chart's pre-install hook fails fast if this CRD is missing.
+The chart's pre-install hook fails fast if this CRD is missing. v0.5.2 is the
+release the chart's CI runs against.
 
 ```bash
-kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.4.6/manifest.yaml
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v0.5.2/sandbox.yaml
 kubectl -n agent-sandbox-system rollout status \
   deployment/agent-sandbox-controller --timeout=120s
 ```
@@ -134,10 +121,11 @@ kubectl -n agent-sandbox-system rollout status \
 Kubernetes'
 [Pod Security Admission](https://kubernetes.io/docs/concepts/security/pod-security-admission/)
 (PSA) restricts what pods in a namespace may do, via labels on the
-namespace. The OpenShell supervisor needs the most permissive level,
-`privileged`, because it configures Landlock + seccomp + a network
-namespace for each agent. Kyma enforces PSA by default; without these
-labels the sandbox pods won't start.
+namespace. Label the sandbox namespace `privileged`, the level the chart's
+CI runs at. Upstream's sandbox pods run unprivileged (non-root, all
+capabilities dropped), so a stricter level may admit them, but only
+`privileged` is verified here, and the provider hook runs as root, which
+`restricted` refuses.
 
 ```bash
 NS=openshell-system
@@ -177,8 +165,8 @@ gateway:
   # Enable the in-pod gateway sidecar. The kyma driver won't work
   # without it (they talk over an in-pod Unix domain socket).
   enabled: true
-  # Persist the gateway DB (provider records + inference route)
-  # across pod restarts. Backed by a 1Gi PVC by default.
+  # Persist the gateway DB (provider profile and provider) across pod
+  # restarts. Backed by a 1Gi PVC by default.
   dbPersistence:
     enabled: true
   sandboxJwt:
@@ -196,8 +184,8 @@ inferenceProvider:
   # endpoint. No trailing slash. Do NOT append /v1 — the SDK adds
   # /v1/messages itself.
   baseUrl: https://api.anthropic.com
-  # Must match one of the models your endpoint serves. The supervisor
-  # refuses model swaps mid-request — this is a credential boundary.
+  # Sandboxes receive this as ANTHROPIC_MODEL. Must be a model your
+  # endpoint serves.
   modelId: claude-opus-4-7
   credentialSecret:
     name: my-anthropic-creds
@@ -206,27 +194,18 @@ inferenceProvider:
 
 Notes on why this is short:
 
-- **`gatewayUpstreamEgress` is not enabled — this is only safe for a
-  public `:443` endpoint.** The chart's default sandbox NetworkPolicy
-  allows egress to DNS, the in-pod gateway, and `0.0.0.0/0:443` **with
-  RFC1918 ranges excluded** (`10/8`, `172.16/12`, `192.168/16`). A
-  public `https://api.anthropic.com` is reached over `:443` on a public
-  IP, so it is covered. **But if your endpoint is inside the cluster**
-  (an RFC1918 ClusterIP, and/or a non-443 port like `:8080`), the
-  supervisor cannot reach it and every inference call fails with
-  `503 inference service unavailable` — while the sandbox itself looks
-  perfectly healthy. In that case enable the egress carve-out:
-
-  ```yaml
-  gatewayUpstreamEgress:
-    enabled: true
-    namespace: your-llm-ns   # namespace hosting the upstream
-    port: 8080               # the upstream's port
-  ```
-
-  This is the single most common reason a correctly-installed setup
-  produces no inference. See the verification `curl`/`node` probe in
-  step 6 to distinguish it from other failures.
+- **No NetworkPolicy setup for the upstream.** The agent's pod has no
+  network of its own; its traffic goes through its supervisor pod, and
+  upstream gives every supervisor pod an allow-all egress policy. A public
+  `https://api.anthropic.com` and an in-cluster proxy such as
+  `http://gateway.your-llm-ns.svc.cluster.local:8080/anthropic` both work with
+  the values above. (0.8.0 needed a `gatewayUpstreamEgress` block for an
+  in-cluster endpoint; it is gone.)
+- **The provider profile comes from these values.** The chart renders a
+  provider profile whose endpoint is the host and port of `baseUrl`
+  (`api.anthropic.com:443` here) and whose `binaries` default to `node` and
+  `claude` under `/usr/bin` and `/usr/local/bin`: claude-code runs under
+  `node`. The API key is bound to that host and port.
 - **No `gatewayApirule` / OIDC block.** Those are for exposing the
   gateway outside the cluster with browser-based auth. This tutorial
   uses `kubectl port-forward` to reach the gateway; auth stays
@@ -238,7 +217,7 @@ Notes on why this is short:
 
 ```bash
 helm install ods oci://ghcr.io/st-gr/charts/openshell-driver-kyma \
-  --version 0.1.2 \
+  --version 0.9.0 \
   --namespace "$NS" \
   -f my-values.yaml \
   --wait --timeout=300s
@@ -251,32 +230,30 @@ Verify:
 ```bash
 kubectl -n "$NS" get pods
 kubectl -n "$NS" logs deploy/ods-openshell-driver-kyma -c driver --tail=5
-# Look for: "PSA enforce=privileged confirmed" / "driver ready"
-kubectl -n "$NS" logs deploy/ods-openshell-driver-kyma -c gateway --tail=5
-# Look for: "Server listening address=0.0.0.0:8080"
-# And:      "Compute driver connected configured_driver=kyma advertised_driver=kyma in_tree=false"
+# Look for: "Starting Kyma compute driver"
+kubectl -n "$NS" logs deploy/ods-openshell-driver-kyma -c gateway --tail=50
+# Look for: "Compute driver connected"
 ```
 
 The last line proves the gateway is talking to the kyma driver over
 the shared UDS. If it's missing, the driver container failed —
 check its logs.
 
-A post-install Job also runs once and registers the Anthropic
-provider + inference route on the gateway. On success helm deletes
-the Job (hook delete-policy), so its absence is the normal outcome —
-confirm via events, or via the CLI in step 5:
+A post-install Job also runs once. It imports the provider profile
+the chart rendered and creates the Anthropic provider from it on the
+gateway (`ods-anthropic`, named `<release>-<type>`). On success helm
+deletes the Job (hook delete-policy), so its absence is the normal
+outcome — confirm via events, or via the CLI in step 5:
 
 ```bash
 kubectl -n "$NS" get events --sort-by=lastTimestamp | grep inference-provider-hook
 # Look for: "Completed   job/ods-openshell-driver-kyma-inference-provider-hook"
 ```
 
-If the install instead timed out waiting on the hook, the most common
-cause is a wrong `inferenceProvider.baseUrl` that the gateway can't
-validate against — see the [troubleshooting appendix in
-`getting-started.md`](getting-started.md#troubleshooting). The failed
-Job sticks around in that case, so `kubectl -n "$NS" logs
-job/ods-openshell-driver-kyma-inference-provider-hook` shows why.
+If the install instead timed out waiting on the hook, the failed
+Job sticks around, so `kubectl -n "$NS" logs
+job/ods-openshell-driver-kyma-inference-provider-hook` shows why; see the
+[troubleshooting section in `getting-started.md`](getting-started.md#troubleshooting).
 
 ## 4. Install the openshell CLI
 
@@ -284,22 +261,17 @@ See [`install-cli.md`](install-cli.md) for the full matrix. For a
 quick smoke test on Linux (or WSL2):
 
 ```bash
-VERSION=v0.0.91
+VERSION=v0.1.2
 curl -fsSL "https://github.com/NVIDIA/OpenShell/releases/download/${VERSION}/openshell-x86_64-unknown-linux-musl.tar.gz" \
   | tar -xz -C /usr/local/bin
 openshell --version
 ```
 
-On macOS: `brew install astral-sh/uv/uv && uv tool install -U openshell`.
-
-**Keep the CLI and the gateway on the same version.** This tutorial
-pins the gateway to the `0.0.91` digest via the chart default (see
-`values.yaml`), so install the matching `v0.0.91` CLI. The gRPC
-contract does drift between releases: a newer CLI against an older
-gateway can fail on individual commands whose response shape changed
-(we hit exactly this with `inference get` on a `0.0.91` CLI talking to
-a `0.0.73` gateway — sandbox and provider commands kept working, but
-that one broke). If you bump one, bump the other.
+**Keep the CLI and the gateway on the same version.** The chart pins
+the gateway to the upstream `v0.1.2` digest (see `values.yaml`), so install
+the matching `v0.1.2` CLI. The gRPC contract does drift between releases: a
+newer CLI against an older gateway can fail on individual commands whose
+response shape changed. If you bump one, bump the other.
 
 ## 5. Reach the gateway + verify
 
@@ -321,168 +293,106 @@ to end.
 
 ## 6. Run Claude in a sandbox
 
+> **Verified on v0.9.0:** `claude -p "reply with ok"` answered `ok` through
+> the provider on a Kyma cluster; see "Versions" at the end for what CI covers.
+
 The sandbox image `ghcr.io/st-gr/sandbox-claude:latest` bundles Node 22
-and the `claude` CLI. The policy below locks agent egress to
-`inference.local:443` only, so the agent's outbound goes exclusively
-through the supervisor's L7 router — the router strips the agent's
-placeholder credentials and injects the real ones from the gateway
-bundle. For what each policy section means and how to iterate on one,
-see NVIDIA's
-[Customize Sandbox Policies](https://docs.nvidia.com/openshell/sandboxes/policies)
-and the
-[Policy Schema Reference](https://docs.nvidia.com/openshell/reference/policy-schema).
+and the `claude` CLI. You attach the provider from step 3 with
+`--provider`: that gives the sandbox the placeholder key and the network
+rule that admits `api.anthropic.com:443`. For what a sandbox
+policy is and how to iterate on one, see NVIDIA's
+[Policies](https://docs.nvidia.com/openshell/how-it-works/policies/overview)
+and
+[Policy schema](https://docs.nvidia.com/openshell/how-it-works/policies/schema).
 
 Create the sandbox:
 
 ```bash
-# A format-valid placeholder is enough. The supervisor's L7 router
-# strips it and injects the real API key from the gateway bundle.
-export ANTHROPIC_API_KEY=sk-ant-placeholder000000000000000000000000000000000000000000000000
-
-cat > claude-policy.yaml <<'YAML'
-version: 1
-filesystem_policy:
-  include_workdir: true
-  read_only:  ["/usr","/lib","/lib64","/proc","/etc","/opt","/home","/etc/openshell-tls"]
-  read_write: ["/sandbox","/tmp"]
-landlock:
-  compatibility: best_effort
-process:
-  run_as_user: sandbox
-  run_as_group: sandbox
-network_policies:
-  claude:
-    name: claude
-    endpoints:
-      - { host: inference.local, port: 443 }
-    binaries:
-      - { path: /usr/bin/claude }
-      - { path: /usr/bin/node }
-YAML
+openshell provider list        # shows ods-anthropic, created by the chart's Job
 
 openshell sandbox create \
   --name hello \
+  --provider ods-anthropic \
   --from ghcr.io/st-gr/sandbox-claude:latest \
-  --provider claude-code \
-  --auto-providers \
-  --policy ./claude-policy.yaml
+  --detach \
+  -- sleep infinity
 
-# sandbox create returns before the pod is Ready. Wait explicitly.
-until openshell sandbox list 2>/dev/null | grep -q "hello.*Ready"; do
-  sleep 1
-done
-openshell sandbox list
+openshell sandbox list         # hello ... Ready
 ```
 
-### 6a. Confirm the inference path first
+`--detach` makes the command return once the gateway reports the sandbox
+`Ready`. Every sandbox gets `ANTHROPIC_BASE_URL` and `ANTHROPIC_MODEL` from the
+driver; only one created with `--provider` is given the key.
 
-Before involving Claude Code, prove the gateway actually serves
-inference — this one probe separates "the pipeline works" from "some
-claude-code quirk." The sandbox image ships `node` (no `curl`), so use
-it to POST directly to `inference.local`. Keep it on one line — the
-exec endpoint rejects multi-line command arguments:
+### 6a. Confirm the provider is attached
 
 ```bash
-openshell sandbox exec --name hello -- node -e 'const https=require("https");const b=JSON.stringify({model:"claude-opus-4-7",max_tokens:16,messages:[{role:"user",content:"Reply OK"}]});const r=https.request("https://inference.local/v1/messages",{method:"POST",rejectUnauthorized:false,headers:{"content-type":"application/json","anthropic-version":"2023-06-01","x-api-key":"sk-ant-placeholder000000000000000000000000000000000000000000000000"}},s=>{let d="";s.on("data",c=>d+=c);s.on("end",()=>{console.log("HTTP",s.statusCode);console.log(d.slice(0,300))})});r.on("error",e=>console.log("ERR",e.message));r.write(b);r.end();'
+openshell sandbox provider list hello
+openshell sandbox exec --name hello -- env | grep ANTHROPIC
 ```
 
-- **`HTTP 200` with `{"content":[{"text":"OK",…}]}`** — the whole path
-  works (supervisor strips the placeholder `x-api-key`, injects the
-  real one, forwards to your upstream). Proceed to 6b.
-- **`HTTP 503 {"error":"inference service unavailable"}`** — the
-  supervisor cannot reach your configured upstream. This is almost
-  always the `gatewayUpstreamEgress` gap from step 2: an in-cluster or
-  non-`:443` endpoint blocked by the sandbox NetworkPolicy. Enable the
-  egress carve-out and re-test.
-- **`HTTP 503 {"error":"cluster inference is not configured"}`** —
-  different failure, despite the same status code. The sandbox predates
-  a gateway upgrade. Gateway `0.0.91` introduced a **workspace**
-  concept; sandboxes created by an older gateway have an empty
-  workspace and cannot resolve an inference bundle, so every request
-  fails even though `openshell inference get` shows a healthy route.
-  Confirm it in the gateway log:
-
-  ```bash
-  kubectl -n "$NS" logs deploy/ods-openshell-driver-kyma -c gateway \
-    | grep -i "non-empty workspace"
-  # WARN Store reconciliation sweep failed
-  #      error=encode error: sandbox requires a non-empty workspace
-  ```
-
-  **Fix: recreate the sandbox.** There is no in-place migration — delete
-  it and create it again with the same flags, and it picks up the
-  default workspace. Do this for every sandbox that outlived a gateway
-  upgrade.
-- **`openshell sandbox list` no longer shows a sandbox you know exists**
-  — you upgraded the driver past the v0.0.91 contract sync. That same
-  workspace concept also changed how the driver names Kubernetes
-  objects: a Sandbox CR is now `{workspace}--{name}` (e.g.
-  `default--hello`) so two sandboxes with the same name in different
-  workspaces cannot collide. Sandboxes created by an older driver have
-  unqualified names and are no longer found. Check for the missing `--`:
-
-  ```bash
-  kubectl -n "$NS" get sandbox
-  # NAME    AGE     <- no `--` means it predates the rename
-  # hello   3d
-  ```
-
-  **Fix: delete and recreate.** Do the delete *before* upgrading the
-  driver if you can — afterwards `openshell sandbox delete` can't find
-  it either, and you have to remove the CR directly:
-
-  ```bash
-  kubectl -n "$NS" delete sandbox hello
-  openshell sandbox create --name hello ...
-  ```
-- **`ERR` / TLS errors** — `inference.local` isn't resolving or the
-  sandbox policy denies it; check the sandbox `--policy` allows
-  `inference.local:443`.
-
-The `x-api-key` here is a format-valid placeholder; the L7 router
-replaces it. `rejectUnauthorized:false` skips verifying the supervisor's
-per-SNI cert, which is fine for this probe.
+Expect `ANTHROPIC_BASE_URL=https://api.anthropic.com`,
+`ANTHROPIC_MODEL=claude-opus-4-7` and an `ANTHROPIC_API_KEY` that is a
+placeholder, not your key. Leave the placeholder in place: do not export a key
+of your own. The supervisor replaces it only in requests to the profile's host
+and port.
 
 ### 6b. Run Claude Code
 
-Once 6a returns `200`, Claude Code works both interactively and in
-print mode. **Call the wrapper `claude`** (installed at
-`/usr/local/bin/claude`) — it sets `HOME`, seeds onboarding state,
-points `ANTHROPIC_BASE_URL` at `inference.local`, and unsets the
-supervisor's placeholder `ANTHROPIC_API_KEY` so Claude uses the managed
-key and never reaches for `api.anthropic.com`. **Do not re-export
-`ANTHROPIC_API_KEY` yourself** — that forces claude-code into an auth
-pre-flight against `api.anthropic.com`, which the sandbox policy blocks.
+**Call the real binary, `/usr/bin/claude`,** so the step also works with
+`sandbox-claude` images built before v0.9.0, whose `claude` wrapper unset
+`ANTHROPIC_API_KEY` (the supervisor substitutes the real key only when the
+client sends its placeholder). Images built from v0.9.0 keep it, and plain
+`claude` works. Set `HOME` to a writable path; `/sandbox` is the sandbox's
+workspace.
 
 Non-interactive (print mode):
 
 ```bash
-openshell sandbox exec --name hello -- claude -p --model claude-opus-4-7 "Reply with exactly OK"
+openshell sandbox exec --name hello -- sh -c '
+  export HOME=/sandbox
+  /usr/bin/claude -p --bare --allow-dangerously-skip-permissions "Reply with exactly OK"'
 ```
 
-Expected output: `OK`.
+If the flow works, this prints `OK`. `ANTHROPIC_MODEL` should already name the model; if you pass
+`--model`, it must be one your endpoint serves.
 
 Interactive TUI (allocates a PTY automatically when your terminal is
 interactive):
 
 ```bash
-openshell sandbox exec --name hello -- claude --model claude-opus-4-7
+openshell sandbox exec --name hello -- sh -c 'HOME=/sandbox exec /usr/bin/claude'
 ```
 
-Type a prompt, watch it stream back through `inference.local`, exit
-with `/quit`.
+If Claude fails, the cause is usually one of these:
 
-If Claude answers with `authentication_error`, your Secret's `api-key`
-value is wrong — recreate it with the correct key and roll the gateway
-pod so it re-reads the DB. If you see `model_not_found`, `--model`
-doesn't match `inferenceProvider.modelId` in your values overlay.
+- **`authentication_error`** — the Secret's `api-key` value is wrong. Recreate
+  the Secret with the correct key and run `helm upgrade` with the same values
+  file: the post-install Job runs again and updates the provider's key.
+  Start a new process in the sandbox afterwards; a running process keeps the
+  environment it started with.
+- **`403` with `credential_endpoint_mismatch`** — the request went to a host
+  or port other than the profile's endpoint, so the supervisor did not
+  substitute the key. Check that `ANTHROPIC_BASE_URL` in the sandbox equals
+  `inferenceProvider.baseUrl`, and that nothing overrides it.
+- **The request is denied or times out** — the calling process is not one of
+  `inferenceProvider.binaries` (claude-code runs under `node`; add the
+  interpreter of any other SDK), or the sandbox was created without
+  `--provider`. Add the binary, `helm upgrade`, and create a new sandbox.
+- **`model_not_found`** — the model does not match one your endpoint
+  serves; check `inferenceProvider.modelId` and any `--model` you passed.
+- **`openshell sandbox create` says the provider or its profile is missing**
+  — the gateway lost them (a restart with `gateway.dbPersistence.enabled`
+  off). Run `helm upgrade` to re-run the Job, or enable persistence.
 
 > **Why `claude -p` might appear to hang.** In print mode claude-code
 > buffers all output until completion, so if the underlying inference
-> call fails (e.g. the 503 above), you see silence rather than an
-> error. If `claude -p` hangs, run the 6a probe — a `503` there is the
-> real cause, not claude-code. `--output-format stream-json --verbose`
-> also surfaces the buffered error.
+> call fails, you see silence rather than an error. If `claude -p`
+> hangs, check the supervisor pod's log
+> (`kubectl -n "$NS" logs os-supervisor-<id> --all-containers`; `<id>` is
+> the lower-cased `openshell.ai/sandbox-id` label of the `hello` Sandbox CR,
+> as shown in [`getting-started.md`](getting-started.md#inspect)).
+> `--output-format stream-json --verbose` also surfaces the buffered error.
 
 For the fuller flow (uploading a file, having Claude produce a new
 file, downloading it) follow
@@ -500,15 +410,16 @@ kubectl delete namespace "$NS"              # optional; wipes the JWT + TLS Secr
 
 The kubernetes-sigs agent-sandbox controller stays installed
 cluster-wide — remove it separately with a matching
-`kubectl delete -f https://…/manifest.yaml` if you no longer need it.
+`kubectl delete -f https://…/sandbox.yaml` if you no longer need it.
 
 ## What to change if your setup is different
 
 - **Your endpoint is an Anthropic-shaped proxy inside your Kyma cluster
   (private).** Set `inferenceProvider.baseUrl` to the in-cluster URL
   (`http://gateway.your-llm-ns.svc.cluster.local:8080/anthropic` or
-  similar) and enable `gatewayUpstreamEgress`. See
-  [`getting-started.md`](getting-started.md) Appendix A "Full install".
+  similar). Nothing else is needed: the profile's endpoint follows the URL's
+  host and port. See [`getting-started.md`](getting-started.md) Appendix A
+  "Full install".
 - **You want to hit real Anthropic via SAP AI Core** (SAP service key,
   Bedrock-shaped deployments). Use
   [`walkthrough-claude-files.md`](walkthrough-claude-files.md) with its
@@ -520,33 +431,12 @@ cluster-wide — remove it separately with a matching
 - **You want to route inference through SAP Cloud Connector.** See
   [`cloud-connector-setup.md`](cloud-connector-setup.md).
 
-## Verified against
+## Versions
 
-Run end-to-end on 2026-07-02:
-
-- Kyma / Gardener (SAP BTP), 4x `cpu-worker` amd64 nodes, Kubernetes
-  v1.34.
-- Chart `openshell-driver-kyma` `0.1.2`.
-- Gateway image `ghcr.io/nvidia/openshell/gateway@sha256:92e73aca…`
-  (upstream NVIDIA `0.0.91`, containing NVIDIA/OpenShell#1703, #1704, and
-  the TUI config-key form #2224),
-  pulled via the chart's default digest pin.
-- `openshell` CLI `v0.0.91`.
-
-Verified end-to-end: install, gateway↔driver named-endpoint handshake
-(`configured_driver=kyma advertised_driver=kyma in_tree=false`),
-provider + inference route registration, sandbox create reaching
-`Ready`, a direct `node` POST to `inference.local` returning
-`HTTP 200` with a Claude reply, and `claude -p` returning `OK` through
-the wrapper.
-
-Verified against an **in-cluster** upstream (an Anthropic-shaped
-gateway on an RFC1918 ClusterIP, port 8080), which required
-`gatewayUpstreamEgress` — without it, inference returned
-`503 inference service unavailable` while the sandbox looked healthy.
-For a genuinely public `https://api.anthropic.com:443` endpoint the
-default policy suffices and no egress block is needed.
-
-If your outcome diverges from what's above, the source of truth is
-`scripts/e2e-cli.sh` — every push through CI runs the same shape
-end-to-end against a real cluster.
+This tutorial targets chart `openshell-driver-kyma` `0.9.0`, which deploys
+upstream NVIDIA OpenShell `v0.1.2`: the gateway, supervisor and sandbox
+runtime images are pinned by digest to that release, and the CLI you install
+in step 4 must be the same release. The agent-sandbox controller is v0.5.2.
+The chart's CI installs the chart against a real gateway image and follows a
+sandbox to Ready, through bootstrap and a stop/start round-trip; inference
+through a provider (step 6) is not part of that run.

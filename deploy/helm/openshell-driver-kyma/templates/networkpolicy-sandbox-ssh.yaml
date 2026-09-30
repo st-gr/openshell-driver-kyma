@@ -1,0 +1,43 @@
+{{- if and (eq .Values.driver.workspaceMode "shared") .Values.networkPolicy.enabled .Values.gateway.enabled }}
+# NetworkPolicy restricting SSH ingress on sandbox pods to the gateway pod.
+# Mirrors upstream's policy of the same name (deploy/helm/openshell/templates/
+# networkpolicy.yaml at the pinned tag, lines 4-35), which upstream renders by
+# default for the shared sandbox namespace. Sandbox pods carry
+# openshell.ai/managed-by=openshell. Only the gateway can reach their SSH port
+# (2222), which blocks lateral movement from other in-cluster workloads. Upstream
+# names its own release's gateway pod as the only peer; here the gateway is a
+# sidecar of the driver pod, so that pod is the peer, and the policy renders only
+# when gateway.enabled. With an external gateway (gateway.enabled=false, the
+# default) the gateway is not part of this release, and its own deployment owns
+# the equivalent policy, as upstream's chart does for its gateway; naming the
+# driver pod would lock the real gateway out of sandbox SSH. The policy selects
+# ingress only: upstream's own fence governs sandbox egress.
+# In managed mode the driver applies the equivalent policy to each workspace
+# namespace itself (driver.managedSshIngress). scripts/check-chart-render.sh
+# asserts this policy's exact shape and that no other chart policy selects
+# sandbox pods.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "openshell-driver-kyma.fullname" . }}-sandbox-ssh
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      openshell.ai/managed-by: openshell
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+          podSelector:
+            matchLabels:
+              {{- include "openshell-driver-kyma.selectorLabels" . | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 2222
+{{- end }}

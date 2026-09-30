@@ -12,9 +12,8 @@ support, and worked examples invoking real RPCs.
 
 ## What the server speaks
 
-Verified live against the upstream NVIDIA gateway image
-`ghcr.io/nvidia/openshell/gateway` (the image the chart runs by
-default):
+The upstream NVIDIA gateway image `ghcr.io/nvidia/openshell/gateway` (the
+image the chart runs by default) serves:
 
 | Surface | Status |
 |---|---|
@@ -34,21 +33,18 @@ probes (`/healthz`, `/readyz`) are plain HTTP/1.1 on
 ## Prerequisite: grab the proto files
 
 The gateway's `.proto` files live in NVIDIA's upstream OpenShell repo,
-not this one. Fetch the five files you need:
+not this one. Fetch the four files you need:
 
 ```bash
 mkdir -p /tmp/proto && cd /tmp/proto
-for f in datamodel.proto inference.proto sandbox.proto openshell.proto compute_driver.proto; do
-  curl -fsSL "https://raw.githubusercontent.com/NVIDIA/OpenShell/main/proto/$f" -o "$f"
+for f in datamodel.proto options.proto sandbox.proto openshell.proto; do
+  curl -fsSL "https://raw.githubusercontent.com/NVIDIA/OpenShell/v0.1.2/proto/$f" -o "$f"
 done
 ```
 
 These pin the message types you'll send and the response shapes you'll
-get back. The CLI version pin you should match is the one your gateway
-image was built against — usually equal to the openshell-cli
-`OPENSHELL_CLI_VERSION` constant in the inference-provider-hook
-template (currently `v0.0.91`). Replace `main` with `v0.0.91` above
-for an exact match.
+get back. Use the tag of the upstream release your gateway image was built
+from: the chart's `upstream.version` (`v0.1.2`).
 
 ## Reach the gateway
 
@@ -78,14 +74,12 @@ for any Linux musl shell.
 grpcurl -plaintext \
   -import-path /tmp/proto \
   -proto openshell.proto \
-  -proto inference.proto \
   ods-openshell-driver-kyma:8080 list
 ```
 
 Expected:
 
 ```
-openshell.inference.v1.Inference
 openshell.v1.OpenShell
 ```
 
@@ -121,49 +115,44 @@ grpcurl -plaintext \
 
 ### Call an RPC
 
-`ListSandboxes` (empty request):
+Workspace-scoped RPCs need a `workspace_scope`; an empty request is rejected
+with `workspace_scope is required`. `default` is the gateway's default
+workspace.
+
+`ListSandboxes`:
 
 ```bash
 grpcurl -plaintext \
   -import-path /tmp/proto -proto openshell.proto \
-  -d '{}' \
+  -d '{"workspace_scope": {"workspace": "default"}}' \
   ods-openshell-driver-kyma:8080 \
   openshell.v1.OpenShell/ListSandboxes
 ```
 
-`GetClusterInference` (returns the inference route the chart's
-post-install Job set up):
+`ListProviders` (returns the providers on the gateway, among them the one
+the chart's post-install Job created, named `<release>-<type>`):
 
 ```bash
 grpcurl -plaintext \
-  -import-path /tmp/proto -proto inference.proto \
-  -d '{}' \
+  -import-path /tmp/proto -proto openshell.proto \
+  -d '{"workspace_scope": {"workspace": "default"}}' \
   ods-openshell-driver-kyma:8080 \
-  openshell.inference.v1.Inference/GetClusterInference
+  openshell.v1.OpenShell/ListProviders
 ```
 
-Expected output:
-
-```json
-{
-  "providerName": "ods-openshell-driver-kyma-anthropic",
-  "modelId": "claude-opus-4-7",
-  "version": "1",
-  "routeName": "inference.local"
-}
-```
-
-`CreateProvider` example body (replace placeholders):
+`CreateProvider` example body (replace placeholders). `type` is the id of a
+provider profile already imported on the gateway; the chart's profile is
+`kyma-<type>` (see `inferenceProvider.profileId`):
 
 ```bash
 grpcurl -plaintext \
   -import-path /tmp/proto -proto openshell.proto \
   -d '{
-    "metadata": { "name": "my-provider" },
-    "spec": {
-      "type": "anthropic",
-      "credential": [{"key": "ANTHROPIC_API_KEY", "value": "sk-ant-..."}],
-      "config":     [{"key": "ANTHROPIC_BASE_URL", "value": "http://gateway.your-llm-ns.svc.cluster.local:8080/anthropic"}]
+    "workspace_scope": { "workspace": "default" },
+    "provider": {
+      "metadata": { "name": "my-provider" },
+      "type": "kyma-anthropic",
+      "credentials": { "ANTHROPIC_API_KEY": "sk-ant-..." }
     }
   }' \
   ods-openshell-driver-kyma:8080 \
@@ -195,7 +184,10 @@ serialized protobuf message.
 
 The flag byte is `0x00` for a normal data frame. For an RPC with no
 request fields (e.g., `ListSandboxes`), the protobuf payload is zero
-bytes, so the body is just `00 00 00 00 00`.
+bytes, so the body is just `00 00 00 00 00`. `ListSandboxes` needs a
+`workspace_scope`, so an empty body is answered with a gRPC error
+(`workspace_scope is required`) in the trailer; the `protoc --encode` example
+below builds a valid request.
 
 ```bash
 printf '\x00\x00\x00\x00\x00' | \
@@ -211,10 +203,10 @@ data frames carrying serialized protobuf, then a trailer frame.
 Decoding requires reading the same proto file you'd hand to grpcurl.
 
 For non-empty requests you have to build the protobuf body yourself —
-`protoc --encode=…` is the conventional way:
+`protoc --encode=…` (text-format input) is the conventional way:
 
 ```bash
-echo '{"page_size": 50}' | \
+echo 'workspace_scope { workspace: "default" } page_size: 50' | \
   protoc --encode=openshell.v1.ListSandboxesRequest \
     -I /tmp/proto openshell.proto > /tmp/req.bin
 LEN=$(printf '%08x' "$(wc -c < /tmp/req.bin)")
@@ -229,39 +221,38 @@ This is fiddly. Use grpcurl unless you really can't.
 
 ## Path 3: the inference DATA path is separate
 
-The walkthrough's `claude` round-trip goes through a totally different
-endpoint:
+The walkthrough's `claude` round-trip does not go through the gateway's gRPC
+API at all:
 
 ```
-sandbox process  ─https://inference.local/v1/messages──▶  supervisor's L7 inference router
+sandbox process  ─ANTHROPIC_BASE_URL, placeholder key──▶  its supervisor pod
                                                                   │
                                                                   ▼
                                                   operator's in-cluster LLM upstream
 ```
 
-That `inference.local/v1/messages` is **not a gateway gRPC RPC**. It's
-an HTTPS endpoint the supervisor's in-process inference router
-intercepts inside the sandbox pod. From inside a sandbox you call it
-with plain HTTP/JSON (Anthropic-shape):
+Inference is an ordinary HTTP(S) request from the sandbox to the endpoint
+named in `inferenceProvider.baseUrl`. The workload pod has no network of its
+own: the request goes through its supervisor pod, which substitutes the real
+key for the placeholder the attached provider put in the sandbox's
+environment. From inside a sandbox created with `--provider`, call the
+endpoint with plain HTTP/JSON (Anthropic shape), sending the key from the
+environment:
 
 ```bash
-curl -sSi -X POST https://inference.local/v1/messages \
-  -H "x-api-key: sk-ant-placeholder000000000000000000000000000000000000000000000000" \
+curl -sSi -X POST "$ANTHROPIC_BASE_URL/v1/messages" \
+  -H "x-api-key: $ANTHROPIC_API_KEY" \
   -H "anthropic-version: 2023-06-01" \
   -H "content-type: application/json" \
-  -d '{"model":"claude-opus-4-7","max_tokens":50,"messages":[{"role":"user","content":"say hi"}]}'
+  -d "{\"model\":\"$ANTHROPIC_MODEL\",\"max_tokens\":50,\"messages\":[{\"role\":\"user\",\"content\":\"say hi\"}]}"
 ```
 
-The `x-api-key` is stripped and replaced by the supervisor; the value
-just has to look like an Anthropic key. The walkthrough at
-[`walkthrough-claude-files.md`](walkthrough-claude-files.md) walks
-through this end-to-end.
-
-The gateway's gRPC RPCs (`CreateSandbox`, `ListSandboxes`,
-`GetInferenceBundle`, etc.) are the **control plane**. The inference
-DATA plane lives entirely between the sandbox process and its
-supervisor; the gateway sees only a one-time `GetInferenceBundle` per
-sandbox at startup, never the actual inference request bytes.
+(`curl` must be in the sandbox image, and its path in
+`inferenceProvider.binaries`; the `sandbox-claude` image ships `node`, not
+`curl`.) The gateway's gRPC RPCs (`CreateSandbox`, `ListSandboxes`,
+`CreateProvider`, etc.) are the **control plane**: the gateway stores the
+provider and profile and hands the supervisor its credentials, and never sees
+the inference request bytes.
 
 ## What's NOT exposed
 

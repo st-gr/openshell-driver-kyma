@@ -14,16 +14,50 @@ who has no use for CI internals.
 | `interop-smoke` | called by `branch-checks` on every PR; manual | **no** |
 | `upstream-sync` | **Mondays 09:30 UTC**; manual | `CLAUDE_CODE_OAUTH_TOKEN` |
 
-`upstream-sync` invokes Claude **only** when the protos are behind, the
-pinned image digests are stale, or the interop smoke failed. Most weeks it
-is a green no-op costing no tokens.
+`upstream-sync` invokes Claude **only** when the upstream pin is behind the
+target release (`latest`, or the release `GATEWAY_REF` names), the pinned image
+digests (gateway, supervisor, sandbox runtime) are stale, or the interop smoke
+failed. Most weeks it is a green no-op costing no tokens.
+
+**What the smokes test.** `interop-smoke` and branch-checks' `managed-smoke`
+install the chart with its own pinned gateway, supervisor and sandbox runtime
+images and the `openshell` CLI of its `upstream.version`: the image set the
+chart ships. `scripts/check-image-digests.sh` (branch-checks'
+`upstream-parity` job) fails unless those three digests are the ones upstream
+published for `upstream.version`. So the weekly sync's own smoke re-tests the
+set `main` ships, and the pins a sync proposes are tested by its PR's
+`branch-checks` smokes (the sync job dispatches them, see below).
+
+**One release.** The driver links upstream's crates, so the crates
+(`Cargo.toml`), the chart's `upstream.version` and its three image digests are
+always one upstream release, and a sync moves all of them to one target tag.
+`GATEWAY_REF` (`.github/upstream-compat.env`) decides which release that is:
+"which upstream release the next sync moves the whole pin set (crates + images)
+to". `latest` means the newest upstream release; a `vX.Y.Z` pins it. It is
+never older than the tag `Cargo.toml` already pins, so a sync does not move
+backwards. The detect job prints it as `VENDOR_TARGET_TAG`, compares the
+crates and the chart's digests against it, and hands it to the sync job, which
+resolves the digests for that same tag.
 
 ## Situations
 
 ### Weekly PR is green
 
 Review the diff as you would any PR — pay attention to whatever upstream
-added, since that is the part Claude wrote from scratch. Merge.
+added, since that is the part Claude wrote from scratch. If it changed
+`scripts/upstream-main-rs.sha256`, check that `crates/openshell-driver-kyma/src/main.rs`
+mirrors the upstream `main()` diff that `scripts/check-upstream-args.sh`
+prints: the hash records that review. The PR was opened with `GITHUB_TOKEN`,
+so `branch-checks` does not run on it by itself: the workflow's separate
+`dispatch-checks` job dispatches it on the sync branch
+(`gh workflow run branch-checks.yml --ref <branch>`, which needs
+`actions: write` — held only by that job — and is why `branch-checks.yml` has
+`workflow_dispatch`),
+and the PR body links its runs
+(`https://github.com/st-gr/openshell-driver-kyma/actions/workflows/branch-checks.yml`,
+filtered to the branch). They report on the PR and include both smokes, which
+install the pins it proposes. If the PR body says the dispatch failed, run the
+command above yourself. Merge once they pass.
 
 Then **roll out to the cluster manually.** CI holds no cluster credentials, so
 this step is never automated:
@@ -33,10 +67,12 @@ helm -n openshell-system upgrade ods deploy/helm/openshell-driver-kyma \
   --reuse-values \
   --set image.tag=sha256:<new driver digest> \
   --set gateway.image.tag=sha256:<new gateway digest> \
-  --set driver.supervisorImage=ghcr.io/nvidia/openshell/supervisor@sha256:<new supervisor digest>
+  --set driver.supervisorImage=ghcr.io/nvidia/openshell/supervisor@sha256:<new supervisor digest> \
+  --set driver.sandboxRuntimeImage=ghcr.io/nvidia/openshell/sandbox@sha256:<new runtime digest> \
+  --set upstream.version=<new upstream tag>
 ```
 
-Pass all three explicitly. `--reuse-values` carries forward the **old chart's**
+Pass all five explicitly. `--reuse-values` carries forward the **old chart's**
 defaults, so a changed default in `values.yaml` is silently ignored — this has
 already happened once, where the driver kept injecting `supervisor:latest`
 after an upgrade that appeared to succeed.
@@ -53,19 +89,30 @@ openshell sandbox exec --name <sandbox> -- claude -p --model claude-opus-4-7 "Re
 
 The PR body's "Local gate" row tells you the gate failed (it only ever renders
 `passed` or `FAILED — see the 'Run the full gate' step`; it cannot tell you
-*why*). To find out whether Claude hit `--max-turns` mid-task or finished but
+*why*). The gate is `cargo fmt --check`, clippy with `-D warnings`,
+`cargo test --workspace`, `scripts/check-image-digests.sh` and
+`scripts/check-chart-render.sh`, in that order; the first red one stops it. To find out whether Claude hit `--max-turns` mid-task or finished but
 left the gate red, read the "Let Claude perform the sync" step's log in the
 run — a turn-cap cutoff ends abruptly mid-transcript, a completed-but-failing
 attempt runs to the end of the prompt and then the separate "Run the full
 gate" step reports the failure. Finish it by hand or close it — do not merge
 a draft.
 
-### Interop smoke red, protos unchanged
+### Interop smoke red with no upstream movement
 
-The interesting case: a behavioural break upstream with no proto diff. Decide:
+The smoke installs the pinned image set, so a red weekly smoke with nothing
+moved upstream means something around it changed (kind, the agent-sandbox
+controller, a CLI asset) or `main` broke. Read the log, fix forward.
 
-- fix forward (usually a driver change), or
-- pin `GATEWAY_REF` to the last good version to unblock PRs while you work.
+### A sync PR's smokes are red
+
+The pins the sync proposes do not work with the driver. Decide:
+
+- fix forward on the sync branch (usually a driver change), or
+- pin `GATEWAY_REF` to the last good release, so the next sync moves the whole
+  pin set (crates, `upstream.version` and all three image digests) to that
+  release instead, and close the PR. Pinned to the release `main` already
+  ships, the next sync moves nothing.
 
 **What a real incompatibility looks like** (exercised 2026-08-05 with a
 deliberately broken driver, not guessed):
@@ -93,24 +140,49 @@ Two traps this exposed:
   The gateway logs it *before* calling `GetGatewayListenerRequirements`
   (`openshell-server/src/compute/mod.rs:608` vs `:617`). A driver that breaks
   that RPC still emits the line, then kills the gateway moments later.
-- **`gateway_ref=v0.0.91` is NOT a negative test.** It passes: v0.0.97 only
-  *added* an RPC and an older gateway never calls it, so the driver is
-  genuinely backward compatible. Verified green against v0.0.91 and v0.0.99
-  alike. To exercise the failure path, break the driver on a scratch branch
-  and dispatch the smoke against that branch.
+- **An older gateway is NOT a negative test.** Pinning an older release passed:
+  v0.0.97 only *added* an RPC and an older gateway never calls it, so the
+  driver is genuinely backward compatible (verified against v0.0.91 and
+  v0.0.99 alike). To exercise the failure path, break the driver on a scratch
+  branch and dispatch the smoke against that branch.
 
-### Unrelated PRs suddenly red after an upstream release
+### An upstream release is broken
 
-Upstream is broken. Pin, and record why:
+Unrelated PRs no longer turn red when upstream ships: their smokes install
+the chart's pins. A broken release shows up on the sync PR that proposes it.
+Pinning is the remedy: it holds the release the next sync moves the whole pin
+set (crates and images) to. Pin, and record why:
 
 ```bash
 # .github/upstream-compat.env
 GATEWAY_REF=v0.0.NN   # last known good
+PIN_REASON=<what upstream broke>
+PIN_REVIEW_AFTER=<YYYY-MM-DD>
 ```
 
 Commit with a message saying what upstream broke. **Revert as soon as upstream
 is fixed** — leaving the pin in place silently reintroduces the two-month
 drift this automation exists to prevent.
+
+### `check-image-digests.sh` is red on a PR that touched no pins
+
+`scripts/check-image-digests.sh` (branch-checks' `upstream-parity` job) compares
+the chart's three digests with what `ghcr.io` serves today for the tag of
+`upstream.version`. It exits **1** with `MISMATCH` lines, or **2** when it could
+not resolve a digest at all.
+
+- **Exit 2, "could not resolve ... to a digest"**: `ghcr.io` (or the network)
+  was unavailable. Nothing in the PR is wrong; re-run the job.
+- **Exit 1, `MISMATCH`, on a PR that did not change the pins or
+  `upstream.version`**: upstream re-pushed that release's tag, so the tag now
+  points at different bytes than the chart pinned. Every open PR goes red at
+  once. Decide whether the new image is acceptable (check upstream's release
+  and the tag's provenance; do not re-pin blind: a re-pushed tag is exactly how
+  an unreviewed supervisor binary reached sandboxes before). If it is, re-pin
+  the three digests to the ones the script prints, in a small PR of their own,
+  and let its smokes pass; the weekly detect job would also flag it as "pinned
+  image digests stale" and the next sync would propose it. If it is not, raise
+  it upstream; the check stays red until the pins and the tag agree, on purpose.
 
 ### Job fails with an authentication error
 
@@ -170,23 +242,13 @@ Note the gate no longer runs when Claude fails. It used to, and it passed —
 because an untouched tree naturally passes fmt/clippy/test. That "success" said
 nothing about the sync and made this failure harder to read.
 
-### The PR pins one version but the smoke tested another
+### The PR body's smoke tested the old pins
 
-Expected, not a bug. `GATEWAY_REF=latest` resolves **at run time**, so if
-upstream ships a release between the sync producing a PR and someone merging
-it, the PR's own `branch-checks` smoke runs against the newer one.
-
-Seen 2026-08-11: PR #18 pinned v0.0.102 (the sync's own smoke validated
-v0.0.102 at 09:52), while the merge-time smoke tested v0.0.103 at 16:03.
-
-Both results are useful — the driver works with the version being pinned *and*
-the one released after. The PR body now names the version the smoke actually
-ran against, so the claim is checkable instead of implied.
-
-The failure mode to watch for: if a newly-released gateway breaks the contract,
-the merge-time smoke goes red on a PR whose *content* is fine. Read the gateway
-tag in the smoke log before assuming the PR is at fault; pinning `GATEWAY_REF`
-is the remedy while upstream is broken.
+Expected, not a bug. The sync job's smoke runs before the sync and installs
+the pins on `main`; the PR body says so (upstream `<tag>` in its "Interop
+smoke" row is the release those pins belong to). The pins the PR proposes are
+tested by the `branch-checks` run the sync job dispatches on its branch, which
+the PR body links; a PR opened with `GITHUB_TOKEN` triggers no checks by itself.
 
 ### Job reports an infrastructure flake
 
@@ -210,78 +272,50 @@ for two months.
 
 Maintainer notes for `driver.workspaceMode`. `Shared` is the default and what
 the live cluster runs; `Managed` and `Operator` are documented here for
-whoever flips them.
+whoever flips them. Upstream's driver implements all three modes. The chart
+only maps values to upstream's options and refuses at render time what
+upstream would refuse at startup (`templates/_workspace-guards.tpl`).
 
-### Operator mode prerequisite
+### Operator mode prerequisites
 
-Upstream's Operator mode only checks the allowlist; it does not bootstrap.
-This driver pins `openshell-sandbox` into every sandbox pod spec, so an
-operator-managed namespace lacking that ServiceAccount produces pods that
-never start — and `verify_psa_label` hard-fails without the PSA label.
+Upstream's Operator mode uses the namespaces you select with
+`driver.operatorNamespaceLabel` (a namespace label) or
+`driver.operatorNamespaceConfigMap` (a file of names mounted from a
+ConfigMap), exactly one of the two. It does not bootstrap them: the
+namespace's owner does, with upstream's `openshell-workspace` chart or an
+equivalent (the sandbox ServiceAccount, upstream's NetworkPolicy, and a Role
+granting the driver Secret `create` and `delete` for the bootstrap and
+image-pull Secrets). This chart does not ship that Role, and the driver's
+ClusterRole grants Operator mode `namespaces` `get`, `list` and `watch`, never
+`create` or `delete`, and no Secret rights: that is deliberate, because the
+platform team owns the namespace's contents.
 
-Before adding a namespace to `driver.operatorNamespaceAllowlist`, the
-platform team must prepare it:
+Pod Security labels on those namespaces are the owner's too: the Kyma layer
+labels only the namespaces the driver creates in Managed mode
+(`driver.workspacePsaLevel`). `privileged` is what CI runs at.
 
-```bash
-kubectl label namespace tenant-a pod-security.kubernetes.io/enforce=privileged
-kubectl -n tenant-a create serviceaccount openshell-sandbox
-kubectl -n tenant-a patch serviceaccount openshell-sandbox \
-  -p '{"automountServiceAccountToken": false}'
-```
+### `driver_config` volumes go through upstream's resource admission
 
-(`tenant-a` above is an example namespace name — substitute the real one.)
-
-This is deliberate. Granting the driver cluster-wide `serviceaccounts: create`
-would contradict the entire premise of a mode where the platform team owns
-namespace contents; the ClusterRole for `operator` grants `namespaces: ["get"]`
-only, never `create` or `delete`.
-
-The allowlist is read **once at startup**. Adding a namespace requires a
-driver restart, not just a `helm upgrade --reuse-values` — and, as noted
-above, `--reuse-values` carries forward the *old* chart's defaults, so pass
-`driver.operatorNamespaceAllowlist` explicitly on every upgrade rather than
-relying on it being reused.
-
-### `driver_config` volumes are gated off by default
-
-`driver_config.volumes[].persistent_volume_claim.claim_name`
-(`DriverSandboxTemplate.driver_config`, proto field 12) is **not**
-sandboxed against other sandboxes' PVCs. `driver_config.rs`'s validation
-constrains it to a DNS-1123 subdomain and nothing more — no ownership
-check, no allowlist.
-
-The concrete exposure in `Shared` mode (the default): every sandbox's
-workspace PVC lives in one namespace under the predictable name
-`{workspace}--{name}-workspace`. A template author who can set
-`driver_config` can name another sandbox's workspace PVC directly in
-`driver_config.volumes[].persistent_volume_claim.claim_name` and mount it
-read-write via `driver_config.containers.agent.volume_mounts`, reading or
-overwriting that sandbox's workspace. `Managed` and `Operator` modes don't
-remove the underlying gap — the claim name is still unchecked — but they
-at least put each workspace in its own namespace, which is what Kubernetes
-RBAC actually scopes.
-
-Upstream's own Kubernetes driver has the identical validation shape (same
-DNS-1123-subdomain-only check, no ownership check either), so this is
-inherited contract behavior, not a defect introduced by this branch. It is
-still worth flagging here: `driver_config` support is new on this branch,
-and `Shared`'s single-namespace default makes the exposure easier to reach
-than it may be for upstream's own callers.
-
-**Gated.** `--driver-config-allow-volumes` / `driver.driverConfigAllowVolumes`
-defaults to `false`. With it off, `driver_config.rs` rejects any
-`driver_config` that declares `volumes[]` or
-`containers.agent.volume_mounts[]` — with `DriverError::PermissionDenied`
-naming the flag, distinct from the `InvalidArgument` a malformed
-`driver_config` gets — from both `CreateSandbox` and
-`ValidateSandboxCreate`. The gate covers only those two fields;
-`driver_config.pod.*` (node selector, runtime class, tolerations, priority
-class) and `containers.agent.resources` are not the exposure and keep
-working regardless. Set the flag to `true` to allow `driver_config`
-volumes on a driver instance — there is still no ownership check behind
-it, so only enable it where every `driver_config` author is already
-trusted with arbitrary PVC access in the target namespace (e.g. a single
-trusted gateway, not multi-tenant callers).
+`driver_config.volumes[].persistent_volume_claim` (in
+`DriverSandboxTemplate.driver_config`) is admitted by upstream's resource
+admission, not by a chart flag. `driver.allowDriverConfig` (default `false`,
+as upstream's chart) is the one switch for whether callers may pass
+`driver_config` at all, volumes included, and `driver.resourceAdmission`
+(`enabled`, default `true`, and `requiredLabels`, default upstream's built-in
+set) is the approval policy for what they attach. The chart renders both, from
+one helper, into the gateway's `[openshell.drivers.kyma]` tables
+(`allow_driver_config` and `resource_admission`) and into the driver's
+`OPENSHELL_DRIVER_ADMISSION_CONFIG_JSON`, as upstream's chart renders them for
+its own driver; `scripts/check-chart-render.sh` check 2 asserts the two sides
+agree. With the defaults, the operator must label each PVC
+`openshell.ai/sandbox-attachable: "true"` and
+`openshell.ai/sandbox-attachable-workspace: "<workspace>"` before a sandbox
+of that workspace can mount it, and labels on the sandbox itself approve
+nothing. The driver reads the PVC's metadata for that check, which is why its
+Role and ClusterRole grant `persistentvolumeclaims` `get` when
+`allowDriverConfig` is true. This replaces the 0.8.0 chart-level gate on
+`driver_config` volumes, under which the claim name was checked only as a
+DNS-1123 subdomain.
 
 ### Switching workspace modes is breaking
 
@@ -399,7 +433,9 @@ them afterwards. Do not flip the mode on a cluster with live sandboxes.
   but nothing structurally stops the `Bash` tool from running `git commit` or
   `git push` itself: `actions/checkout` leaves credentials for `GITHUB_TOKEN`
   configured in git, and the job's own token has write scope. This is a
-  prompt-level constraint, not a permissions-level one.
+  prompt-level constraint, not a permissions-level one. `actions: write` (to
+  dispatch `branch-checks` on the sync branch) is deliberately NOT on this job:
+  it lives on the separate `dispatch-checks` job, which runs no model.
 
   That the workflow's own steps only ever commit and push to
   `upstream-sync/<tag>-<run-id>` is a property of the code as written, **not
