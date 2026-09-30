@@ -4,6 +4,49 @@ All notable changes to openshell-driver-kyma are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- **Sandbox exposure goes through an Istio VirtualService on Kyma's gateway.**
+  With `driver.enableApirule`, the driver now applies a `networking.istio.io/v1`
+  VirtualService `<cr>` where 0.9.0 applied an APIRule: host
+  `<workspace>--<name>.<clusterDomain>`, bound to `driver.istioGateway`
+  (default `kyma-system/kyma-gateway`), routing every path and method to port
+  8080 of the Service `<cr>-svc`. Traffic goes from the Istio ingress gateway
+  to the Service and on to the workload pod, which needs no Istio sidecar;
+  the missing sidecar is what kept 0.9.0's APIRule in `Error` (see 0.9.0
+  "Known limitations"). The Service, the NetworkPolicy that admits only the
+  ingress gateway, the owner references, the labels and the `ExposureFailed`
+  Warning Event are unchanged, and so is the security trade-off: the route is
+  unauthenticated, so enabling exposure publishes the sandbox's port 8080.
+  (The APIRule allowed only `GET` and `POST`; the VirtualService does not
+  filter methods.) `driver.enableApirule` keeps its name and switches exposure
+  of either kind on. Exposure runs when a sandbox is created, so a sandbox
+  created by 0.9.0 keeps its APIRule until it is deleted; recreate it to get a
+  VirtualService.
+- **RBAC for exposure follows the kind.** With `driver.enableApirule`, the
+  driver is granted `create` and `patch` on `networking.istio.io`
+  `virtualservices` instead of `gateway.kyma-project.io` `apirules` (in the
+  shared-mode Role, cluster-wide in managed and operator mode). With
+  `driver.exposureKind: apirule` it gets the `apirules` rule instead; never
+  both.
+
+### Added
+
+- **`driver.exposureKind`** (`--kyma-exposure-kind`,
+  `OPENSHELL_KYMA_EXPOSURE_KIND`): `virtualservice` (default) or `apirule`.
+  `apirule` keeps 0.9.0's APIRule v2 exposure for a future mesh-compatible
+  setup; on Kyma with upstream v0.1.2 it still does not carry traffic (Kyma
+  sets the rule to `Error` and the ingress gateway answers 403).
+- **`driver.istioGateway`** (`--kyma-istio-gateway`,
+  `OPENSHELL_KYMA_ISTIO_GATEWAY`): the Istio Gateway the VirtualService binds
+  to, `<namespace>/<name>`, default `kyma-system/kyma-gateway`, whose servers
+  accept `*.<cluster-domain>`.
+- The chart refuses to render, naming the value, a `driver.exposureKind` other
+  than `virtualservice` or `apirule`, or a `driver.istioGateway` that is not
+  two DNS-1123 labels joined by one `/`; the driver refuses both at startup.
+
 ## [0.9.0] — 2026-09-29
 
 **UPGRADE NOTE: delete all existing sandboxes before upgrading to this
@@ -328,7 +371,8 @@ upgrade. To upgrade from 0.8.0 with only this section in front of you:
   gives the workload pod no egress, so an injected sidecar could not reach
   istiod. `driver.enableApirule` creates the Service, NetworkPolicy and APIRule
   as documented, but the ingress gateway answers 403 until a mesh-compatible
-  design lands. Treat it as experimental.
+  design lands. Treat it as experimental. Since then exposure defaults to an
+  Istio VirtualService, which needs no sidecar; see "Unreleased".
 - **Claude Code's real executable must be in `inferenceProvider.binaries`.**
   The npm launcher `/usr/bin/claude` execs into
   `/usr/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe`, which is

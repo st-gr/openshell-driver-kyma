@@ -60,6 +60,8 @@ driver:
   disableClaudeTelemetry: true
   enableApirule: true
   clusterDomain: example.org
+  exposureKind: apirule
+  istioGateway: istio-system/other-gateway
   ingressNamespace: example-ingress
   workspacePsaLevel: baseline
   healthPort: 9191

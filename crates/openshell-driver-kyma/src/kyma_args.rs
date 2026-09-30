@@ -6,6 +6,7 @@
 use openshell_core::sandbox_env::LOG_LEVEL;
 
 use crate::enrich::{EnrichConfig, CLAUDE_TELEMETRY_ENV};
+use crate::exposure::{ExposureKind, KYMA_GATEWAY};
 
 /// Environment names with this prefix belong to OpenShell; upstream drops them
 /// from the sandbox environment except [`LOG_LEVEL`].
@@ -32,16 +33,32 @@ pub struct KymaArgs {
     #[arg(long, env = "OPENSHELL_KYMA_SANDBOX_ENV", value_delimiter = ',')]
     pub kyma_sandbox_env: Vec<String>,
 
-    /// Expose each sandbox's port 8080 through a Kyma APIRule.
+    /// Expose each sandbox's port 8080 through the object --kyma-exposure-kind
+    /// names (by default an Istio VirtualService).
     #[arg(long, env = "OPENSHELL_KYMA_ENABLE_APIRULE")]
     pub kyma_enable_apirule: bool,
 
-    /// Domain for APIRule hosts (`<workspace>--<name>.<domain>`). Required with
-    /// --kyma-enable-apirule.
+    /// What routes an exposed sandbox's host: `virtualservice`, an Istio
+    /// VirtualService on --kyma-istio-gateway that needs no sidecar on the
+    /// sandbox, or `apirule`, a Kyma APIRule v2, which Kyma refuses for a
+    /// sandbox without an Istio sidecar.
+    #[arg(
+        long,
+        env = "OPENSHELL_KYMA_EXPOSURE_KIND",
+        default_value = "virtualservice"
+    )]
+    pub kyma_exposure_kind: String,
+
+    /// The Istio Gateway the VirtualService binds to, `<namespace>/<name>`.
+    #[arg(long, env = "OPENSHELL_KYMA_ISTIO_GATEWAY", default_value = KYMA_GATEWAY)]
+    pub kyma_istio_gateway: String,
+
+    /// Domain for exposure hosts (`<workspace>--<name>.<domain>`). Required
+    /// with --kyma-enable-apirule.
     #[arg(long, env = "OPENSHELL_KYMA_CLUSTER_DOMAIN", default_value = "")]
     pub kyma_cluster_domain: String,
 
-    /// Namespace of the Istio ingress gateway that APIRule traffic arrives from.
+    /// Namespace of the Istio ingress gateway that exposure traffic arrives from.
     #[arg(
         long,
         env = "OPENSHELL_KYMA_INGRESS_NAMESPACE",
@@ -67,6 +84,14 @@ impl KymaArgs {
             return Err(
                 "--kyma-cluster-domain is required when --kyma-enable-apirule is set".into(),
             );
+        }
+        self.exposure_kind()?;
+        if !is_namespaced_name(&self.kyma_istio_gateway) {
+            return Err(format!(
+                "--kyma-istio-gateway `{}` must be <namespace>/<name>, two DNS-1123 labels \
+                 (e.g. {KYMA_GATEWAY})",
+                self.kyma_istio_gateway
+            ));
         }
         if !matches!(
             self.kyma_workspace_psa_level.as_str(),
@@ -100,6 +125,18 @@ impl KymaArgs {
         }
     }
 
+    /// `--kyma-exposure-kind` as an [`ExposureKind`]. The one parser behind
+    /// [`KymaArgs::validate`] and the exposure configuration.
+    pub fn exposure_kind(&self) -> Result<ExposureKind, String> {
+        match self.kyma_exposure_kind.as_str() {
+            "virtualservice" => Ok(ExposureKind::VirtualService),
+            "apirule" => Ok(ExposureKind::ApiRule),
+            other => Err(format!(
+                "--kyma-exposure-kind `{other}` is not an exposure kind (virtualservice or apirule)"
+            )),
+        }
+    }
+
     /// The `--kyma-sandbox-env` entries as pairs. The one parser behind both
     /// [`KymaArgs::validate`] and [`KymaArgs::enrich_config`], so they cannot
     /// disagree about what a valid entry is.
@@ -125,6 +162,26 @@ impl KymaArgs {
             })
             .collect()
     }
+}
+
+/// `<namespace>/<name>`: exactly two DNS-1123 labels around one `/`.
+fn is_namespaced_name(value: &str) -> bool {
+    value
+        .split_once('/')
+        .is_some_and(|(namespace, name)| is_dns1123_label(namespace) && is_dns1123_label(name))
+}
+
+/// At most 63 lowercase letters, digits and `-`, starting and ending with a
+/// letter or digit.
+fn is_dns1123_label(label: &str) -> bool {
+    let bytes = label.as_bytes();
+    let edge = |b: Option<&u8>| b.is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
+    bytes.len() <= 63
+        && edge(bytes.first())
+        && edge(bytes.last())
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
 }
 
 #[cfg(test)]
@@ -205,6 +262,8 @@ mod tests {
         let args = parse(&[]);
         assert!(!args.kyma_istio_inject_sandboxes);
         assert!(!args.kyma_enable_apirule);
+        assert_eq!(args.exposure_kind(), Ok(ExposureKind::VirtualService));
+        assert_eq!(args.kyma_istio_gateway, "kyma-system/kyma-gateway");
         assert_eq!(args.kyma_ingress_namespace, "istio-system");
         assert_eq!(args.kyma_workspace_psa_level, "");
         assert_eq!(args.kyma_health_port, 9090);
@@ -316,6 +375,68 @@ mod tests {
         ])
         .validate()
         .is_ok());
+    }
+
+    #[test]
+    fn exposure_kind_is_virtualservice_or_apirule() {
+        let args = parse(&["--kyma-exposure-kind", "apirule"]);
+        assert!(args.validate().is_ok());
+        assert_eq!(args.exposure_kind(), Ok(ExposureKind::ApiRule));
+        let args = parse(&["--kyma-exposure-kind", "virtualservice"]);
+        assert!(args.validate().is_ok());
+        assert_eq!(args.exposure_kind(), Ok(ExposureKind::VirtualService));
+        for bad in ["APIRule", "ingress", ""] {
+            let err = parse(&["--kyma-exposure-kind", bad])
+                .validate()
+                .unwrap_err();
+            assert!(err.contains("--kyma-exposure-kind"), "{err}");
+            assert!(
+                err.contains(&format!("`{bad}`")),
+                "must name the value: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn istio_gateway_is_namespace_slash_name() {
+        let longest = "a".repeat(63);
+        let longest = format!("{longest}/{longest}");
+        for ok in [
+            "kyma-system/kyma-gateway",
+            "istio-system/other-gateway",
+            "a/b",
+            "ns1/0gw",
+            longest.as_str(),
+        ] {
+            assert!(
+                parse(&["--kyma-istio-gateway", ok]).validate().is_ok(),
+                "{ok}"
+            );
+        }
+        let too_long = format!("ns/{}", "a".repeat(64));
+        for bad in [
+            "",
+            "kyma-gateway",
+            "/kyma-gateway",
+            "kyma-system/",
+            "a/b/c",
+            "ns//gw",
+            "Kyma-System/kyma-gateway",
+            "ns/-gw",
+            "ns/gw-",
+            "ns/gw_1",
+            "ns/gw.example",
+            too_long.as_str(),
+        ] {
+            let err = parse(&["--kyma-istio-gateway", bad])
+                .validate()
+                .unwrap_err();
+            assert!(err.contains("--kyma-istio-gateway"), "{err}");
+            assert!(
+                err.contains(&format!("`{bad}`")),
+                "must name the value: {err}"
+            );
+        }
     }
 
     #[test]

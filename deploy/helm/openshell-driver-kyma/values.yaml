@@ -77,11 +77,24 @@ driver:
   # it from its disableTls; without the gateway it is left to upstream.
   gatewayEndpoint: ""
   istioInjectSandboxes: false
-  # Expose each sandbox's port 8080 through a Kyma APIRule, on a host under
-  # clusterDomain. Requires clusterDomain; the chart refuses to render without
-  # it.
+  # Expose each sandbox's port 8080 on the host
+  # <workspace>--<name>.<clusterDomain>, unauthenticated. By default through an
+  # Istio VirtualService on Kyma's gateway (exposureKind, istioGateway), which
+  # needs no sidecar on the sandbox. Requires clusterDomain; the chart refuses
+  # to render without it. The name is historical: the switch covers either
+  # exposureKind.
   enableApirule: false
   clusterDomain: ""
+  # What routes the host to the sandbox: `virtualservice` (default) or
+  # `apirule`. `apirule` is kept for a future mesh-compatible setup; on Kyma
+  # today it does not carry traffic, because Kyma's APIRule v2 refuses a
+  # sandbox without an Istio sidecar and upstream's workload fence leaves a
+  # sidecar no way to reach istiod. The driver's RBAC covers only the kind
+  # chosen.
+  exposureKind: virtualservice
+  # The Istio Gateway the VirtualService binds to, <namespace>/<name>. Kyma's
+  # gateway serves *.<cluster-domain>.
+  istioGateway: kyma-system/kyma-gateway
   # When true, the driver adds `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`
   # to every sandbox's environment (an explicit sandboxEnv entry for the same
   # key wins). Pair with an in-cluster LLM gateway that
@@ -241,7 +254,8 @@ driver:
   # than OPENSHELL_LOG_LEVEL (upstream strips them); the chart refuses to render
   # either.
   sandboxEnv: []
-  # Namespace of the Istio ingress gateway APIRule traffic arrives from.
+  # Namespace of the Istio ingress gateway exposure traffic arrives from; the
+  # exposure NetworkPolicy admits only its `istio: ingressgateway` pods.
   ingressNamespace: istio-system
   # Pod Security level for namespaces the driver creates in managed mode
   # (privileged, baseline, restricted, or empty for none). Default chosen on

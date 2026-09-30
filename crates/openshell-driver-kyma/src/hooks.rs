@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The production [`KymaHooks`]: request enrichment, APIRule exposure, and Managed-mode namespace labelling.
+//! The production [`KymaHooks`]: request enrichment, sandbox exposure (VirtualService or APIRule), and Managed-mode namespace labelling.
 //!
 //! Namespace labelling runs on `EnsureWorkspace` and also before
 //! `CreateSandbox`: upstream's gateway calls `EnsureWorkspace` only in
@@ -94,7 +94,7 @@ impl KymaHooks for KymaHookSet {
 mod tests {
     use super::*;
     use crate::enrich::{ISTIO_INJECT_LABEL, KAGENTI_TYPE_LABEL, KAGENTI_TYPE_VALUE};
-    use crate::exposure::ExposureConfig;
+    use crate::exposure::{ExposureConfig, ExposureKind, KYMA_GATEWAY};
     use crate::test_support::{hanging_client, mock_client};
     use openshell_driver_kubernetes::{KubernetesComputeConfig, WorkspaceMode};
     use std::time::Duration;
@@ -125,6 +125,8 @@ mod tests {
         let exposure = ExposureReconciler::new(
             client,
             ExposureConfig {
+                kind: ExposureKind::VirtualService,
+                istio_gateway: KYMA_GATEWAY.to_string(),
                 cluster_domain: "example.org".to_string(),
                 ingress_namespace: "istio-system".to_string(),
                 search_namespace: Some("sandboxes".to_string()),
@@ -153,6 +155,8 @@ mod tests {
         let exposure = ExposureReconciler::new(
             hanging_client(),
             ExposureConfig {
+                kind: ExposureKind::VirtualService,
+                istio_gateway: KYMA_GATEWAY.to_string(),
                 cluster_domain: "example.org".to_string(),
                 ingress_namespace: "istio-system".to_string(),
                 search_namespace: Some("sandboxes".to_string()),

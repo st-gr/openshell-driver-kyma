@@ -223,7 +223,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use crate::enrich::EnrichConfig;
-    use crate::exposure::{ExposureConfig, ExposureReconciler};
+    use crate::exposure::{ExposureConfig, ExposureKind, ExposureReconciler, KYMA_GATEWAY};
     use crate::hooks::KymaHookSet;
     use crate::namespaces::NamespaceLabeler;
     use crate::test_support::{mock_client, Recorded};
@@ -867,7 +867,7 @@ mod tests {
                 });
                 return (200, namespace.to_string());
             }
-            if line.contains("/apirules/") {
+            if line.contains("/virtualservices/") {
                 let _ = exposed_tx.send(());
             }
             (
@@ -884,6 +884,8 @@ mod tests {
         let exposure = ExposureReconciler::new(
             client.clone(),
             ExposureConfig {
+                kind: ExposureKind::VirtualService,
+                istio_gateway: KYMA_GATEWAY.to_string(),
                 cluster_domain: "example.org".to_string(),
                 ingress_namespace: "istio-system".to_string(),
                 search_namespace: None,
@@ -920,7 +922,7 @@ mod tests {
                 "GET /apis/agents.x-k8s.io/v1beta1/sandboxes",
                 "PATCH /api/v1/namespaces/openshell-gw-team-a/services/sb-svc",
                 "PATCH /apis/networking.k8s.io/v1/namespaces/openshell-gw-team-a/networkpolicies/sb-expose",
-                "PATCH /apis/gateway.kyma-project.io/v2/namespaces/openshell-gw-team-a/apirules/sb",
+                "PATCH /apis/networking.istio.io/v1/namespaces/openshell-gw-team-a/virtualservices/sb",
             ]
         );
     }

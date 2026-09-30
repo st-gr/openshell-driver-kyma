@@ -1,15 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Hook 2: expose a sandbox's port 8080 through a Kyma APIRule.
+//! Hook 2: expose a sandbox's port 8080 through an Istio VirtualService on
+//! Kyma's gateway (the default) or a Kyma APIRule.
 //!
 //! Upstream fences sandbox workloads (`openshell-sandbox-workloads`): they
 //! accept ingress only from supervisor pods on the boundary port and have no
 //! egress. Direct HTTPS exposure is therefore an explicit, opt-in exception to
 //! upstream's isolation — a Service selecting the workload by upstream's
 //! boundary labels, a NetworkPolicy admitting only the Istio ingress gateway on
-//! 8080, and the APIRule. All three are owner-referenced to the Sandbox CR, so
-//! Kubernetes deletes them with it, and labelled as ours so they never look
-//! like upstream's objects.
+//! 8080, and the route: a VirtualService or an APIRule. All three are
+//! owner-referenced to the Sandbox CR, so Kubernetes deletes them with it, and
+//! labelled as ours so they never look like upstream's objects.
+//!
+//! The VirtualService is the default because it needs no sidecar on the
+//! workload: the ingress gateway routes straight to the Service. Kyma's APIRule
+//! v2 refuses a rule whose target pod has no injected sidecar, and upstream's
+//! workload fence gives the workload no egress, so a sidecar could not reach
+//! istiod.
 
 use std::future::Future;
 use std::time::Duration;
@@ -69,8 +76,22 @@ impl SandboxOwner {
     }
 }
 
+/// What routes a sandbox's host to its Service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExposureKind {
+    /// An Istio `VirtualService` bound to [`ExposureConfig::istio_gateway`]:
+    /// the ingress gateway routes to the Service, no sidecar on the workload.
+    VirtualService,
+    /// A Kyma `APIRule` v2 on [`KYMA_GATEWAY`]. Kyma sets it to `Error` for a
+    /// workload without an injected sidecar, which is every workload today.
+    ApiRule,
+}
+
 #[derive(Debug, Clone)]
 pub struct ExposureConfig {
+    pub kind: ExposureKind,
+    /// The Istio Gateway a VirtualService binds to, `<namespace>/<name>`.
+    pub istio_gateway: String,
     pub cluster_domain: String,
     pub ingress_namespace: String,
     /// `Some(namespace)` in Shared mode, where the driver's RBAC is namespaced;
@@ -129,7 +150,7 @@ pub fn policy_name(kube_name: &str) -> String {
     format!("{kube_name}-expose")
 }
 
-/// The APIRule host's first label: `{workspace}--{name}` in every workspace
+/// The exposure host's first label: `{workspace}--{name}` in every workspace
 /// mode. That is upstream's Shared-mode resource name (so it equals the CR
 /// name there), but in Managed and Operator mode the CR is named just `{name}`
 /// in a per-workspace namespace, and two workspaces may both have a `dev`.
@@ -210,6 +231,39 @@ pub fn apirule_manifest(
             "hosts": [format!("{host_label}.{cluster_domain}")],
             "service": {"name": service_name(&owner.name), "port": EXPOSE_PORT},
             "rules": [{"path": "/*", "methods": ["GET", "POST"], "noAuth": true}],
+        },
+    })
+}
+
+/// The Istio route for the exposure: `host_label.cluster_domain` on
+/// `istio_gateway`, every path and method, to port 8080 of `service_name` in
+/// `namespace`. Named after the CR, as the APIRule would be.
+pub fn virtualservice_manifest(
+    owner: &SandboxOwner,
+    sandbox_id: &str,
+    host_label: &str,
+    cluster_domain: &str,
+    istio_gateway: &str,
+    service_name: &str,
+    namespace: &str,
+) -> Value {
+    json!({
+        "apiVersion": "networking.istio.io/v1",
+        "kind": "VirtualService",
+        "metadata": metadata(owner, &owner.name, sandbox_id),
+        "spec": {
+            // Workspace-qualified, as the APIRule host: the CR name alone would
+            // collide across workspaces in Managed and Operator mode.
+            "hosts": [format!("{host_label}.{cluster_domain}")],
+            "gateways": [istio_gateway],
+            "http": [{
+                "route": [{
+                    "destination": {
+                        "host": format!("{service_name}.{namespace}.svc.cluster.local"),
+                        "port": {"number": EXPOSE_PORT},
+                    },
+                }],
+            }],
         },
     })
 }
@@ -375,14 +429,41 @@ impl ExposureReconciler {
             "applying the ingress NetworkPolicy",
         )
         .await?;
-        self.apply(
-            resource("gateway.kyma-project.io", "v2", "APIRule", "apirules"),
-            owner,
-            &owner.name,
-            apirule_manifest(owner, sandbox_id, host_label, &self.config.cluster_domain),
-            "applying the APIRule",
-        )
-        .await
+        match self.config.kind {
+            ExposureKind::VirtualService => {
+                self.apply(
+                    resource(
+                        "networking.istio.io",
+                        "v1",
+                        "VirtualService",
+                        "virtualservices",
+                    ),
+                    owner,
+                    &owner.name,
+                    virtualservice_manifest(
+                        owner,
+                        sandbox_id,
+                        host_label,
+                        &self.config.cluster_domain,
+                        &self.config.istio_gateway,
+                        &service_name(&owner.name),
+                        &owner.namespace,
+                    ),
+                    "applying the VirtualService",
+                )
+                .await
+            }
+            ExposureKind::ApiRule => {
+                self.apply(
+                    resource("gateway.kyma-project.io", "v2", "APIRule", "apirules"),
+                    owner,
+                    &owner.name,
+                    apirule_manifest(owner, sandbox_id, host_label, &self.config.cluster_domain),
+                    "applying the APIRule",
+                )
+                .await
+            }
+        }
     }
 
     async fn apply(
@@ -469,8 +550,11 @@ mod tests {
         }
     }
 
+    /// The default kind, a VirtualService.
     fn config(search_namespace: Option<&str>) -> ExposureConfig {
         ExposureConfig {
+            kind: ExposureKind::VirtualService,
+            istio_gateway: KYMA_GATEWAY.to_string(),
             cluster_domain: "example.org".to_string(),
             ingress_namespace: "istio-system".to_string(),
             search_namespace: search_namespace.map(str::to_string),
@@ -478,14 +562,22 @@ mod tests {
         }
     }
 
+    fn apirule_config(search_namespace: Option<&str>) -> ExposureConfig {
+        ExposureConfig {
+            kind: ExposureKind::ApiRule,
+            ..config(search_namespace)
+        }
+    }
+
     enum Scenario {
         Ok,
-        ApiRuleRejected,
+        /// The route (the VirtualService or the APIRule) is rejected.
+        RouteRejected,
         NoSandbox,
         /// The cluster serves the Sandbox CRD at `v1alpha1` only.
         OnlyV1Alpha1,
-        /// `OnlyV1Alpha1`, and the APIRule is rejected.
-        OnlyV1Alpha1ApiRuleRejected,
+        /// `OnlyV1Alpha1`, and the route is rejected.
+        OnlyV1Alpha1RouteRejected,
         /// Neither Sandbox API version is served.
         NoSandboxApi,
         /// Two Sandbox CRs carry the sandbox id.
@@ -516,7 +608,7 @@ mod tests {
             if line.starts_with("GET ") && line.ends_with("/sandboxes") {
                 let only_v1alpha1 = matches!(
                     scenario,
-                    Scenario::OnlyV1Alpha1 | Scenario::OnlyV1Alpha1ApiRuleRejected
+                    Scenario::OnlyV1Alpha1 | Scenario::OnlyV1Alpha1RouteRejected
                 );
                 if matches!(scenario, Scenario::NoSandboxApi)
                     || (only_v1alpha1 && line.contains("/v1beta1/"))
@@ -552,8 +644,8 @@ mod tests {
             }
             if matches!(
                 scenario,
-                Scenario::ApiRuleRejected | Scenario::OnlyV1Alpha1ApiRuleRejected
-            ) && line.contains("/apirules/")
+                Scenario::RouteRejected | Scenario::OnlyV1Alpha1RouteRejected
+            ) && (line.contains("/apirules/") || line.contains("/virtualservices/"))
             {
                 return (404, not_found());
             }
@@ -607,6 +699,15 @@ mod tests {
             service_manifest(&owner, "sb-id"),
             ingress_policy_manifest(&owner, "sb-id", "istio-system"),
             apirule_manifest(&owner, "sb-id", "ws--sb", "example.org"),
+            virtualservice_manifest(
+                &owner,
+                "sb-id",
+                "ws--sb",
+                "example.org",
+                KYMA_GATEWAY,
+                "ws--sb-svc",
+                "sandboxes",
+            ),
         ] {
             let labels = &manifest["metadata"]["labels"];
             assert_eq!(labels[MANAGED_BY_LABEL], MANAGED_BY_VALUE);
@@ -662,14 +763,71 @@ mod tests {
     }
 
     #[test]
+    fn virtualservice_routes_the_host_through_the_gateway_to_the_service() {
+        let service = service_name(&owner().name);
+        let route = virtualservice_manifest(
+            &owner(),
+            "sb-id",
+            "ws--sb",
+            "example.org",
+            "istio-system/other-gateway",
+            &service,
+            "sandboxes",
+        );
+        assert_eq!(route["apiVersion"], "networking.istio.io/v1");
+        assert_eq!(route["kind"], "VirtualService");
+        assert_eq!(route["metadata"]["name"], "ws--sb");
+        assert_eq!(route["spec"]["hosts"], json!(["ws--sb.example.org"]));
+        assert_eq!(
+            route["spec"]["gateways"],
+            json!(["istio-system/other-gateway"])
+        );
+        let http = route["spec"]["http"].as_array().expect("an http list");
+        assert_eq!(http.len(), 1, "{http:?}");
+        let routes = http[0]["route"].as_array().expect("a route list");
+        assert_eq!(routes.len(), 1, "{routes:?}");
+        let destination = &routes[0]["destination"];
+        assert_eq!(
+            destination["host"],
+            "ws--sb-svc.sandboxes.svc.cluster.local"
+        );
+        assert_eq!(destination["port"]["number"], EXPOSE_PORT);
+    }
+
+    #[test]
     fn host_label_is_workspace_and_name_in_every_mode() {
         assert_eq!(host_label("a", "dev"), "a--dev");
     }
 
     #[tokio::test]
-    async fn reconcile_applies_service_policy_and_apirule_in_order() {
+    async fn reconcile_applies_service_policy_and_virtualservice_in_order() {
         let (client, seen) = mock_client(respond(Scenario::Ok));
         ExposureReconciler::new(client, config(Some("sandboxes")))
+            .reconcile(&sandbox("ws", "sb"))
+            .await
+            .expect("exposure succeeds");
+        assert_eq!(
+            lines(&seen),
+            vec![
+                "GET /apis/agents.x-k8s.io/v1beta1/namespaces/sandboxes/sandboxes",
+                "PATCH /api/v1/namespaces/sandboxes/services/ws--sb-svc",
+                "PATCH /apis/networking.k8s.io/v1/namespaces/sandboxes/networkpolicies/ws--sb-expose",
+                "PATCH /apis/networking.istio.io/v1/namespaces/sandboxes/virtualservices/ws--sb",
+            ]
+        );
+        let recorded = seen.lock().unwrap().clone();
+        let route = json_body(recorded.last().expect("the VirtualService was applied"));
+        assert_eq!(route["spec"]["gateways"], json!([KYMA_GATEWAY]));
+        assert_eq!(
+            route["spec"]["http"][0]["route"][0]["destination"]["host"],
+            "ws--sb-svc.sandboxes.svc.cluster.local"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_applies_service_policy_and_apirule_in_order() {
+        let (client, seen) = mock_client(respond(Scenario::Ok));
+        ExposureReconciler::new(client, apirule_config(Some("sandboxes")))
             .reconcile(&sandbox("ws", "sb"))
             .await
             .expect("exposure succeeds");
@@ -744,19 +902,21 @@ mod tests {
         );
     }
 
-    // Each call is bounded: an APIRule apply that never returns fails the
+    // Each call is bounded: a VirtualService apply that never returns fails the
     // exposure, and the CR, already known, still gets its Warning Event.
     #[tokio::test]
     async fn a_hanging_apply_times_out_and_still_records_the_event() {
-        let (client, seen) =
-            mock_client_hanging_on(|line| line.contains("/apirules/"), respond(Scenario::Ok));
+        let (client, seen) = mock_client_hanging_on(
+            |line| line.contains("/virtualservices/"),
+            respond(Scenario::Ok),
+        );
         let err = ExposureReconciler::new(client, config(Some("sandboxes")))
             .with_api_timeout(Duration::from_millis(50))
             .reconcile(&sandbox("ws", "sb"))
             .await
             .unwrap_err();
         assert!(
-            matches!(&err, ExposureError::Timeout { what, .. } if what.contains("APIRule")),
+            matches!(&err, ExposureError::Timeout { what, .. } if what.contains("VirtualService")),
             "{err}"
         );
         let recorded = seen.lock().unwrap().clone();
@@ -808,17 +968,17 @@ mod tests {
                 .await
                 .expect("exposure succeeds");
             let recorded = seen.lock().unwrap().clone();
-            let rule = recorded
+            let route = recorded
                 .iter()
-                .find(|r| r.line.contains("/apirules/"))
-                .expect("an APIRule was applied");
+                .find(|r| r.line.contains("/virtualservices/"))
+                .expect("a VirtualService was applied");
             assert_eq!(
-                rule.line,
+                route.line,
                 format!(
-                    "PATCH /apis/gateway.kyma-project.io/v2/namespaces/{workspace}/apirules/dev"
+                    "PATCH /apis/networking.istio.io/v1/namespaces/{workspace}/virtualservices/dev"
                 )
             );
-            hosts.push(json_body(rule)["spec"]["hosts"][0].clone());
+            hosts.push(json_body(route)["spec"]["hosts"][0].clone());
         }
         assert_eq!(
             hosts,
@@ -828,9 +988,35 @@ mod tests {
 
     // Review Focus 3.
     #[tokio::test]
-    async fn apirule_failure_emits_a_warning_event() {
-        let (client, seen) = mock_client(respond(Scenario::ApiRuleRejected));
+    async fn virtualservice_failure_emits_a_warning_event_naming_it() {
+        let (client, seen) = mock_client(respond(Scenario::RouteRejected));
         let err = ExposureReconciler::new(client, config(Some("sandboxes")))
+            .reconcile(&sandbox("ws", "sb"))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("VirtualService"), "{err}");
+        let recorded = seen.lock().unwrap().clone();
+        let event = json_body(
+            recorded
+                .iter()
+                .find(|r| r.line == "POST /api/v1/namespaces/sandboxes/events")
+                .expect("a Warning Event was recorded"),
+        );
+        assert_eq!(event["type"], "Warning");
+        assert_eq!(event["reason"], "ExposureFailed");
+        assert_eq!(event["involvedObject"]["uid"], "cr-uid");
+        assert!(
+            event["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("VirtualService")),
+            "{event}"
+        );
+    }
+
+    #[tokio::test]
+    async fn apirule_failure_emits_a_warning_event() {
+        let (client, seen) = mock_client(respond(Scenario::RouteRejected));
+        let err = ExposureReconciler::new(client, apirule_config(Some("sandboxes")))
             .reconcile(&sandbox("ws", "sb"))
             .await
             .unwrap_err();
@@ -852,7 +1038,7 @@ mod tests {
     // `kubectl describe` shows an Event's age from these.
     #[tokio::test]
     async fn failure_event_carries_timestamps_and_a_count() {
-        let (client, seen) = mock_client(respond(Scenario::ApiRuleRejected));
+        let (client, seen) = mock_client(respond(Scenario::RouteRejected));
         ExposureReconciler::new(client, config(Some("sandboxes")))
             .reconcile(&sandbox("ws", "sb"))
             .await
@@ -932,7 +1118,7 @@ mod tests {
                 "GET /apis/agents.x-k8s.io/v1alpha1/namespaces/sandboxes/sandboxes",
                 "PATCH /api/v1/namespaces/sandboxes/services/ws--sb-svc",
                 "PATCH /apis/networking.k8s.io/v1/namespaces/sandboxes/networkpolicies/ws--sb-expose",
-                "PATCH /apis/gateway.kyma-project.io/v2/namespaces/sandboxes/apirules/ws--sb",
+                "PATCH /apis/networking.istio.io/v1/namespaces/sandboxes/virtualservices/ws--sb",
             ]
         );
         let recorded = seen.lock().unwrap().clone();
@@ -953,7 +1139,7 @@ mod tests {
 
     #[tokio::test]
     async fn fallback_failure_event_names_the_v1alpha1_sandbox() {
-        let (client, seen) = mock_client(respond(Scenario::OnlyV1Alpha1ApiRuleRejected));
+        let (client, seen) = mock_client(respond(Scenario::OnlyV1Alpha1RouteRejected));
         ExposureReconciler::new(client, config(Some("sandboxes")))
             .reconcile(&sandbox("ws", "sb"))
             .await

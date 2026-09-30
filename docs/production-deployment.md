@@ -275,43 +275,67 @@ kubectl -n openshell-system get apirule
   `networkPolicy.enabled` the chart lets the driver pod reach that endpoint's
   port (80 when the URL names none), on any address.
 
-## Exposing a sandbox through an APIRule (opt-in exception)
+## Exposing a sandbox's port 8080 (opt-in exception)
 
 `driver.enableApirule` (default `false`) publishes each sandbox's port 8080 on
-a Kyma hostname. It is an explicit exception to upstream's isolation, so read
-what it does before turning it on.
+a Kyma hostname, by default through an Istio VirtualService on Kyma's gateway.
+It is an explicit exception to upstream's isolation, so read what it does
+before turning it on. (The value's name predates the VirtualService; it
+switches exposure of either `driver.exposureKind` on.)
 
 ```yaml
 driver:
   enableApirule: true
-  clusterDomain: "<cluster-domain>"     # required with enableApirule
-  ingressNamespace: istio-system        # where the Istio ingress gateway runs
+  clusterDomain: "<cluster-domain>"         # required with enableApirule
+  exposureKind: virtualservice              # default; or apirule, see below
+  istioGateway: kyma-system/kyma-gateway    # default; <namespace>/<name>
+  ingressNamespace: istio-system            # where the Istio ingress gateway runs
 ```
 
-For each sandbox the driver then creates three objects, all
-owner-referenced to the sandbox's `Sandbox` CR (so they are deleted with it)
-and labelled `app.kubernetes.io/managed-by: openshell-driver-kyma`:
+For each sandbox the driver then creates three objects when the sandbox is
+created, all owner-referenced to the sandbox's `Sandbox` CR (so they are
+deleted with it) and labelled `app.kubernetes.io/managed-by:
+openshell-driver-kyma`:
 
 - a Service `<cr>-svc` on port 8080, selecting the sandbox's workload pod;
 - a NetworkPolicy `<cr>-expose` that admits only the Istio ingress gateway
   (pods labelled `istio: ingressgateway` in `driver.ingressNamespace`) to TCP
   8080 of that workload pod;
-- an APIRule `<cr>`, host `<workspace>--<name>.<cluster-domain>` in every
-  workspace mode, through `kyma-system/kyma-gateway`, path `/*`, methods
-  `GET` and `POST`, with `noAuth`.
+- a VirtualService `<cr>` (`networking.istio.io/v1`), host
+  `<workspace>--<name>.<cluster-domain>` in every workspace mode, bound to
+  `driver.istioGateway`, with one HTTP route to
+  `<cr>-svc.<namespace>.svc.cluster.local` port 8080, for every path and
+  method.
+
+Traffic goes from the Istio ingress gateway to the Service and on to the
+workload pod on 8080. The gateway routes to the Service itself, so the
+workload pod needs no Istio sidecar, which it could not use anyway: upstream's
+fence gives it no egress, so a sidecar could not reach istiod. Kyma's gateway
+`kyma-system/kyma-gateway` serves `*.<cluster-domain>`; a gateway of your own
+must serve the sandbox hosts.
+
+`driver.exposureKind: apirule` creates an APIRule `<cr>`
+(`gateway.kyma-project.io/v2`) instead of the VirtualService, as 0.9.0 did:
+same host, through `kyma-system/kyma-gateway`, path `/*`, methods `GET` and
+`POST`, with `noAuth`. It is kept for a future mesh-compatible setup and does
+not carry traffic on Kyma today: APIRule v2 sets a rule whose target pod has
+no injected Istio sidecar to `Error`, and the ingress gateway answers 403.
 
 Upstream's workload pods otherwise accept ingress only from their own
 supervisor. Exposure lets traffic from the internet reach whatever listens on
-port 8080 in the sandbox, without passing the supervisor, and the APIRule has
+port 8080 in the sandbox, without passing the supervisor, and the route has
 no authentication. Enable it only for sandboxes that are meant to serve
 requests, and put authentication in the service itself. A failure to create
 the objects never fails the sandbox: it is logged and recorded as a
 `Warning` Event with reason `ExposureFailed` on the `Sandbox`
 (`kubectl describe sandbox <cr>`). The driver's RBAC gains the matching
-Service, NetworkPolicy, APIRule and Event rights only when the option is on.
-In managed and operator mode those rights are cluster-wide, because sandboxes
-live in many namespaces: the driver may then create and patch APIRules, and
-patch Services and NetworkPolicies, in every namespace.
+rights only when the option is on: `patch` on Services and NetworkPolicies,
+`create` on Events, and `create` and `patch` on `networking.istio.io`
+`virtualservices`, or on `gateway.kyma-project.io` `apirules` with
+`exposureKind: apirule`, never both. In managed and operator mode those rights
+are cluster-wide, because sandboxes live in many namespaces: the driver may
+then create and patch VirtualServices (or APIRules), and patch Services and
+NetworkPolicies, in every namespace.
 This is separate from `gatewayApirule`, which publishes the gateway, with
 OIDC, and is documented above.
 

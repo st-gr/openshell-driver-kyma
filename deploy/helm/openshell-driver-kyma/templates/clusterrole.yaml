@@ -93,17 +93,23 @@ rules:
   {{- end }}
   {{- end }}
   {{- if and (ne $mode "shared") .Values.driver.enableApirule }}
-  # Kyma layer: APIRule exposure in whichever namespace a sandbox lives, as in
-  # role.yaml.
+  # Kyma layer: sandbox exposure in whichever namespace a sandbox lives, as in
+  # role.yaml: the route of driver.exposureKind only.
   - apiGroups: [""]
     resources: ["services"]
     verbs: ["patch"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
     verbs: ["patch"]
+  {{- if eq (toString .Values.driver.exposureKind) "apirule" }}
   - apiGroups: ["gateway.kyma-project.io"]
     resources: ["apirules"]
     verbs: ["create", "patch"]
+  {{- else }}
+  - apiGroups: ["networking.istio.io"]
+    resources: ["virtualservices"]
+    verbs: ["create", "patch"]
+  {{- end }}
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create"]

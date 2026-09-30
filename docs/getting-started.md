@@ -352,7 +352,7 @@ The Job is idempotent (re-runs cleanly on `helm upgrade`). The chart
 never sees the API key — it's mounted into the Job pod from your Secret
 via `secretKeyRef`.
 
-## Appendix B: public exposure via Kyma APIRule
+## Appendix B: public exposure of the gateway and of sandboxes
 
 For exposing the gateway outside the cluster (so the `openshell` CLI
 runs on a developer laptop, not via port-forward), set
@@ -360,6 +360,48 @@ runs on a developer laptop, not via port-forward), set
 chart refuses to render an APIRule for an unauthenticated gateway. See
 [`production-deployment.md`](production-deployment.md) for the full
 setup.
+
+A sandbox's own port 8080 is published separately, by the driver, with
+`driver.enableApirule` (the name predates the VirtualService; it switches
+exposure of either `driver.exposureKind` on):
+
+```yaml
+driver:
+  enableApirule: true
+  clusterDomain: "<cluster-domain>"          # required: your Kyma cluster's domain
+  # The defaults:
+  # exposureKind: virtualservice
+  # istioGateway: kyma-system/kyma-gateway
+```
+
+For each new sandbox the driver creates, next to its `Sandbox` CR `<cr>` and
+owned by it:
+
+- a Service `<cr>-svc` on port 8080, selecting the sandbox's workload pod;
+- a NetworkPolicy `<cr>-expose` that admits only the Istio ingress gateway
+  (`istio: ingressgateway` pods in `driver.ingressNamespace`) to port 8080;
+- an Istio VirtualService `<cr>` for the host
+  `<workspace>--<name>.<cluster-domain>`, bound to `driver.istioGateway`,
+  routing every path to the Service.
+
+Traffic goes from the ingress gateway to the Service and on to the workload
+pod on 8080; the workload pod needs no Istio sidecar. The route is
+unauthenticated: anyone who knows the host reaches whatever listens on port
+8080 in the sandbox, without passing its supervisor. Enable it only for
+sandboxes meant to serve requests. With it on, the driver's RBAC gains
+`create` and `patch` on `networking.istio.io` `virtualservices`, `patch` on
+Services and NetworkPolicies, and `create` on Events. Check the objects with:
+
+```bash
+kubectl -n "$NS" get virtualservice,service,networkpolicy \
+  -l app.kubernetes.io/managed-by=openshell-driver-kyma
+```
+
+A failure is recorded as a `Warning` Event with reason `ExposureFailed` on
+the Sandbox (`kubectl -n "$NS" describe sandbox <cr>`); the sandbox itself is
+unaffected. [`production-deployment.md`](production-deployment.md) has the
+details, including `driver.exposureKind: apirule`, which does not carry
+traffic on Kyma today.
 
 ## Troubleshooting
 

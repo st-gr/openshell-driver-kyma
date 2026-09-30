@@ -169,6 +169,10 @@ scripts/check-chart-render.sh fails CI when an upstream option is missing here.
 - name: OPENSHELL_KYMA_CLUSTER_DOMAIN
   value: {{ required "driver.clusterDomain is required when driver.enableApirule is true" $d.clusterDomain | quote }}
 {{- end }}
+- name: OPENSHELL_KYMA_EXPOSURE_KIND
+  value: {{ $d.exposureKind | quote }}
+- name: OPENSHELL_KYMA_ISTIO_GATEWAY
+  value: {{ $d.istioGateway | quote }}
 - name: OPENSHELL_KYMA_INGRESS_NAMESPACE
   value: {{ $d.ingressNamespace | quote }}
 {{- with $d.workspacePsaLevel }}
@@ -275,6 +279,12 @@ strips those from the sandbox environment).
 Pre-flight guard for driver values that are not workspace or sandbox-env
 settings, called from deployment.yaml beside the other guards.
 
+driver.exposureKind and driver.istioGateway are checked as the driver's
+startup validation checks them (kyma_args.rs), whether or not exposure is
+enabled, because the driver validates them either way: the kind is
+virtualservice or apirule, and the gateway is <namespace>/<name>, two DNS-1123
+labels.
+
 driver.allowDriverConfig and driver.resourceAdmission.enabled render as bare
 TOML values in the gateway's config and as JSON values in the driver's
 admission policy. Given the string "false", the TOML still reads as the boolean
@@ -285,6 +295,14 @@ while admission is enabled, as upstream refuses it at startup
 (ResourceAdmissionConfig::validate, src/resource_admission.rs:135-140).
 */}}
 {{- define "openshell-driver-kyma.driverValueGuards" -}}
+{{- $kind := toString .Values.driver.exposureKind -}}
+{{- if not (has $kind (list "virtualservice" "apirule")) -}}
+{{- fail (printf "driver.exposureKind must be virtualservice or apirule, got %q." $kind) -}}
+{{- end -}}
+{{- $istioGateway := toString .Values.driver.istioGateway -}}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?/[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$" $istioGateway) -}}
+{{- fail (printf "driver.istioGateway %q must be <namespace>/<name>, two DNS-1123 labels (e.g. kyma-system/kyma-gateway): the Istio Gateway the exposure VirtualService binds to." $istioGateway) -}}
+{{- end -}}
 {{- $sock := toString .Values.driver.socket -}}
 {{- $parts := splitList "/" (trimPrefix "/" $sock) -}}
 {{- if or (not (hasPrefix "/" $sock)) (hasSuffix "/" $sock) (lt (len $parts) 4) (has "" $parts) -}}

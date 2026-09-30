@@ -50,11 +50,14 @@ reasoning behind defaulting injection off for sandboxes.
 | Cluster domain | Often `*.<cluster-name>.<base>` | `*.<cluster-id>.kyma.ondemand.com`, set via `--kyma-cluster-domain` (`driver.clusterDomain`, required with exposure) |
 
 Each exposed sandbox gets a Service, a NetworkPolicy admitting only the Istio
-ingress gateway on port 8080, and an APIRule at
-`<workspace>--<name>.<cluster-domain>`. That is an explicit exception to
-upstream's isolation; see [`production-deployment.md`](production-deployment.md).
-When `--kyma-enable-apirule` is off, no `apirules.gateway.kyma-project.io`
-RBAC is granted to the driver's ServiceAccount. The driver runs cleanly
+ingress gateway on port 8080, and an Istio VirtualService on Kyma's gateway
+(an APIRule with `--kyma-exposure-kind=apirule`, which Kyma refuses for a
+workload without a sidecar) at `<workspace>--<name>.<cluster-domain>`. That is
+an explicit exception to upstream's isolation; see
+[`production-deployment.md`](production-deployment.md).
+When `--kyma-enable-apirule` is off, no `virtualservices.networking.istio.io`
+or `apirules.gateway.kyma-project.io` RBAC is granted to the driver's
+ServiceAccount. The driver runs cleanly
 in clusters that don't have the Kyma API Gateway module installed.
 
 ## Compute / GPU

@@ -107,10 +107,15 @@ async fn main() -> Result<()> {
     let config = compute_config(upstream, selector);
     // The Kyma layer's own client; upstream's driver builds its own internally.
     let hook_client = kube::Client::try_default().await.into_diagnostic()?;
+    let exposure_kind = kyma
+        .exposure_kind()
+        .map_err(|err| miette::miette!("{err}"))?;
     let exposure = kyma.kyma_enable_apirule.then(|| {
         ExposureReconciler::new(
             hook_client.clone(),
             ExposureConfig {
+                kind: exposure_kind,
+                istio_gateway: kyma.kyma_istio_gateway.clone(),
                 cluster_domain: kyma.kyma_cluster_domain.clone(),
                 ingress_namespace: kyma.kyma_ingress_namespace.clone(),
                 search_namespace: (!config.is_multi_namespace()).then(|| config.namespace.clone()),

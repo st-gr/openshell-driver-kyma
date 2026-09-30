@@ -11,15 +11,16 @@
 #      and the driver's gateway id equals the gateway's;
 #   3. the driver container takes no command-line args, and removed values are
 #      gone from values.yaml;
-#   3b-3h. values the driver or upstream would refuse at startup fail at render
+#   3b-3j. values the driver or upstream would refuse at startup fail at render
 #      time instead, naming the value, and the values they accept still render:
 #      3b driver.sandboxEnv entries, 3c the managed-mode gateway id, 3d the
 #      operator-mode namespace selectors, 3e managed SSH ingress, 3f the sandbox
 #      UID/GID, 3g driver.allowDriverConfig and driver.resourceAdmission (types, and
-#      no empty label set while admission is enabled); and 3h
+#      no empty label set while admission is enabled); 3h
 #      gateway settings that cannot work: the in-pod gateway without the Service
 #      sandboxes dial or without sandbox-JWT keys, and the provider hook without
 #      the gateway's Service or against an OIDC or TLS gateway it cannot reach;
+#      and 3j the exposure kind and the Istio Gateway its VirtualService binds to;
 #   4. the chart's NetworkPolicies: exactly one selects OpenShell sandbox pods, the
 #      mirror of upstream's SSH-ingress restriction, present in shared mode with the
 #      in-pod gateway only; in managed mode the driver applies it instead, so the
@@ -191,6 +192,17 @@ try bad-3h-gateway-no-jwt 'gateway.sandboxJwt.enabled' t --set gateway.sandboxJw
 try good-3h-gateway-endpoint '' t --set gatewayService.enabled=false \
 	--set driver.gatewayEndpoint=http://gateway.example:8080
 
+# 3j. The driver validates the exposure kind (virtualservice or apirule) and the Istio
+# Gateway (<namespace>/<name>, two DNS-1123 labels) at startup, exposure on or off.
+try bad-3j-kind 'driver.exposureKind must be virtualservice or apirule, got "ingress"' t \
+	--set driver.exposureKind=ingress
+try bad-3j-gateway-no-namespace 'driver.istioGateway "kyma-gateway"' t --set driver.istioGateway=kyma-gateway
+try bad-3j-gateway-three-parts 'driver.istioGateway "a/b/c"' t --set driver.istioGateway=a/b/c
+try bad-3j-gateway-not-a-label 'driver.istioGateway "Kyma-System/kyma-gateway"' t \
+	--set driver.istioGateway=Kyma-System/kyma-gateway
+try good-3j-exposure '' t --set driver.enableApirule=true --set driver.clusterDomain=example.org \
+	--set driver.exposureKind=apirule --set driver.istioGateway=istio-system/other-gateway
+
 # 7 and 7b. An inference provider. Every value goes in explicitly and as the last
 # word on its key: helm applies --set after --set-json, so an override of a --set
 # value with --set-json would be ignored. baseUrl and modelId reach the sandboxes'
@@ -258,9 +270,13 @@ try good-7-binaries '' t "${inference_common[@]}" --set "inferenceProvider.baseU
 
 # 4 and 5. Renders for the NetworkPolicy and RBAC checks. Named rbac-*, so check 2's
 # render-*.yaml glob skips them, and check 4's r*.yaml glob takes them.
-# Exposure on, in shared, managed (which also labels namespaces) and operator mode.
+# Exposure on (the renders are named after driver.enableApirule), in shared, managed
+# (which also labels namespaces) and operator mode, through the default VirtualService;
+# and in shared mode through an APIRule (the all-options render covers managed mode).
 render_as t --set driver.enableApirule=true --set driver.clusterDomain=example.org \
 	>"$WORK/rbac-apirule.yaml"
+render_as t --set driver.enableApirule=true --set driver.clusterDomain=example.org \
+	--set driver.exposureKind=apirule >"$WORK/rbac-apirule-kind.yaml"
 render_as t --set driver.workspaceMode=managed --set gateway.sandboxJwt.gatewayId=gw \
 	--set driver.enableApirule=true --set driver.clusterDomain=example.org \
 	--set driver.workspacePsaLevel=baseline >"$WORK/rbac-managed-apirule.yaml"
@@ -488,7 +504,7 @@ for d in docs(work / "render-shared-true.yaml"):
     if not any(v.get("name") == "socket-dir" and "emptyDir" in v for v in pod.get("volumes", [])):
         failures.append("socket-dir is not an emptyDir")
 
-# 3b-3i and 7b. values upstream or the driver would refuse fail the render, naming the value
+# 3b-3j and 7b. values upstream or the driver would refuse fail the render, naming the value
 bad_cases = sorted(pathlib.Path(p).stem for p in glob.glob(str(work / "bad-*.rc")))
 if not bad_cases:
     failures.append("no refused-value cases were rendered")
@@ -541,6 +557,17 @@ if env is not None and (env.get("OPENSHELL_K8S_SANDBOX_UID"), env.get("OPENSHELL
 env = rendered("good-3f-unset")
 if env is not None and ("OPENSHELL_K8S_SANDBOX_UID" in env or "OPENSHELL_K8S_SANDBOX_GID" in env):
     failures.append("an unset sandbox UID/GID was still passed to the driver")
+
+# 3j. the chart's exposure defaults are the driver's (kyma_args.rs), and set values reach it
+EXPOSURE_ENV = ("OPENSHELL_KYMA_EXPOSURE_KIND", "OPENSHELL_KYMA_ISTIO_GATEWAY")
+env = {e["name"]: e.get("value") for e in driver_container(docs(work / "render-shared-true.yaml")).get("env", [])}
+if tuple(env.get(n) for n in EXPOSURE_ENV) != ("virtualservice", "kyma-system/kyma-gateway"):
+    failures.append(f"the default render passes {[env.get(n) for n in EXPOSURE_ENV]} as {list(EXPOSURE_ENV)}, "
+                    "not the driver's defaults virtualservice and kyma-system/kyma-gateway")
+env = rendered("good-3j-exposure")
+if env is not None and tuple(env.get(n) for n in EXPOSURE_ENV) != ("apirule", "istio-system/other-gateway"):
+    failures.append(f"driver.exposureKind and driver.istioGateway did not reach the driver: "
+                    f"{[env.get(n) for n in EXPOSURE_ENV]}")
 
 # Checks 4 and 5 need the sandbox namespace and the Deployment that runs the driver.
 sandbox_namespace = (yaml.safe_load(values) or {}).get("namespace")
@@ -736,10 +763,13 @@ WORKSPACE_SERVICEACCOUNTS = [("", "serviceaccounts", ["create", "get"])]        
 # managed SSH ingress, which derives from networkPolicy.enabled with the in-pod gateway (see check 4).
 SSH_INGRESS_POLICY = [("networking.k8s.io", "networkpolicies", ["get", "create", "patch", "update"])]
 # The Kyma layer (src/exposure.rs, src/namespaces.rs): server-side apply of a Service, a
-# NetworkPolicy and an APIRule (patch, and create for a new object; nothing reads an
-# APIRule), a failure Event, and a merge patch that labels a managed namespace.
+# NetworkPolicy and a route, a VirtualService by default or an APIRule with
+# driver.exposureKind=apirule, never both (patch, and create for a new object; nothing
+# reads a route), a failure Event, and a merge patch that labels a managed namespace.
 KYMA_EXPOSURE = [("", "services", ["patch"]), ("networking.k8s.io", "networkpolicies", ["patch"]),
-                 ("gateway.kyma-project.io", "apirules", ["create", "patch"]), ("", "events", ["create"])]
+                 ("networking.istio.io", "virtualservices", ["create", "patch"]), ("", "events", ["create"])]
+KYMA_EXPOSURE_APIRULE = [("", "services", ["patch"]), ("networking.k8s.io", "networkpolicies", ["patch"]),
+                         ("gateway.kyma-project.io", "apirules", ["create", "patch"]), ("", "events", ["create"])]
 KYMA_PSA_LABEL = [("", "namespaces", ["patch"])]
 
 def secret_sources(*names):
@@ -764,6 +794,7 @@ EXPECTED = {
     "rbac-shared-no-netpol": (SHARED, SHARED_CLUSTER),
     "rbac-shared-no-gateway": (SHARED, SHARED_CLUSTER),                                    # an external gateway changes no RBAC
     "rbac-apirule": (SHARED + [KYMA_EXPOSURE], SHARED_CLUSTER),
+    "rbac-apirule-kind": (SHARED + [KYMA_EXPOSURE_APIRULE], SHARED_CLUSTER),               # driver.exposureKind=apirule
     "rbac-shared-secrets": (SHARED, SHARED_CLUSTER),                                       # shared mode stages no Secret
     "rbac-inference": (SHARED, SHARED_CLUSTER),                                            # the hook's own Role is bound to the hook
     # Managed SSH ingress is on by default with the in-pod gateway and networkPolicy.enabled.
@@ -782,7 +813,8 @@ EXPECTED = {
     "rbac-shared-tls": (SHARED, SHARED_CLUSTER),                                           # shared mode stages no Secret
     "rbac-managed-tls": ([secret_sources("t-openshell-driver-kyma-client-tls")], MANAGED + [SSH_INGRESS_POLICY]),
     "rbac-operator-tls": ([secret_sources("own-tls")], OPERATOR),                          # an explicit name wins
-    "good-all-options": ([all_options_secrets], MANAGED + [PVC_GET, SSH_INGRESS_POLICY, KYMA_EXPOSURE, KYMA_PSA_LABEL]),
+    "good-all-options": ([all_options_secrets],                                            # driver.exposureKind=apirule
+                         MANAGED + [PVC_GET, SSH_INGRESS_POLICY, KYMA_EXPOSURE_APIRULE, KYMA_PSA_LABEL]),
 }
 
 def table(scope, blocks):

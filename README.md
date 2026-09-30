@@ -9,9 +9,9 @@ agent sandboxes on **SAP BTP Kyma** clusters. The driver runs upstream
 OpenShell's Kubernetes driver (`openshell-driver-kubernetes`, release v0.1.2)
 unchanged, so every `ComputeDriver` RPC, the sandbox lifecycle and the
 isolation are upstream's. It adds only request enrichment (the Istio opt-out
-and Kagenti labels, plus configured sandbox environment), optional Kyma
-`APIRule` exposure and Pod Security labels on managed-mode workspace
-namespaces. Wire-compatible with the upstream OpenShell gateway.
+and Kagenti labels, plus configured sandbox environment), optional sandbox
+exposure (an Istio VirtualService on Kyma's gateway) and Pod Security labels
+on managed-mode workspace namespaces. Wire-compatible with the upstream OpenShell gateway.
 
 ```text
 openshell-gateway ── Unix domain socket ── openshell-driver-kyma (Rust, Tonic gRPC)
@@ -20,7 +20,7 @@ openshell-gateway ── Unix domain socket ── openshell-driver-kyma (Rust, 
                                                   │     (every RPC: Sandbox CRs, supervisor pods,
                                                   │      isolation, admission, workspace modes)
                                                   └── Kyma layer
-                                                        (request labels and env, APIRule exposure,
+                                                        (request labels and env, sandbox exposure,
                                                          namespace PSA labels, /healthz /readyz)
 ```
 
@@ -59,7 +59,7 @@ The driver container takes no command-line arguments: the Helm chart turns
 `values.yaml` keys into environment variables (`driver.*` and `namespace`).
 The driver accepts every option of upstream's `openshell-driver-kubernetes`
 under upstream's own names (long flag and `OPENSHELL_*` variable, as in
-`openshell-driver-kyma --help`), and adds eight Kyma options that always
+`openshell-driver-kyma --help`), and adds ten Kyma options that always
 start with `--kyma-` / `OPENSHELL_KYMA_`:
 
 | Flag | Values key | Default | Purpose |
@@ -67,9 +67,11 @@ start with `--kyma-` / `OPENSHELL_KYMA_`:
 | `--kyma-istio-inject-sandboxes` | `driver.istioInjectSandboxes` | `false` | Value of the `sidecar.istio.io/inject` label on sandbox workloads. False means no sidecar. |
 | `--kyma-disable-claude-telemetry` | `driver.disableClaudeTelemetry` | `false` | Adds `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` to every sandbox. |
 | `--kyma-sandbox-env` | `driver.sandboxEnv` | none | `KEY=VALUE` added to every sandbox. Comma-separated, so a value cannot contain a comma; `OPENSHELL_*` keys other than `OPENSHELL_LOG_LEVEL` are rejected. |
-| `--kyma-enable-apirule` | `driver.enableApirule` | `false` | Expose each sandbox's port 8080 through a Kyma `APIRule` (`gateway.kyma-project.io/v2`). An explicit exception to upstream's isolation; see [`docs/production-deployment.md`](docs/production-deployment.md). |
-| `--kyma-cluster-domain` | `driver.clusterDomain` | `""` | Domain of the APIRule hosts (`<workspace>--<name>.<domain>`). Required with `--kyma-enable-apirule`. |
-| `--kyma-ingress-namespace` | `driver.ingressNamespace` | `istio-system` | Namespace of the Istio ingress gateway that APIRule traffic arrives from. |
+| `--kyma-enable-apirule` | `driver.enableApirule` | `false` | Expose each sandbox's port 8080 through the object `--kyma-exposure-kind` names. An explicit exception to upstream's isolation; see [`docs/production-deployment.md`](docs/production-deployment.md). |
+| `--kyma-exposure-kind` | `driver.exposureKind` | `virtualservice` | `virtualservice`: an Istio VirtualService (`networking.istio.io/v1`) on `--kyma-istio-gateway`, which needs no sidecar on the sandbox. `apirule`: a Kyma `APIRule` (`gateway.kyma-project.io/v2`), which does not carry traffic on Kyma today. |
+| `--kyma-istio-gateway` | `driver.istioGateway` | `kyma-system/kyma-gateway` | The Istio Gateway the VirtualService binds to, `<namespace>/<name>`. |
+| `--kyma-cluster-domain` | `driver.clusterDomain` | `""` | Domain of the exposure hosts (`<workspace>--<name>.<domain>`). Required with `--kyma-enable-apirule`. |
+| `--kyma-ingress-namespace` | `driver.ingressNamespace` | `istio-system` | Namespace of the Istio ingress gateway that exposure traffic arrives from. |
 | `--kyma-workspace-psa-level` | `driver.workspacePsaLevel` | `""` | Pod Security level for namespaces the driver creates in managed mode (`privileged`, `baseline`, `restricted`; empty leaves them unlabelled). |
 | `--kyma-health-port` | `driver.healthPort` | `9090` | Port for `/healthz` and `/readyz`. |
 
