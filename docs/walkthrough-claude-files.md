@@ -210,11 +210,10 @@ apk add --no-cache rsync openssh-client          # Alpine
 
 ## 8. Run inference: ask Claude to read + write a new file
 
-> **Not yet verified end to end on v0.9.0.** Steps 6 and 8 follow upstream's
-> provider model, but this flow has not been run against a v0.9.0 cluster yet.
-> Call `/usr/bin/claude` directly (as below): the `claude` wrapper in the
-> `sandbox-claude` image predates provider profiles and unsets
-> `ANTHROPIC_API_KEY`.
+> **Verified on v0.9.0.** The commands call `/usr/bin/claude` directly so they
+> also work with `sandbox-claude` images built before v0.9.0, whose `claude`
+> wrapper unset `ANTHROPIC_API_KEY`; with an image built from v0.9.0 or later,
+> plain `claude` works too.
 
 ```bash
 openshell sandbox exec --name claude-files -- sh -c '
@@ -231,10 +230,10 @@ openshell sandbox exec --name claude-files -- sh -c '
 
 The flags that matter:
 
-- `/usr/bin/claude` — the real binary. The `claude` wrapper in the
-  `sandbox-claude` image predates provider profiles and unsets
-  `ANTHROPIC_API_KEY`, which would stop the supervisor from substituting the
-  real key.
+- `/usr/bin/claude` — the real binary, safe with every image version. The
+  `claude` wrapper in `sandbox-claude` images built before v0.9.0 unset
+  `ANTHROPIC_API_KEY`, which stops the supervisor from substituting the real
+  key; images built from v0.9.0 keep it.
 - `HOME=/sandbox` — a writable directory for claude's state cache.
 - **No `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY` or `--model`.** The driver
   already gave the sandbox `ANTHROPIC_BASE_URL` and `ANTHROPIC_MODEL`, and

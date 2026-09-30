@@ -157,11 +157,11 @@ the gateway reports `Ready`.
 
 ### Run Claude with an inference provider
 
-> **Not yet verified end to end on v0.9.0.** This flow follows upstream's
-> provider model, but it has not been run against a v0.9.0 cluster yet. Call
-> `/usr/bin/claude` directly (as below): the `claude` wrapper in the
-> `sandbox-claude` image predates provider profiles and unsets
-> `ANTHROPIC_API_KEY`.
+> **Verified on v0.9.0** (`claude -p "reply with ok"` answers `ok` through the
+> provider). The commands below call `/usr/bin/claude` directly so they also
+> work with `sandbox-claude` images built before v0.9.0, whose `claude` wrapper
+> unset `ANTHROPIC_API_KEY`; with an image built from v0.9.0 or later, plain
+> `claude` works too.
 
 If your overlay has `inferenceProvider.enabled`, the chart's post-install
 Job has created a provider on the gateway. Its name is

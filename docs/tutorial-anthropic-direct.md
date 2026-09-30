@@ -293,9 +293,8 @@ to end.
 
 ## 6. Run Claude in a sandbox
 
-> **Not yet verified end to end on v0.9.0.** This step follows upstream's
-> provider model but has not been run against a v0.9.0 cluster yet; see
-> "Versions" at the end.
+> **Verified on v0.9.0:** `claude -p "reply with ok"` answered `ok` through
+> the provider on a Kyma cluster; see "Versions" at the end for what CI covers.
 
 The sandbox image `ghcr.io/st-gr/sandbox-claude:latest` bundles Node 22
 and the `claude` CLI. You attach the provider from step 3 with
@@ -340,10 +339,12 @@ and port.
 
 ### 6b. Run Claude Code
 
-**Call the real binary, `/usr/bin/claude`.** The `claude` wrapper in this image
-predates provider profiles and unsets `ANTHROPIC_API_KEY`, which would stop the
-supervisor from substituting the real key. Set `HOME` to a writable path;
-`/sandbox` is the sandbox's workspace.
+**Call the real binary, `/usr/bin/claude`,** so the step also works with
+`sandbox-claude` images built before v0.9.0, whose `claude` wrapper unset
+`ANTHROPIC_API_KEY` (the supervisor substitutes the real key only when the
+client sends its placeholder). Images built from v0.9.0 keep it, and plain
+`claude` works. Set `HOME` to a writable path; `/sandbox` is the sandbox's
+workspace.
 
 Non-interactive (print mode):
 

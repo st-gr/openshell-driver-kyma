@@ -244,8 +244,12 @@ driver:
   # Namespace of the Istio ingress gateway APIRule traffic arrives from.
   ingressNamespace: istio-system
   # Pod Security level for namespaces the driver creates in managed mode
-  # (privileged, baseline, restricted, or empty for none).
-  workspacePsaLevel: ""
+  # (privileged, baseline, restricted, or empty for none). Default chosen on
+  # the v0.9.0 live check: with a sandbox running, a server-side dry run of
+  # `pod-security.kubernetes.io/enforce=restricted` on its namespace printed
+  # no warning (upstream's supervisor and workload pods run non-root, drop all
+  # capabilities and use the RuntimeDefault seccomp profile).
+  workspacePsaLevel: restricted
 
 # The upstream NVIDIA/OpenShell release this chart's driver links. Must equal
 # the tag in the workspace Cargo.toml (scripts/check-chart-render.sh).
@@ -497,6 +501,12 @@ inferenceProvider:
     - /usr/local/bin/node
     - /usr/bin/claude
     - /usr/local/bin/claude
+    # The npm-installed claude launcher execs into this native binary, which is
+    # the executable the supervisor sees on the request (v0.9.0 live check:
+    # "DENIED /usr/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe"
+    # until it was listed; upstream's claude-code profile lists only the two
+    # launcher paths).
+    - /usr/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe
   # Operator-managed Secret carrying the API key. Must already exist
   # in .Release.Namespace before install. The chart does NOT create it
   # (chart isolation guarantee #10: never inject pull-secrets into

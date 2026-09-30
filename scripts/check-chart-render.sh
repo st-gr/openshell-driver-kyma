@@ -264,6 +264,8 @@ render_as t --set driver.enableApirule=true --set driver.clusterDomain=example.o
 render_as t --set driver.workspaceMode=managed --set gateway.sandboxJwt.gatewayId=gw \
 	--set driver.enableApirule=true --set driver.clusterDomain=example.org \
 	--set driver.workspacePsaLevel=baseline >"$WORK/rbac-managed-apirule.yaml"
+render_as t --set driver.workspaceMode=managed --set gateway.sandboxJwt.gatewayId=gw \
+	--set driver.workspacePsaLevel="" >"$WORK/rbac-managed-no-psa.yaml"
 render_as t --set driver.workspaceMode=operator --set driver.operatorNamespaceLabel=team=a \
 	--set driver.enableApirule=true --set driver.clusterDomain=example.org \
 	>"$WORK/rbac-operator-apirule.yaml"
@@ -578,6 +580,7 @@ MANAGED_SSH = {
     "render-managed-false": (None, own_pods[0]),
     "rbac-managed-apirule": (None, own_pods[0]),
     "rbac-managed-secrets": (None, own_pods[0]),
+    "rbac-managed-no-psa": (None, own_pods[0]),                 # in-pod gateway, PSA label cleared
     "rbac-managed-ssh": ("gw-ns", {"app": "gateway"}),            # explicit values override the defaults
     "rbac-managed-no-netpol": None,                              # networkPolicy.enabled=false, as upstream
     "rbac-managed-no-gateway": None,                             # an external gateway: nothing derived
@@ -748,7 +751,8 @@ def secret_sources(*names):
 SHARED = [WORKLOAD, BOOTSTRAP_SECRETS]     # in the sandbox namespace, by the Role
 SHARED_CLUSTER = [NODE_READER, NAMESPACE_GET]
 MANAGED = [NODE_READER, NAMESPACE_GET, NAMESPACE_DISCOVERY, NAMESPACE_LIFECYCLE, WORKLOAD,
-           BOOTSTRAP_SECRETS, WORKSPACE_SERVICEACCOUNTS]
+           BOOTSTRAP_SECRETS, WORKSPACE_SERVICEACCOUNTS,
+           KYMA_PSA_LABEL]  # driver.workspacePsaLevel defaults to restricted (v0.9.0 live check)
 OPERATOR = [NODE_READER, NAMESPACE_GET, NAMESPACE_DISCOVERY, WORKLOAD]   # no secrets, no lifecycle
 opts = (yaml.safe_load(all_options.read_text()) or {})["driver"]
 all_options_secrets = secret_sources(opts["clientTlsSecretName"], *opts["sandboxImagePullSecrets"])
@@ -766,6 +770,7 @@ EXPECTED = {
     "render-managed-true": ([], MANAGED + [PVC_GET, SSH_INGRESS_POLICY]),
     "render-managed-false": ([], MANAGED + [SSH_INGRESS_POLICY]),
     "rbac-managed-apirule": ([], MANAGED + [SSH_INGRESS_POLICY, KYMA_EXPOSURE, KYMA_PSA_LABEL]),
+    "rbac-managed-no-psa": ([], [b for b in MANAGED if b is not KYMA_PSA_LABEL] + [SSH_INGRESS_POLICY]),
     "rbac-managed-ssh": ([], MANAGED + [SSH_INGRESS_POLICY]),
     "rbac-managed-no-netpol": ([], MANAGED),                                               # as upstream, off with networkPolicy
     "rbac-managed-no-gateway": ([], MANAGED),                                              # an external gateway: off unless set

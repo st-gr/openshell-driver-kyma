@@ -31,8 +31,9 @@ upgrade. To upgrade from 0.8.0 with only this section in front of you:
    driver, gateway, supervisor and sandbox runtime images must be one release.
    Three defaults changed to upstream's (see "Changed"): set
    `driver.allowDriverConfig: true` to keep 0.8.0's behaviour, where callers
-   could pass `driver_config`; set `driver.workspacePsaLevel: privileged` to
-   keep 0.8.0's `privileged` label on managed-mode namespaces; and set
+   could pass `driver_config`; set `driver.workspacePsaLevel: privileged` if
+   your managed-mode sandboxes need more than the `restricted` level the chart
+   now labels new namespaces with (0.8.0 labelled them `privileged`); and set
    `driver.managedSshIngress.enabled: false` if managed mode must not get the
    SSH ingress policy. With `gateway.enabled`, also set
    `gatewayService.enabled` and `gateway.sandboxJwt.enabled`, and leave
@@ -114,10 +115,14 @@ upgrade. To upgrade from 0.8.0 with only this section in front of you:
   path creates the namespace itself. The namespace is then ensured by the
   step upstream's create path runs, with its status codes: a namespace
   another gateway owns is `FAILED_PRECONDITION`.
-- **Managed-mode namespaces are no longer labelled `privileged`.** 0.8.0
-  labelled every namespace it created
-  `pod-security.kubernetes.io/enforce=privileged`; they now stay unlabelled
-  (the cluster default applies) unless `driver.workspacePsaLevel` is set.
+- **Managed-mode namespaces are labelled `restricted`, not `privileged`.**
+  0.8.0 labelled every namespace it created
+  `pod-security.kubernetes.io/enforce=privileged`. `driver.workspacePsaLevel`
+  now defaults to `restricted`: on the v0.9.0 live check a server-side dry run
+  of that level on a namespace with a running sandbox printed no warning
+  (upstream's supervisor and workload pods are non-root, drop all capabilities
+  and use the RuntimeDefault seccomp profile). Set it to `baseline`,
+  `privileged` or `""` (no label) to change that.
 - **Defaults follow upstream's chart.** `driver.allowDriverConfig` defaults to
   `false` (0.8.0: `true`), so a caller's `driver_config` is refused until an
   operator opts in; set it to `true` to keep 0.8.0's behaviour.
@@ -238,7 +243,11 @@ upgrade. To upgrade from 0.8.0 with only this section in front of you:
   `openshell.ai/managed-by` label (they carry
   `app.kubernetes.io/managed-by: openshell-driver-kyma`). The
   APIRule is `noAuth`: enabling exposure publishes the sandbox's port 8080,
-  and inbound traffic bypasses the supervisor.
+  and inbound traffic bypasses the supervisor. **Not yet functional on Kyma
+  with upstream v0.1.2** (see "Known limitations"): the objects are created
+  correctly, but Kyma's APIRule v2 sets the rule to `Error` because the
+  workload pod has no Istio sidecar, and injecting one is incompatible with
+  upstream's zero-egress workload fence today.
 - **The provider hook verifies the CLI it downloads** against the release's
   `openshell-checksums-sha256.txt` before running it, picks the asset by the
   node's architecture (x86_64 or aarch64), and receives the API key only as an
@@ -246,6 +255,15 @@ upgrade. To upgrade from 0.8.0 with only this section in front of you:
   chart or the command line.
 
 ### Fixed
+
+- **The `sandbox-claude` image's `claude` wrapper kept the provider credential
+  from being injected.** It unset `ANTHROPIC_API_KEY` for the retired
+  `inference.local` router; under the provider model that variable carries the
+  supervisor's resolver placeholder, and the proxy substitutes the real key only
+  when the client sends it. The wrapper now leaves `ANTHROPIC_API_KEY` and
+  `ANTHROPIC_BASE_URL` alone (verified on the v0.9.0 live check: `claude -p`
+  answers through the provider). Images built before this fix need
+  `/usr/bin/claude` called directly.
 
 - **Sandboxes run on upstream v0.1.2 again.** 0.8.0's driver could not start
   them: upstream renamed the supervisor and moved it to a separate,
@@ -298,6 +316,20 @@ upgrade. To upgrade from 0.8.0 with only this section in front of you:
 
 ### Known limitations
 
+- **APIRule exposure does not carry traffic yet.** Kyma's APIRule v2 refuses a
+  rule whose target pod has no Istio sidecar (`Pod … does not have an injected
+  istio sidecar`, live check on v0.9.0), and upstream v0.1.2's workload fence
+  gives the workload pod no egress, so an injected sidecar could not reach
+  istiod. `driver.enableApirule` creates the Service, NetworkPolicy and APIRule
+  as documented, but the ingress gateway answers 403 until a mesh-compatible
+  design lands. Treat it as experimental.
+- **Claude Code's real executable must be in `inferenceProvider.binaries`.**
+  The npm launcher `/usr/bin/claude` execs into
+  `/usr/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe`, which is
+  the path the supervisor sees on the request; the chart default lists it
+  (upstream's `claude-code` profile lists only the launcher paths). Images that
+  install Claude Code elsewhere need their own path added, which the supervisor
+  log names (`DENIED <path> -> <host>:<port>`).
 - **Operator mode:** the namespace owner must grant the driver `create` and
   `delete` on Secrets in each operator namespace. Upstream ships that Role in
   its separate `openshell-workspace` chart; this chart does not.
