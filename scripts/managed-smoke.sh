@@ -259,11 +259,14 @@ osh_within() { local secs=$1; shift; timeout "$secs" openshell --gateway-endpoin
 # finish: killing the CLI as soon as the CR appears drops the CreateSandbox RPC
 # while the driver is still creating the pods, and can leave them stuck
 # SchedulingGated. The `timeout` is a backstop for a wedged CLI, not the wait.
+# No --from: the sandbox runs the chart's driver.sandboxImage (upstream's own
+# default). The community base:latest image embeds a sandbox policy the v0.1.2
+# supervisor rejects ("Image policy is invalid"); upstream's default image has
+# none, so the supervisor applies its restrictive default policy.
 create_sandbox_ready() { # name [sandbox-create-args...]
 	local name=$1 rc=0
 	shift
 	osh_within 600 sandbox create --detach "$@" --name "$name" \
-		--from ghcr.io/nvidia/openshell-community/sandboxes/base:latest \
 		-- sleep infinity >"/tmp/create-${name}.log" 2>&1 || rc=$?
 	cat "/tmp/create-${name}.log"
 	((rc == 0)) || { for ns in "$NS_DEFAULT" "$NS_DECOY" "$NS_OWNED"; do sandbox_failure_diagnostics "$ns"; done; fail "sandbox create ${name} exited ${rc} (124 = still running after 600s); see the output above"; }
