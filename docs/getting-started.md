@@ -129,21 +129,43 @@ kubectl -n "$NS" logs deploy/ods-openshell-driver-kyma -c gateway --tail=50
 The last line proves the gateway is talking to the driver over the shared
 Unix socket. If it is missing, check the driver container's logs.
 
-Reach the gateway, create a sandbox, exec into it:
+Reach the gateway from your laptop, create a sandbox, get a shell in it
+(install the v0.1.2 CLI first, see [install-cli.md](install-cli.md)):
 
 ```bash
 kubectl -n "$NS" port-forward svc/ods-openshell-driver-kyma 8080:8080 &
 
+# No --from: the sandbox runs the chart's driver.sandboxImage (upstream's
+# default Ubuntu image). No command: the sandbox's main process is the
+# image's login shell, which is what `sandbox connect` attaches to.
 openshell --gateway-endpoint http://localhost:8080 sandbox create \
-  --name hello \
-  --from ghcr.io/nvidia/openshell-community/sandboxes/base:latest \
-  --detach \
-  -- sleep infinity
+  --name hello --detach
+
+openshell --gateway-endpoint http://localhost:8080 sandbox connect hello
+#   ...an interactive shell inside the sandbox. Detach with Ctrl-P Ctrl-Q to
+#   keep the sandbox running; `exit` ends its main process, after which the
+#   sandbox shows `Completed` and cannot be connected to again.
 
 openshell --gateway-endpoint http://localhost:8080 sandbox exec \
   --name hello \
   -- echo "hello from inside the sandbox"
+
+openshell --gateway-endpoint http://localhost:8080 sandbox delete hello
 ```
+
+Two things that look like "the sandbox is unreachable" but are not:
+
+- `sandbox connect` attaches to the sandbox's **main process**. A sandbox
+  created with `-- sleep infinity` connects to `sleep`, which prints nothing
+  and takes no input; create it without a command (login shell) if you want
+  `connect`, and use `sandbox exec` for one-off commands. Typing `exit` in a
+  connected login shell ends the sandbox (`Completed`); detach with
+  Ctrl-P Ctrl-Q instead.
+- Do not create sandboxes from
+  `ghcr.io/nvidia/openshell-community/sandboxes/base:latest`: that image
+  embeds a sandbox policy the v0.1.2 supervisor rejects ("Image policy is
+  invalid"), so the sandbox never reaches Ready. Use the default image, or an
+  image without an embedded policy such as `ghcr.io/st-gr/sandbox-claude`.
 
 `sandbox create --detach` returns once the gateway reports the sandbox
 `Ready`. Behind that: the CLI calls `CreateSandbox` on the gateway → the
