@@ -8,6 +8,12 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Verified live on Kyma:** the VirtualService, Service and NetworkPolicy are
+  created as designed; on a cluster whose ingress gateway carries ALLOW
+  `AuthorizationPolicy` allowlists, the route answers `403 RBAC: access denied`
+  until an ALLOW rule covers the sandbox hosts (documented in
+  getting-started and production-deployment; the driver does not manage
+  `istio-system` policies).
 - **Sandbox exposure goes through an Istio VirtualService on Kyma's gateway.**
   With `driver.enableApirule`, the driver now applies a `networking.istio.io/v1`
   VirtualService `<cr>` where 0.9.0 applied an APIRule: host

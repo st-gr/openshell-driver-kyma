@@ -365,6 +365,15 @@ A sandbox's own port 8080 is published separately, by the driver, with
 `driver.enableApirule` (the name predates the VirtualService; it switches
 exposure of either `driver.exposureKind` on):
 
+> **Locked-down ingress gateways.** If any Istio `AuthorizationPolicy` with
+> `action: ALLOW` selects the ingress gateway (Kyma installs none, but
+> operators commonly add per-host IP allowlists), Istio denies every request
+> that no ALLOW rule matches and the route answers `403 RBAC: access denied`.
+> Add an ALLOW rule for the sandbox hosts, for example `hosts: ["*.<cluster-domain>"]`
+> restricted to your `remoteIpBlocks`, or one policy per sandbox host. The
+> driver does not create these policies (they live in `istio-system`).
+
+
 ```yaml
 driver:
   enableApirule: true
