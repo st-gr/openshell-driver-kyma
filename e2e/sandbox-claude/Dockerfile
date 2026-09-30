@@ -30,6 +30,12 @@
 FROM ghcr.io/st-gr/e2e-sandbox@sha256:abbcc9a966fde6395916eaef25064c9d010a7cbdb912f7c97a04d726ca832b97
 
 USER root
+# The base image is pinned by digest and may predate the uid change there:
+# renumber the sandbox user to 10001, upstream's default run_as_user, so the
+# workload's uid has a passwd entry (`sandbox connect` otherwise shows
+# "I have no name!"). Idempotent once the base already uses 10001.
+RUN groupmod -g 10001 sandbox && usermod -u 10001 -g 10001 sandbox \
+    && chown -R 10001:10001 /sandbox /home/sandbox
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Node 22 LTS — Claude Code's package needs Node 20+ (string-width's /v
