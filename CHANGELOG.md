@@ -316,6 +316,12 @@ upgrade. To upgrade from 0.8.0 with only this section in front of you:
 
 ### Known limitations
 
+- **Do not create sandboxes from
+  `ghcr.io/nvidia/openshell-community/sandboxes/base:latest`.** Its embedded
+  sandbox policy is rejected by the v0.1.2 supervisor ("Image policy is
+  invalid"), so such a sandbox never reaches Ready. Use the chart's default
+  image (no `--from`) or an image without an embedded policy. The docs and
+  smokes no longer reference it.
 - **APIRule exposure does not carry traffic yet.** Kyma's APIRule v2 refuses a
   rule whose target pod has no Istio sidecar (`Pod … does not have an injected
   istio sidecar`, live check on v0.9.0), and upstream v0.1.2's workload fence

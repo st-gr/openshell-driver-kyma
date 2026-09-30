@@ -176,7 +176,10 @@ What's happening:
   from `inferenceProvider.baseUrl` and `.modelId`.
 - `--detach -- sleep infinity` — `--detach` returns once the gateway reports
   the sandbox `Ready`; the trailing command is the sandbox's main process,
-  kept alive with `sleep`.
+  kept alive with `sleep`. `sandbox connect` would attach to that `sleep`,
+  so this walkthrough uses `sandbox exec`; for an interactive shell create a
+  sandbox without a trailing command and detach with Ctrl-P Ctrl-Q (`exit`
+  ends it).
 
 ## 7. Upload a file
 

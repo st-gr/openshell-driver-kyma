@@ -320,6 +320,11 @@ openshell sandbox create \
 openshell sandbox list         # hello ... Ready
 ```
 
+> `sandbox connect` attaches to the main process, here `sleep`, so use
+> `sandbox exec` with this sandbox. For an interactive shell, create the
+> sandbox without a trailing command (its login shell becomes the main
+> process) and detach with Ctrl-P Ctrl-Q; `exit` would end the sandbox.
+
 `--detach` makes the command return once the gateway reports the sandbox
 `Ready`. Every sandbox gets `ANTHROPIC_BASE_URL` and `ANTHROPIC_MODEL` from the
 driver; only one created with `--provider` is given the key.
