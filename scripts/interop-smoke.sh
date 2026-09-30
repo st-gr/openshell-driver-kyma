@@ -33,6 +33,26 @@ fail() { printf '\nFAIL: %s\n' "$*" >&2; dump_diagnostics; exit 1; }
 # text around it, so a literal ` ERROR ` never matches otherwise.
 strip_ansi() { sed $'s/\033\\[[0-9;]*m//g'; }
 
+# On a create that never reaches Ready, print what the runtime pods said: the
+# supervisor's log is where bootstrap stalls show up, and the CLI only sees
+# the phase. Label-based, so it needs no sandbox id.
+sandbox_failure_diagnostics() { # namespace
+	local ns=$1
+	echo "--- sandbox pods in ${ns} ---" >&2
+	kubectl -n "$ns" get pods -l openshell.ai/managed-by=openshell -o wide >&2 || true
+	kubectl -n "$ns" describe pods -l openshell.ai/managed-by=openshell >&2 || true
+	echo "--- supervisor logs ---" >&2
+	kubectl -n "$ns" logs -l openshell.ai/component=supervisor --all-containers --prefix --tail=300 >&2 || true
+	echo "--- workload logs ---" >&2
+	kubectl -n "$ns" logs -l openshell.ai/component=sandbox --all-containers --prefix --tail=100 >&2 || true
+	echo "--- gateway log (last 300 lines) ---" >&2
+	kubectl -n "$NS" logs "deploy/${RELEASE}-openshell-driver-kyma" -c gateway --tail=300 2>&1 | strip_ansi >&2 || true
+	echo "--- driver log (last 100 lines) ---" >&2
+	kubectl -n "$NS" logs "deploy/${RELEASE}-openshell-driver-kyma" -c driver --tail=100 2>&1 | strip_ansi >&2 || true
+	echo "--- events in ${ns} ---" >&2
+	kubectl -n "$ns" get events --sort-by=.lastTimestamp 2>&1 | tail -40 >&2 || true
+}
+
 dump_diagnostics() {
 	printf '\n--- pods ---\n' >&2
 	kubectl -n "$NS" get pods -o wide 2>&1 | head -20 >&2 || true
@@ -239,7 +259,7 @@ osh_within 600 sandbox create --detach --name "$SB" \
 	--from ghcr.io/nvidia/openshell-community/sandboxes/base:latest \
 	-- sleep infinity >/tmp/create.log 2>&1 || create_rc=$?
 cat /tmp/create.log
-((create_rc == 0)) || fail "sandbox create ${SB} exited ${create_rc} (124 = still running after 600s); see the output above"
+((create_rc == 0)) || { sandbox_failure_diagnostics "$NS"; fail "sandbox create ${SB} exited ${create_rc} (124 = still running after 600s); see the output above"; }
 cr=$(kubectl -n "$NS" get sandbox -l "openshell.ai/sandbox-name=${SB}" \
 	-o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || cr=""
 [[ -n $cr ]] || fail "no Sandbox CR exists for ${SB} although create returned"

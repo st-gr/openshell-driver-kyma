@@ -47,6 +47,26 @@ fail() { printf '\nFAIL: %s\n' "$*" >&2; dump_diagnostics; exit 1; }
 # matching on its log lines, or a literal level or field never matches.
 strip_ansi() { sed $'s/\033\\[[0-9;]*m//g'; }
 
+# On a create that never reaches Ready, print what the runtime pods said: the
+# supervisor's log is where bootstrap stalls show up, and the CLI only sees
+# the phase. Label-based, so it needs no sandbox id.
+sandbox_failure_diagnostics() { # namespace
+	local ns=$1
+	echo "--- sandbox pods in ${ns} ---" >&2
+	kubectl -n "$ns" get pods -l openshell.ai/managed-by=openshell -o wide >&2 || true
+	kubectl -n "$ns" describe pods -l openshell.ai/managed-by=openshell >&2 || true
+	echo "--- supervisor logs ---" >&2
+	kubectl -n "$ns" logs -l openshell.ai/component=supervisor --all-containers --prefix --tail=300 >&2 || true
+	echo "--- workload logs ---" >&2
+	kubectl -n "$ns" logs -l openshell.ai/component=sandbox --all-containers --prefix --tail=100 >&2 || true
+	echo "--- gateway log (last 300 lines) ---" >&2
+	kubectl -n "$NS" logs "deploy/${RELEASE}-openshell-driver-kyma" -c gateway --tail=300 2>&1 | strip_ansi >&2 || true
+	echo "--- driver log (last 100 lines) ---" >&2
+	kubectl -n "$NS" logs "deploy/${RELEASE}-openshell-driver-kyma" -c driver --tail=100 2>&1 | strip_ansi >&2 || true
+	echo "--- events in ${ns} ---" >&2
+	kubectl -n "$ns" get events --sort-by=.lastTimestamp 2>&1 | tail -40 >&2 || true
+}
+
 dump_diagnostics() {
 	printf '\n--- pods (%s) ---\n' "$NS" >&2
 	kubectl -n "$NS" get pods -o wide 2>&1 | head -20 >&2 || true
@@ -246,7 +266,7 @@ create_sandbox_ready() { # name [sandbox-create-args...]
 		--from ghcr.io/nvidia/openshell-community/sandboxes/base:latest \
 		-- sleep infinity >"/tmp/create-${name}.log" 2>&1 || rc=$?
 	cat "/tmp/create-${name}.log"
-	((rc == 0)) || fail "sandbox create ${name} exited ${rc} (124 = still running after 600s); see the output above"
+	((rc == 0)) || { for ns in "$NS_DEFAULT" "$NS_DECOY" "$NS_OWNED"; do sandbox_failure_diagnostics "$ns"; done; fail "sandbox create ${name} exited ${rc} (124 = still running after 600s); see the output above"; }
 }
 
 # --- ASSERT M1: creating a sandbox bootstraps the workspace namespace -----
