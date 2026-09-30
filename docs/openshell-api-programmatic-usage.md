@@ -190,7 +190,7 @@ canonical list.
 
 ```python
 sandbox = stub.CreateSandbox(pb.CreateSandboxRequest(
-    image="ghcr.io/nvidia/openshell-community/sandboxes/base:latest",
+    image="ghcr.io/st-gr/sandbox-claude:latest",  # any image without an embedded sandbox policy
     command=["sleep", "infinity"],
     provider="anthropic-prod",       # attaches the provider above
     labels={"owner": "my-service"},
