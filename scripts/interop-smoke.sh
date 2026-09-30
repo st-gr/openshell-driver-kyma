@@ -254,9 +254,13 @@ ${gw_logs}"
 # reported Ready. The `timeout` is a backstop for a wedged CLI: a bound, not
 # the wait.
 log "ASSERT 2: sandbox CR is created with the expected name and labels"
+# No --from: the sandbox runs the chart's driver.sandboxImage (upstream's own
+# default). The community base:latest image carries an embedded sandbox policy
+# that the v0.1.2 supervisor rejects ("Image policy is invalid"), and a mutable
+# tag can change that under us; upstream's default image has none, so the
+# supervisor applies its restrictive default policy.
 create_rc=0
 osh_within 600 sandbox create --detach --name "$SB" \
-	--from ghcr.io/nvidia/openshell-community/sandboxes/base:latest \
 	-- sleep infinity >/tmp/create.log 2>&1 || create_rc=$?
 cat /tmp/create.log
 ((create_rc == 0)) || { sandbox_failure_diagnostics "$NS"; fail "sandbox create ${SB} exited ${create_rc} (124 = still running after 600s); see the output above"; }
