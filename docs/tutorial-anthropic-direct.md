@@ -20,7 +20,7 @@ flowchart TB
         V["inferenceProvider:<br/>baseUrl, modelId, credential Secret"]
     end
 
-    subgraph S3["3 — helm install chart 0.9.1"]
+    subgraph S3["3 — helm install chart 0.10.0"]
         POD["driver + gateway pod 2/2<br/>gateway v0.1.2, Unix socket"]
         HOOK["hook Job: provider profile import +<br/>provider create (auto-deletes)"]
     end
@@ -206,7 +206,7 @@ Notes on why this is short:
   (`api.anthropic.com:443` here) and whose `binaries` default to `node` and
   `claude` under `/usr/bin` and `/usr/local/bin`: claude-code runs under
   `node`. The API key is bound to that host and port.
-- **No `gatewayApirule` / OIDC block.** Those are for exposing the
+- **No `gatewayIngress` / OIDC block.** Those are for exposing the
   gateway outside the cluster with browser-based auth. This tutorial
   uses `kubectl port-forward` to reach the gateway; auth stays
   unauthenticated-in-cluster.
@@ -217,7 +217,7 @@ Notes on why this is short:
 
 ```bash
 helm install ods oci://ghcr.io/st-gr/charts/openshell-driver-kyma \
-  --version 0.9.1 \
+  --version 0.10.0 \
   --namespace "$NS" \
   -f my-values.yaml \
   --wait --timeout=300s
@@ -430,7 +430,7 @@ cluster-wide — remove it separately with a matching
   [`walkthrough-claude-files.md`](walkthrough-claude-files.md) with its
   bedrockBridge variant.
 - **You want the CLI to run on a developer laptop over the public
-  internet** (no port-forward). Set `gatewayApirule.enabled=true` and
+  internet** (no port-forward). Set `gatewayIngress.enabled=true` and
   `gateway.oidc.issuer`. See
   [`production-deployment.md`](production-deployment.md).
 - **You want to route inference through SAP Cloud Connector.** See
@@ -438,7 +438,7 @@ cluster-wide — remove it separately with a matching
 
 ## Versions
 
-This tutorial targets chart `openshell-driver-kyma` `0.9.1`, which deploys
+This tutorial targets chart `openshell-driver-kyma` `0.10.0`, which deploys
 upstream NVIDIA OpenShell `v0.1.2`: the gateway, supervisor and sandbox
 runtime images are pinned by digest to that release, and the CLI you install
 in step 4 must be the same release. The agent-sandbox controller is v0.5.2.

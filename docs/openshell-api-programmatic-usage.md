@@ -85,7 +85,7 @@ clients you deliberately route through the chart's optional
 |---|---|
 | Inside the cluster, same namespace | `<release>-openshell-driver-kyma:8080` |
 | Inside the cluster, other namespace | `<release>-openshell-driver-kyma.<release-ns>.svc.cluster.local:8080` |
-| Public (only with `gatewayApirule.enabled` + OIDC) | `https://<gatewayApirule.host>` |
+| Public (only with `gatewayIngress.enabled` + OIDC) | `https://openshell.<cluster-domain>` (`gatewayIngress.host`) |
 | Laptop port-forward | `kubectl -n <release-ns> port-forward svc/<release>-openshell-driver-kyma 8080:8080`, then `http://localhost:8080` |
 
 Pick the URL appropriate to your deployment topology — the rest of
@@ -94,16 +94,15 @@ this guide treats the gateway as a generic gRPC endpoint.
 Pick one of the two patterns based on whether you want public ingress
 or VPN-only routing:
 
-### A. Public hostname via Kyma `APIRule`
+### A. Public hostname via the Kyma ingress gateway
 
 When the `openshell-driver-kyma` Helm chart is installed with
-`--set gatewayApirule.enabled=true`, a `gatewayApirule.host` and
-`gateway.oidc.issuer`, Kyma's API Gateway exposes the gateway at
-`https://<gatewayApirule.host>` (for example
-`openshell.<cluster-domain>`).
-Lock it down to your VPN egress IPs with an
-`AuthorizationPolicy` on the Istio ingress. Native gRPC clients dial
-the `:443` HTTPS endpoint.
+`gatewayIngress.enabled=true`, a `gatewayIngress.domain` and
+`gateway.oidc.{issuer,audience,clientId}`, the gateway is reachable at
+`https://openshell.<cluster-domain>`. The ingress gateway requires a valid
+token of the issuer (and, with `gatewayIngress.allowedCidrs`, a source address
+in it) before forwarding; the gateway validates the same token again. Native
+gRPC clients dial the `:443` HTTPS endpoint with `authorization: Bearer <token>`.
 
 ### B. Private routing via SAP Cloud Connector
 

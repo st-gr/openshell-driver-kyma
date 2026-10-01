@@ -3,8 +3,9 @@
 This runbook is for operators going beyond the in-cluster /
 port-forward path covered by [`getting-started.md`](getting-started.md).
 It assumes you've already verified the chart works behind a port-forward
-and now want a production-grade install: OIDC user auth, public access
-through the Kyma API Gateway, image digests pinned, an `imagePullSecrets`
+and now want a production-grade install: OIDC user auth, remote access
+through the cluster's Istio ingress gateway, image digests pinned, an
+`imagePullSecrets`
 where needed.
 
 The cluster's CNI must enforce `NetworkPolicy` in every sandbox namespace:
@@ -15,22 +16,47 @@ without enforcement sandbox pods can bypass OpenShell's network policy.
 
 | Option | Auth | Pros | Cons |
 |---|---|---|---|
-| Public APIRule + OIDC | OIDC + sandbox-JWT | Standard SAP IAS pattern, no VPN, MFA | Public attack surface |
+| Remote access (`gatewayIngress`) + OIDC | OIDC at the edge and at the gateway + sandbox-JWT | Standard OIDC login, no port-forward, MFA from your IdP | Public attack surface; needs rights in `istio-system` |
 | SCC Service Channel + port-forward | None at gateway, OIDC at kubectl | No public exposure | All users must be on corporate VPN; see [`cloud-connector-setup.md`](cloud-connector-setup.md) |
 | Mesh-internal only | sandbox-JWT only (CLI requires `allow_unauthenticated_users`) | Simplest | Caller must be inside the cluster |
 
-The Public APIRule option is the focus of the rest of this doc.
+The remote-access option is the focus of the rest of this doc.
 
 ## 1. Provision an OIDC client
 
-Use SAP IAS (or any other OIDC IdP). Two values matter:
+Any OIDC provider that issues **JWT access tokens** works: the `openshell` CLI
+sends the access token, and both the ingress gateway and the OpenShell gateway
+validate its signature, issuer and audience. You need:
 
-- `issuer` — your IAS tenant's OIDC issuer URL.
-- `audience` — an OAuth client ID with the `openshell` audience.
+- **A public client for the CLI** → `gateway.oidc.clientId`: Authorization
+  Code with PKCE and the redirect URI `http://127.0.0.1:*/callback` (the CLI
+  listens on an ephemeral loopback port during login). If your provider
+  rejects a wildcard port, log in with the device grant instead
+  (`OPENSHELL_NO_BROWSER=1 openshell gateway add …`).
+- **An audience** → `gateway.oidc.audience`: the value the access token's
+  `aud` claim must contain. Some providers put the client id there; others
+  (Keycloak) need an audience mapper on the client.
+- **The issuer URL** → `gateway.oidc.issuer`, over HTTPS. Keep it reachable
+  from the cluster (the gateway and the ingress gateway fetch its JWKS) and
+  from your users' laptops (the CLI redirects to it on first auth).
+- **A client secret**, only if you use `inferenceProvider`: the chart's
+  provider hook authenticates with the client-credentials grant. Store it in
+  a Secret you manage, never in a values file:
 
-Keep the issuer reachable from the cluster (the gateway fetches the
-JWKS at startup) and from your users' laptops (the CLI redirects to it
-on first auth).
+  ```bash
+  kubectl -n openshell-system create secret generic openshell-oidc-client \
+    --from-literal=client-secret='<the client secret>'
+  ```
+
+**Authorization.** Upstream's gateway defaults to RBAC: a token needs the role
+`openshell-admin` or `openshell-user` in the claim `realm_access.roles`
+(Keycloak's shape). Choose one:
+
+- keep the defaults and grant those roles in your provider, or name your own
+  with `gateway.oidc.rolesClaim`, `adminRole` and `userRole` (both roles must
+  be set together). The client the provider hook uses needs the user role too;
+- or set `gateway.oidc.authOnly: true` to accept every identity the issuer
+  authenticates. Who may log in is then decided in the provider alone.
 
 ## 2. Decide on chart values
 
@@ -62,13 +88,17 @@ gateway:
   # them alone unless you move that version too: they must match each other
   # and the driver.
 
-  # OIDC required for the public-APIRule path. The chart's
-  # gateway-apirule.yaml refuses to render with an empty issuer.
+  # OIDC is required for remote access: the chart refuses to publish an
+  # unauthenticated gateway.
   oidc:
-    issuer: "https://<your-tenant>.accounts.ondemand.com"
-    audience: "openshell"
-    adminRole: "openshell-admin"
-    userRole:  "openshell-user"
+    issuer: "https://<your-issuer>"
+    audience: "<audience>"
+    clientId: "<client-id>"
+    # Roles: upstream's defaults (openshell-admin / openshell-user in
+    # realm_access.roles) apply unless you set rolesClaim + adminRole +
+    # userRole, or authOnly: true.
+    clientCredentialsSecret:       # only with inferenceProvider
+      name: openshell-oidc-client
 
   sandboxJwt:
     enabled: true
@@ -87,25 +117,21 @@ gateway:
 gatewayService:
   enabled: true
 
-gatewayApirule:
+gatewayIngress:
   enabled: true
-  host: "openshell.<your-cluster-id>.kyma.ondemand.com"
-  gateway: kyma-system/kyma-gateway
-  rules:
-    - path: /*
-      methods: [POST]
-      jwt:
-        authentications:
-          - issuer: "https://<your-tenant>.accounts.ondemand.com"
-            jwksUri: "https://<your-tenant>.accounts.ondemand.com/oauth2/certs"
-        authorizations:
-          - requiredScopes: []   # rely on OIDC roles in the gateway
+  domain: "<your-cluster-id>.kyma.ondemand.com"   # the Kyma gateway's *.<domain>
+  # Source addresses allowed through the ingress gateway. Optional for the CLI
+  # host (a token is required either way), required for serviceHosts.
+  allowedCidrs: ["203.0.113.0/24"]
+  # Publish `openshell service expose` URLs. Read "Reaching a service inside a
+  # sandbox" below first: this admits allowedCidrs to every host of the domain.
+  serviceHosts:
+    enabled: true
 
-# No `inferenceProvider` block. Its post-install Job registers the provider
-# with the gateway's CLI, without a token, and a gateway with OIDC refuses
-# unauthenticated calls, so the chart refuses `inferenceProvider.enabled`
-# together with `gateway.oidc.issuer`. Register the provider yourself after
-# the install, from an authenticated CLI session (step 3b), and give
+# `inferenceProvider` works with OIDC when gateway.oidc.clientCredentialsSecret
+# names the client secret: its post-install Job logs in with the
+# client-credentials grant. Without a client secret, leave it disabled, register
+# the provider yourself from an authenticated CLI session (step 3b), and give
 # sandboxes the endpoint and model it would have set:
 driver:
   sandboxEnv:
@@ -181,21 +207,38 @@ helm install ods deploy/helm/openshell-driver-kyma \
 The pre-install hook will:
 
 - Refuse if the agent-sandbox CRD isn't installed.
-- Refuse to render `gatewayApirule.yaml` if `gateway.oidc.issuer` is
-  empty (the chart's `B1` security guard).
+- Refuse to render if `gatewayIngress.enabled` is set without
+  `gateway.oidc.issuer`, `audience` and `clientId` (the chart never publishes
+  an unauthenticated gateway), without `gatewayIngress.domain`, or with
+  `serviceHosts.enabled` and no `allowedCidrs`.
+
+Installing with `gatewayIngress.enabled` creates a RequestAuthentication and
+AuthorizationPolicies in `istio-system`, so the installing identity needs
+rights there. The RequestAuthentication selects the whole ingress gateway: a
+request to any host that carries an invalid token of your issuer is answered
+401 there. Requests without a token, or with another issuer's, are unaffected.
 
 ### 3b. Register the inference provider
 
-Once the install has finished (step 4 shows how to check the gateway is up),
-register the gateway with the `openshell` CLI on a laptop
-(`openshell gateway add https://openshell.<cluster-domain>`); the CLI
-redirects to your OIDC issuer on first use.
+Register the gateway with the `openshell` CLI on a laptop; a browser opens for
+the OIDC login:
 
-With OIDC on, the provider is registered from that authenticated CLI session
-(an admin role), with the profile the chart's hook would have imported. Write
-it for your endpoint: `host` and `port` are those of `ANTHROPIC_BASE_URL`
-above (the path is not part of the binding), and `binaries` are the processes
-allowed to reach it (claude-code runs under `node`):
+```bash
+openshell gateway add https://openshell.<cluster-domain> --name kyma \
+  --oidc-issuer https://<your-issuer> \
+  --oidc-client-id <client-id> --oidc-audience <audience>
+```
+
+(`helm install` prints this line with your values.) When the token expires,
+`openshell gateway login kyma` renews it.
+
+With `inferenceProvider.enabled` and a client secret, the chart's hook has
+already registered the provider and this step is done. Otherwise register it
+from that authenticated session, with the profile the hook would have
+imported. Write it for your endpoint: `host` and `port` are those of
+`ANTHROPIC_BASE_URL` above (the path is not part of the binding), and
+`binaries` are the processes allowed to reach it (claude-code runs under
+`node`):
 
 ```yaml
 # profile.yaml
@@ -242,8 +285,14 @@ kubectl -n openshell-system get pods
 kubectl -n openshell-system logs deploy/ods-openshell-driver-kyma -c gateway \
   | grep "Compute driver connected"
 
-# APIRule reconciled
-kubectl -n openshell-system get apirule
+# Routes and ingress policies rendered
+kubectl -n openshell-system get virtualservice
+kubectl -n istio-system get requestauthentication,authorizationpolicy | grep openshell
+
+# The edge refuses a call without a token (403), the CLI gets through
+curl -s -o /dev/null -w '%{http_code}\n' -X POST \
+  https://openshell.<cluster-domain>/openshell.v1.OpenShell/ListSandboxes
+openshell status
 ```
 
 ## 5. Operational notes
@@ -302,10 +351,23 @@ the CLI on a `kubectl port-forward` to the gateway (the setup in
 `--resolve default--web.openshell.localhost:8080:127.0.0.1`. A server bound to
 `0.0.0.0` or `[::]` opens the relay but never answers.
 
-Reaching such a URL without a port-forward means publishing the gateway, not
-the pods: `gatewayApirule` above, or upstream's edge-authenticated mode
-(`enable_websocket_tunnel`, with a wildcard `server_sans` entry for the service
-hostnames). The latter is not wired into the chart yet.
+With `gatewayIngress.serviceHosts.enabled`, the same command prints a public
+URL, `http://default--web.<cluster-domain>/`, which the Kyma gateway redirects
+to HTTPS; no port-forward and no `--resolve`. Three things to know:
+
+- A browser sends no token, so these hosts are fenced by
+  `gatewayIngress.allowedCidrs` only. Put authentication into the service
+  itself if the address ranges are shared.
+- Istio's host matching takes only a prefix wildcard, so the policy admits
+  `allowedCidrs` to **every** host under the cluster domain, not only to
+  sandbox service hosts. On a cluster that allowlists other applications per
+  host, that widens their fence to the same address ranges. Leave
+  `serviceHosts.enabled: false` and use the port-forward URLs if that matters.
+- The gateway then binds port 80 in its pod (so the printed URL carries no
+  port), which adds the safe sysctl `net.ipv4.ip_unprivileged_port_start=0` to
+  the pod. The in-cluster Service port stays `gateway.grpcPort`.
+
+Sandbox pods themselves are never published.
 
 ## Known limitations
 

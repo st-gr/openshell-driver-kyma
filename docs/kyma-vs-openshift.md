@@ -46,9 +46,9 @@ reasoning behind defaulting injection off for sandboxes.
 | | OpenShift | Kyma |
 |---|---|---|
 | Native CR | `Route` (`route.openshift.io/v1`) | `APIRule` (`gateway.kyma-project.io/v2`) |
-| Gateway | Phase 2 in upstream OpenShift driver (not yet) | `gatewayApirule` publishes the gateway behind OIDC |
+| Gateway | Phase 2 in upstream OpenShift driver (not yet) | `gatewayIngress` publishes the gateway behind OIDC (VirtualService + ingress policies) |
 | Sandbox pods | — | Never, by upstream design (below) |
-| Cluster domain | Often `*.<cluster-name>.<base>` | `*.<cluster-id>.kyma.ondemand.com`, used in `gatewayApirule.host` |
+| Cluster domain | Often `*.<cluster-name>.<base>` | `*.<cluster-id>.kyma.ondemand.com`, set as `gatewayIngress.domain` |
 
 Nothing routes to a sandbox pod: upstream's sandbox runtime brokers the
 workload's `bind`/`listen`/`accept` syscalls and resets every inbound
@@ -142,14 +142,13 @@ metrics ports; egress to DNS and 443). Set `networkPolicy.enabled=false` to
 render neither. The cluster's CNI must enforce NetworkPolicy in every sandbox
 namespace.
 
-## Public APIRule guard
+## Public ingress guard
 
-The chart refuses to render `gatewayApirule.yaml` if
-`gatewayApirule.enabled=true` and `gateway.oidc.issuer=""`. Without
-this guard, an operator could combine a public host with
-`allow_unauthenticated_users=true` (set automatically when no
-issuer) and `--disable-tls`, producing a world-writable sandbox
-factory.
+The chart refuses to render with `gatewayIngress.enabled=true` unless
+`gateway.oidc.issuer`, `audience` and `clientId` are set. Without this guard,
+an operator could combine a public host with
+`allow_unauthenticated_users=true` (set automatically when no issuer) and
+`--disable-tls`, producing a world-writable sandbox factory.
 
 ## Provider-profile inference routing
 

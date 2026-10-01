@@ -378,14 +378,15 @@ The Job is idempotent (re-runs cleanly on `helm upgrade`). The chart
 never sees the API key — it's mounted into the Job pod from your Secret
 via `secretKeyRef`.
 
-## Appendix B: public exposure via Kyma APIRule
+## Appendix B: remote access without a port-forward
 
-For exposing the gateway outside the cluster (so the `openshell` CLI
-runs on a developer laptop, not via port-forward), set
-`gatewayApirule.enabled=true` and supply `gateway.oidc.issuer`. The
-chart refuses to render an APIRule for an unauthenticated gateway. See
-[`production-deployment.md`](production-deployment.md) for the full
-setup.
+To use the `openshell` CLI from a laptop without a port-forward, publish the
+gateway through the cluster's Istio ingress gateway: set
+`gatewayIngress.enabled=true`, `gatewayIngress.domain` and
+`gateway.oidc.{issuer,audience,clientId}`. The chart refuses to publish an
+unauthenticated gateway. `gatewayIngress.serviceHosts.enabled` additionally
+publishes the URLs `openshell service expose` prints. See
+[`production-deployment.md`](production-deployment.md) for the full setup.
 
 ## Troubleshooting
 

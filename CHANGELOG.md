@@ -4,6 +4,55 @@ All notable changes to openshell-driver-kyma are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.10.0] — 2026-09-30
+
+**UPGRADE NOTE: `gatewayApirule` is removed.** Move to `gatewayIngress` (table
+below) before `helm upgrade`; a values file that still carries `gatewayApirule`
+is ignored, so the gateway silently loses its public route.
+
+### Added
+
+- **Remote access (`gatewayIngress`)**: publishes the gateway through the
+  cluster's Istio ingress gateway with OIDC, so the `openshell` CLI works
+  without a port-forward. Renders a VirtualService for `openshell.<domain>` in
+  the release namespace and, on the ingress gateway in `istio-system`, a
+  RequestAuthentication plus an ALLOW AuthorizationPolicy that requires a token
+  of the issuer (and, with `allowedCidrs`, a source address). The gateway
+  validates the same token again. The chart refuses to publish a gateway
+  without `gateway.oidc.{issuer,audience,clientId}`.
+- **Published service URLs (`gatewayIngress.serviceHosts`)**:
+  `openshell service expose` prints `http://<workspace>--<sandbox>.<domain>/`
+  (redirected to HTTPS), routed by a wildcard VirtualService to the gateway and
+  fenced by `allowedCidrs`. The gateway then binds port 80 in its pod (safe
+  sysctl `net.ipv4.ip_unprivileged_port_start=0`) and takes the domain from
+  `--server-san`. The policy admits `allowedCidrs` to every host under the
+  domain; see production-deployment.
+- **`gateway.oidc.authOnly`**, `rolesClaim`, `clientId`, `jwksUri` and
+  `clientCredentialsSecret`. `authOnly: true` selects upstream's
+  authentication-only mode (both roles passed empty); `adminRole` and
+  `userRole` must now be set together.
+- **`inferenceProvider` with OIDC**: the provider hook logs in with the
+  client-credentials grant when `gateway.oidc.clientCredentialsSecret` names
+  the client secret. The pair was refused before.
+- `scripts/remote-access-check.sh`, the live acceptance check, and a flag check
+  in `scripts/check-gateway-config.sh` (the pinned gateway image must know every
+  flag the chart renders).
+
+### Removed
+
+- **`gatewayApirule`** and its APIRule template: never verified, and APIRule v2
+  needs an Istio sidecar on the gateway pod.
+
+### Values migration
+
+| 0.9.x | 0.10.0 |
+|---|---|
+| `gatewayApirule.enabled` | `gatewayIngress.enabled` |
+| `gatewayApirule.host: openshell.<domain>` | `gatewayIngress.domain: <domain>` (and `host` only if it is not `openshell.<domain>`) |
+| `gatewayApirule.gateway` | `gatewayIngress.istioGateway` |
+| `gatewayApirule.rules[].jwt.authentications[].issuer` / `jwksUri` | `gateway.oidc.issuer` / `gateway.oidc.jwksUri` |
+| (none) | `gateway.oidc.clientId` (required with `gatewayIngress`) |
+
 ## [0.9.1] — 2026-09-30
 
 ### Removed
