@@ -1,5 +1,7 @@
 # Remote Gateway Access Implementation Plan
 
+> **Superseded.** This plan implemented revision 1 of the design, which was withdrawn (it put a `RequestAuthentication` on a shared ingress gateway). See `2026-10-01-remote-gateway-access-rev2.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Publish the OpenShell gateway of a Kyma cluster through the cluster's Istio ingress gateway with OIDC, so the CLI and `openshell service expose` URLs work without a `kubectl port-forward` (chart/driver 0.10.0).

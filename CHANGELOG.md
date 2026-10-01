@@ -4,23 +4,48 @@ All notable changes to openshell-driver-kyma are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
-## [0.10.0] — 2026-09-30
+## [0.10.0] — unreleased
 
 **UPGRADE NOTE: `gatewayApirule` is removed.** Move to `gatewayIngress` (table
 below) before `helm upgrade`; the chart refuses a values file that still enables
 `gatewayApirule`, so the gateway cannot silently lose its public route.
 
+**UPGRADE NOTE: turning on `gateway.tls.enabled`, which `gatewayIngress`
+requires, needs a new PKI on an existing install, once.** The PKI hook creates
+the gateway's certificate at the first install and never replaces it, and until
+this release it did not put the release's Service names into it, so no client
+could verify it. Before the upgrade that enables gateway TLS, delete the three
+PKI Secrets (all three: upstream's generator refuses a partial set); the upgrade
+creates them again:
+
+```bash
+kubectl -n <namespace> delete secret \
+  <fullname>-server-tls <fullname>-client-tls <fullname>-jwt-keys
+```
+
+Sandboxes from before that upgrade must be recreated: their pods carry the
+plaintext gateway endpoint and tokens of the old signing key. Installs that keep
+gateway TLS off need nothing.
+
 ### Added
 
 - **Remote access (`gatewayIngress`)**: publishes the gateway through the
-  cluster's Istio ingress gateway with OIDC, so the `openshell` CLI works
-  without a port-forward. Renders a VirtualService for `openshell.<domain>` in
-  the release namespace and, on the ingress gateway in `istio-system`, a
-  RequestAuthentication plus an AuthorizationPolicy that lets a request through
-  only with a token of the issuer (and, with `allowedCidrs`, from a listed
-  source address). The gateway validates the same token again. The chart
+  cluster's Istio ingress gateway, the way upstream intends a Kubernetes gateway
+  to be reached, so the `openshell` CLI works without a port-forward. The
+  gateway is the only authenticator: it serves TLS (`gateway.tls.enabled`,
+  required) and validates every caller's OIDC token itself. The ingress gateway
+  terminates the client's TLS, routes `openshell.<domain>` (a VirtualService),
+  re-encrypts to the gateway pod and verifies its certificate against the chart
+  CA (a DestinationRule; a post-install Job, which may write that one Secret
+  only, copies the CA's public certificate into `istio-system`). This is
+  upstream's `grpcRoute` with `backendTLSPolicy`, written for Istio. The chart
   refuses to publish a gateway without `gateway.oidc.{issuer,audience,clientId}`.
-- **`gatewayIngress.policyAction`** chooses how those policies are written:
+- **Nothing the chart renders applies to the shared ingress gateway as a
+  whole.** It creates no RequestAuthentication (on an ingress gateway one
+  answers 401 to every other application's Bearer tokens), and every
+  AuthorizationPolicy rule names this release's hosts. `allowedCidrs` is an
+  optional source-address fence for the gateway host.
+- **`gatewayIngress.policyAction`** chooses how the policies are written:
   `DENY` (default) for an ingress gateway without ALLOW policies, naming only
   the chart's own hosts and leaving every other host alone; `ALLOW` for a
   gateway that already allowlists per host. An ALLOW policy on a gateway
@@ -28,17 +53,13 @@ below) before `helm upgrade`; the chart refuses a values file that still enables
   production-deployment before choosing.
 - **Published service URLs (`gatewayIngress.serviceHosts`)**:
   services exposed with `openshell service expose` are reachable at
-  `https://<workspace>--<sandbox>.<domain>/`, routed to the gateway and fenced
-  by `allowedCidrs`. (Through the remote gateway upstream's CLI prints the URL
-  as `http://<host>:443/`, the gateway's scheme with the endpoint's port; use
-  the host with `https://`.)
-  Published per workspace (`serviceHosts.workspaces`, default `[default]`):
-  routes and policies match `<workspace>--*`, never the whole domain. The
-  gateway then binds port 80 in its pod (safe sysctl
-  `net.ipv4.ip_unprivileged_port_start=0`), so the URL API and SDK clients
-  receive is `http://<host>/` (redirected to HTTPS), and takes the domain from
-  `--server-san`.
-- **`gateway.oidc.authOnly`**, `rolesClaim`, `clientId`, `jwksUri` and
+  `https://<workspace>--<sandbox>.<domain>/`, the URL the CLI prints, routed to
+  the gateway and fenced by `allowedCidrs` (required: the gateway does not
+  authenticate a request to a service URL). Published per workspace
+  (`serviceHosts.workspaces`, default `[default]`): routes and policies match
+  `<workspace>--*`, never the whole domain. API and SDK clients receive the
+  gateway's own URL, with the port it binds in its pod (`:8080`); drop the port.
+- **`gateway.oidc.authOnly`**, `rolesClaim`, `clientId` and
   `clientCredentialsSecret`. `authOnly: true` selects upstream's
   authentication-only mode (both roles passed empty; every authenticated
   identity is then a platform admin); `adminRole` and
@@ -46,16 +67,30 @@ below) before `helm upgrade`; the chart refuses a values file that still enables
 - **`networkPolicy.extraEgress`**: extra egress rules for the driver+gateway
   pod, for destinations that are not on 443 from the pod's point of view, such
   as an OIDC issuer published through the cluster's own ingress gateway.
-- **`inferenceProvider` with OIDC**: the provider hook logs in with the
-  client-credentials grant when `gateway.oidc.clientCredentialsSecret` names
-  the client secret (and, for providers with a separate confidential client,
-  its `clientId`). The pair was refused before.
+- **`inferenceProvider` with OIDC, and with gateway TLS**: the provider hook
+  logs in with the client-credentials grant when
+  `gateway.oidc.clientCredentialsSecret` names the client secret (and, for
+  providers with a separate confidential client, its `clientId`), and against a
+  gateway that serves TLS it dials `https://` and trusts the chart CA. Both
+  pairs were refused before; the provider with gateway TLS but without OIDC
+  still is.
 - `e2e/keycloak`: a Keycloak test identity provider for clusters without one
   (upstream's development realm, no credential in the repository), with its
   own test.
-- `scripts/remote-access-check.sh`, the live acceptance check, and a flag check
-  in `scripts/check-gateway-config.sh` (the pinned gateway image must know every
-  flag the chart renders).
+- `scripts/remote-access-check.sh`, the live acceptance check. While it
+  upgrades a release it watches other applications behind the same ingress
+  gateway, and rolls the release back if one of them starts answering
+  differently; `scripts/remote-access-check-test.sh` tests that without a
+  cluster. And a flag check in `scripts/check-gateway-config.sh` (the pinned
+  gateway image must know every flag the chart renders).
+
+### Fixed
+
+- **`gateway.tls.enabled` produced a certificate no client could verify.** The
+  PKI hook now passes the release's Service names and loopback to upstream's
+  certificate generator, as upstream's own chart does; before, the certificate
+  carried only upstream's default names (`openshell`, `openshell.openshell.svc`,
+  …). Existing installs: see the upgrade note.
 
 ### Removed
 
@@ -69,8 +104,8 @@ below) before `helm upgrade`; the chart refuses a values file that still enables
 | `gatewayApirule.enabled` | `gatewayIngress.enabled` |
 | `gatewayApirule.host: openshell.<domain>` | `gatewayIngress.domain: <domain>` (and `host` only if it is not `openshell.<domain>`) |
 | `gatewayApirule.gateway` | `gatewayIngress.istioGateway` |
-| `gatewayApirule.rules[].jwt.authentications[].issuer` / `jwksUri` | `gateway.oidc.issuer` / `gateway.oidc.jwksUri` |
-| (none) | `gateway.oidc.clientId` (required with `gatewayIngress`) |
+| `gatewayApirule.rules[].jwt.authentications[].issuer` | `gateway.oidc.issuer` (the gateway validates tokens; the ingress gateway does not) |
+| (none) | `gateway.oidc.clientId` and `gateway.tls.enabled: true` (required with `gatewayIngress`) |
 
 ## [0.9.1] — 2026-09-30
 

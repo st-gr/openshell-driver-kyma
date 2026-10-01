@@ -382,10 +382,12 @@ via `secretKeyRef`.
 
 To use the `openshell` CLI from a laptop without a port-forward, publish the
 gateway through the cluster's Istio ingress gateway: set
-`gatewayIngress.enabled=true`, `gatewayIngress.domain` and
-`gateway.oidc.{issuer,audience,clientId}`. The chart refuses to publish an
-unauthenticated gateway. `gatewayIngress.serviceHosts.enabled` additionally
-publishes the URLs `openshell service expose` prints. See
+`gatewayIngress.enabled=true`, `gatewayIngress.domain`,
+`gateway.tls.enabled=true` and `gateway.oidc.{issuer,audience,clientId}`. The
+gateway authenticates every call with OIDC, and the chart refuses to publish an
+unauthenticated one. `gatewayIngress.serviceHosts.enabled` additionally
+publishes the URLs `openshell service expose` prints. An install from before
+0.10.0 must delete its PKI Secrets first ("Upgrading to gateway TLS" there). See
 [`production-deployment.md`](production-deployment.md) for the full setup.
 
 ## Troubleshooting
@@ -420,11 +422,10 @@ only if you set an OIDC issuer) or the driver's ClusterRole lacks
 
 **`inference-provider-hook` Job stuck or failed.** Read its log
 (`kubectl -n "$NS" logs job/<release>-openshell-driver-kyma-inference-provider-hook`).
-The chart refuses to render `inferenceProvider.enabled` together with
-`gateway.oidc.issuer`: the Job calls the gateway without a token, which a
-gateway with OIDC refuses. With OIDC, register the profile and provider from
-an authenticated CLI session instead; see
-[`production-deployment.md`](production-deployment.md), step 3b.
+With `gateway.oidc.issuer` the Job logs in with the client-credentials grant
+and needs `gateway.oidc.clientCredentialsSecret`; without a client secret,
+register the profile and provider from an authenticated CLI session instead;
+see [`production-deployment.md`](production-deployment.md), step 3b.
 
 If the Job's log says the provider "exists with type …", a provider of that
 name was created under another profile (for example by 0.8.0). A provider's

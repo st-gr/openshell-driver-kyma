@@ -46,7 +46,7 @@ reasoning behind defaulting injection off for sandboxes.
 | | OpenShift | Kyma |
 |---|---|---|
 | Native CR | `Route` (`route.openshift.io/v1`) | `APIRule` (`gateway.kyma-project.io/v2`) |
-| Gateway | Phase 2 in upstream OpenShift driver (not yet) | `gatewayIngress` publishes the gateway behind OIDC (VirtualService + ingress policies) |
+| Gateway | Phase 2 in upstream OpenShift driver (not yet) | `gatewayIngress` publishes the gateway, which authenticates with OIDC (VirtualService, TLS from the ingress gateway to the gateway pod, source-address policies) |
 | Sandbox pods | — | Never, by upstream design (below) |
 | Cluster domain | Often `*.<cluster-name>.<base>` | `*.<cluster-id>.kyma.ondemand.com`, set as `gatewayIngress.domain` |
 

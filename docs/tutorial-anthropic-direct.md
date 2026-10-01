@@ -430,8 +430,8 @@ cluster-wide — remove it separately with a matching
   [`walkthrough-claude-files.md`](walkthrough-claude-files.md) with its
   bedrockBridge variant.
 - **You want the CLI to run on a developer laptop over the public
-  internet** (no port-forward). Set `gatewayIngress.enabled=true` and
-  `gateway.oidc.issuer`. See
+  internet** (no port-forward). Set `gatewayIngress.enabled=true`,
+  `gateway.tls.enabled=true` and `gateway.oidc`. See
   [`production-deployment.md`](production-deployment.md).
 - **You want to route inference through SAP Cloud Connector.** See
   [`cloud-connector-setup.md`](cloud-connector-setup.md).

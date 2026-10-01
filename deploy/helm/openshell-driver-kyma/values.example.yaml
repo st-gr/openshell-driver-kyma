@@ -122,7 +122,9 @@ gatewayService:
 # ─── Remote access (Kyma ingress) ─────────────────────────────────────────
 # Publishes the gateway through the cluster's Istio ingress gateway. Refused
 # unless gateway.oidc.{issuer,audience,clientId} are set (the chart never
-# publishes an unauthenticated gateway). See docs/production-deployment.md.
+# publishes an unauthenticated gateway) and gateway.tls.enabled is true (the
+# gateway serves TLS; the ingress gateway re-encrypts to it). An install from
+# before 0.10.0 regenerates its PKI first. See docs/production-deployment.md.
 gatewayIngress:
   enabled: false
   domain: ""               # e.g. your-cluster-id.kyma.ondemand.com

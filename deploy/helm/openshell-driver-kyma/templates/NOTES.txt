@@ -5,7 +5,8 @@ Remote access
 ═══════════════════════════════════════════════════════════════════
 
 The gateway is published at https://{{ include "openshell-driver-kyma.gatewayIngressHost" . }}
-behind OIDC. Register it once with the openshell CLI (a browser opens for login):
+and authenticates every call with OIDC. Register it once with the openshell CLI
+(a browser opens for login):
 
   openshell gateway add https://{{ include "openshell-driver-kyma.gatewayIngressHost" . }} --name kyma \
     --oidc-issuer {{ .Values.gateway.oidc.issuer }} \
@@ -20,8 +21,7 @@ value's comment before you do).
 {{- if .Values.gatewayIngress.serviceHosts.enabled }}
 
 `openshell service expose <sandbox> <port>` publishes a sandbox service at
-https://<workspace>--<sandbox>.{{ .Values.gatewayIngress.domain }}/ (the CLI prints it as
-http://<host>:443/: use the host with https://),
+https://<workspace>--<sandbox>.{{ .Values.gatewayIngress.domain }}/,
 reachable from gatewayIngress.allowedCidrs, for the workspaces
 {{ join ", " .Values.gatewayIngress.serviceHosts.workspaces }}. The service must listen on 127.0.0.1.
 {{- end }}

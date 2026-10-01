@@ -99,10 +99,12 @@ or VPN-only routing:
 When the `openshell-driver-kyma` Helm chart is installed with
 `gatewayIngress.enabled=true`, a `gatewayIngress.domain` and
 `gateway.oidc.{issuer,audience,clientId}`, the gateway is reachable at
-`https://openshell.<cluster-domain>`. The ingress gateway requires a valid
-token of the issuer (and, with `gatewayIngress.allowedCidrs`, a source address
-in it) before forwarding; the gateway validates the same token again. Native
-gRPC clients dial the `:443` HTTPS endpoint with `authorization: Bearer <token>`.
+`https://openshell.<cluster-domain>`. The gateway validates the token of every
+call; the ingress gateway checks none, and with `gatewayIngress.allowedCidrs`
+admits only those source addresses. Native gRPC clients dial the `:443` HTTPS
+endpoint with `authorization: Bearer <token>`. A sandbox service URL the API
+returns carries the port the gateway binds in its pod (`:8080`); through the
+ingress gateway, drop the port.
 
 ### B. Private routing via SAP Cloud Connector
 
