@@ -9,14 +9,21 @@
 #
 #   OSH_DOMAIN          the cluster's wildcard domain, without "*."
 #   OSH_OIDC_ISSUER     the OIDC issuer URL
-#   OSH_OIDC_CLIENT_ID  the OIDC client id (also the audience)
+#   OSH_OIDC_CLIENT_ID  the OIDC client id the CLI logs in with
 #   OSH_ALLOWED_CIDRS   comma-separated source CIDR blocks for the ingress policies
 #   OSH_VALUES          the release's values file
 # Optional: OSH_RELEASE (ods), OSH_NAMESPACE (openshell-system), OSH_CLIENT_SECRET
 # (openshell-oidc-client: a Secret in OSH_NAMESPACE whose key client-secret holds the
 # OIDC client secret; needed when the values enable inferenceProvider),
+# OSH_HOOK_CLIENT_ID (the confidential client that secret belongs to, when it is not
+# OSH_OIDC_CLIENT_ID), OSH_OIDC_AUDIENCE (the tokens' audience; default the client id),
+# OSH_OIDC_JWKS_URI (JWKS URL for the ingress gateway, e.g. an in-cluster one),
+# OSH_AUTH_ONLY=1 (accept every authenticated identity instead of upstream's roles),
 # OSH_GATEWAY_NAME (kyma), OSH_SKIP_INSTALL=1 (check an install that is already
-# there), OSH_CHECK_IDLE=1 (also hold an idle stream for 400 s).
+# there), OSH_CHECK_IDLE=1 (also hold an idle stream for 400 s), OSH_DRY_RUN=1 (render
+# the chart with the values this script would install, print them and exit).
+#
+# e2e/keycloak/deploy.sh sets up a test identity provider and prints these values.
 #
 # `openshell gateway add` opens a browser for the OIDC login on first use.
 # Requires: kubectl (with KUBECONFIG set), helm, curl, python3, openshell.
@@ -52,18 +59,33 @@ http_code() { curl -s -o /dev/null -m 20 -w '%{http_code}' "$@" || true; }
 cidrs_json=$(python3 -c 'import json,sys; print(json.dumps([c.strip() for c in sys.argv[1].split(",") if c.strip()]))' \
 	"$OSH_ALLOWED_CIDRS")
 
+AUDIENCE=${OSH_OIDC_AUDIENCE:-$OSH_OIDC_CLIENT_ID}
+helm_args=(--set gatewayIngress.enabled=true
+	--set "gatewayIngress.domain=$OSH_DOMAIN"
+	--set gatewayIngress.serviceHosts.enabled=true
+	--set-json "gatewayIngress.allowedCidrs=$cidrs_json"
+	--set "gateway.oidc.issuer=$OSH_OIDC_ISSUER"
+	--set "gateway.oidc.audience=$AUDIENCE"
+	--set "gateway.oidc.clientId=$OSH_OIDC_CLIENT_ID"
+	--set "gateway.oidc.clientCredentialsSecret.name=$SECRET")
+if [[ -n ${OSH_HOOK_CLIENT_ID:-} ]]; then
+	helm_args+=(--set "gateway.oidc.clientCredentialsSecret.clientId=$OSH_HOOK_CLIENT_ID")
+fi
+if [[ -n ${OSH_OIDC_JWKS_URI:-} ]]; then
+	helm_args+=(--set "gateway.oidc.jwksUri=$OSH_OIDC_JWKS_URI")
+fi
+if [[ ${OSH_AUTH_ONLY:-} == 1 ]]; then
+	helm_args+=(--set gateway.oidc.authOnly=true)
+fi
+if [[ ${OSH_DRY_RUN:-} == 1 ]]; then
+	helm template "$RELEASE" "$CHART" -n "$NS" -f "$OSH_VALUES" "${helm_args[@]}" >/dev/null
+	printf '%s\n' "${helm_args[@]}"
+	exit 0
+fi
+
 if [[ ${OSH_SKIP_INSTALL:-} != 1 ]]; then
 	log "upgrading $RELEASE with gatewayIngress"
-	if helm upgrade "$RELEASE" "$CHART" -n "$NS" -f "$OSH_VALUES" \
-		--set gatewayIngress.enabled=true \
-		--set "gatewayIngress.domain=$OSH_DOMAIN" \
-		--set gatewayIngress.serviceHosts.enabled=true \
-		--set-json "gatewayIngress.allowedCidrs=$cidrs_json" \
-		--set "gateway.oidc.issuer=$OSH_OIDC_ISSUER" \
-		--set "gateway.oidc.audience=$OSH_OIDC_CLIENT_ID" \
-		--set "gateway.oidc.clientId=$OSH_OIDC_CLIENT_ID" \
-		--set gateway.oidc.authOnly=true \
-		--set "gateway.oidc.clientCredentialsSecret.name=$SECRET" \
+	if helm upgrade "$RELEASE" "$CHART" -n "$NS" -f "$OSH_VALUES" "${helm_args[@]}" \
 		--wait --timeout 10m >/dev/null; then
 		pass "helm upgrade with gatewayIngress (provider hook included)"
 	else
@@ -92,7 +114,7 @@ check "POST without a bearer is refused at the edge (HTTP $code, want 403)" test
 
 log "CLI through the ingress (a browser opens for the OIDC login)"
 openshell gateway add "https://$HOST" --name "$GW" --oidc-issuer "$OSH_OIDC_ISSUER" \
-	--oidc-client-id "$OSH_OIDC_CLIENT_ID" --oidc-audience "$OSH_OIDC_CLIENT_ID" || true
+	--oidc-client-id "$OSH_OIDC_CLIENT_ID" --oidc-audience "$AUDIENCE" || true
 check "openshell status through https://openshell.<domain>" osh status
 osh sandbox delete "$SANDBOX" >/dev/null 2>&1 || true
 check "sandbox create" osh sandbox create --detach --name "$SANDBOX" --from python:3.12-slim \

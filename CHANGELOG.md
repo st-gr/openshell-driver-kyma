@@ -33,7 +33,11 @@ is ignored, so the gateway silently loses its public route.
   `userRole` must now be set together.
 - **`inferenceProvider` with OIDC**: the provider hook logs in with the
   client-credentials grant when `gateway.oidc.clientCredentialsSecret` names
-  the client secret. The pair was refused before.
+  the client secret (and, for providers with a separate confidential client,
+  its `clientId`). The pair was refused before.
+- `e2e/keycloak`: a Keycloak test identity provider for clusters without one
+  (upstream's development realm, no credential in the repository), with its
+  own test.
 - `scripts/remote-access-check.sh`, the live acceptance check, and a flag check
   in `scripts/check-gateway-config.sh` (the pinned gateway image must know every
   flag the chart renders).

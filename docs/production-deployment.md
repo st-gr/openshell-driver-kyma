@@ -40,8 +40,11 @@ validate its signature, issuer and audience. You need:
   from the cluster (the gateway and the ingress gateway fetch its JWKS) and
   from your users' laptops (the CLI redirects to it on first auth).
 - **A client secret**, only if you use `inferenceProvider`: the chart's
-  provider hook authenticates with the client-credentials grant. Store it in
-  a Secret you manage, never in a values file:
+  provider hook authenticates with the client-credentials grant. If your
+  provider wants a separate confidential client for that grant (Keycloak
+  does), name it in `gateway.oidc.clientCredentialsSecret.clientId`; its
+  tokens need the same issuer and audience. Store the secret in a Secret you
+  manage, never in a values file:
 
   ```bash
   kubectl -n openshell-system create secret generic openshell-oidc-client \
