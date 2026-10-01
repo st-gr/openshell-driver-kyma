@@ -60,6 +60,7 @@ jobs:
             --set gateway.oidc.audience=osh-client \
             --set gateway.oidc.clientId=osh-client \
             --set gateway.oidc.authOnly=true \
+            --set gateway.tls.enabled=true \
             > /dev/null
 
       - name: Assert the driver's configuration surface

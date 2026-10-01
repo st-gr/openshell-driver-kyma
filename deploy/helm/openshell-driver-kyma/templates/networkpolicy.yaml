@@ -54,7 +54,7 @@ spec:
         - port: {{ .Values.driver.healthPort }}
           protocol: TCP
       {{- if .Values.gateway.enabled }}
-        - port: {{ include "openshell-driver-kyma.gatewayBindPort" . }}
+        - port: {{ .Values.gateway.grpcPort }}
           protocol: TCP
         - port: {{ .Values.gateway.healthPort }}
           protocol: TCP

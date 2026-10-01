@@ -396,23 +396,29 @@ gateway:
   #
   # When `enabled: false` (default), the chart passes `--disable-tls` to
   # the gateway and it serves plaintext HTTP — suitable only for
-  # in-cluster deployments behind a TLS-terminating reverse proxy
-  # (gatewayIngress and the Kyma gateway), or for fully-trusted local dev.
-  # NOT safe for direct public exposure.
+  # in-cluster use and a port-forward. NOT safe for direct public exposure.
   #
   # When `enabled: true`, the chart mounts the self-signed server-tls
   # Secret created by the gateway-jwt-pki-hook (requires
   # `gateway.sandboxJwt.enabled: true`) and passes
   #   --tls-cert /etc/openshell-tls/server/tls.crt
   #   --tls-key  /etc/openshell-tls/server/tls.key
-  # so the gateway terminates HTTPS itself.
+  # so the gateway terminates HTTPS itself. Sandboxes then dial https:// and
+  # verify the gateway against the chart CA. gatewayIngress requires it: the
+  # ingress gateway re-encrypts to the gateway pod.
+  #
+  # The PKI hook creates the certificate once and never replaces it. A release
+  # installed before 0.10.0 has one without this release's Service names, which
+  # no client can verify: delete the three PKI Secrets before the upgrade that
+  # turns this on (CHANGELOG.md, 0.10.0 upgrade note).
   #
   # When `tls.clientCa.enabled: true` (mTLS), the chart additionally
   # passes `--tls-client-ca /etc/openshell-tls/server/ca.crt` so the
   # gateway requires + verifies a client cert signed by the same self-
   # signed CA. Use this when fronting the gateway with an mTLS-enforcing
   # reverse proxy, OR when distributing the chart's client-tls Secret to
-  # a small set of admins as a simple SPIFFE-ish auth model.
+  # a small set of admins as a simple SPIFFE-ish auth model. Not with
+  # gatewayIngress: the ingress gateway presents no client certificate.
   tls:
     enabled: false
     clientCa:
@@ -523,16 +529,14 @@ gatewayIngress:
   # serviceHosts.
   allowedCidrs: []
   # Publish sandbox services (`openshell service expose`) at
-  # https://<workspace>--<sandbox>[--<service>].<domain>/. Through the remote
-  # gateway the CLI prints that URL as http://<host>:443/ (the gateway's scheme,
-  # the endpoint's port): use the host with https://.
-  # A browser sends no token, so these hosts are fenced by allowedCidrs only.
-  # They are published per workspace: routes and policies match <workspace>--*
-  # for the workspaces listed here, never the whole domain, so nothing else under
-  # the domain is affected and a workspace that is not listed is not reachable.
-  # With this on, the gateway binds port 80 in the pod (the pod gets the safe
-  # sysctl net.ipv4.ip_unprivileged_port_start=0), so the URL it hands to API
-  # and SDK clients is http://<host>/, which the Kyma gateway redirects to https.
+  # https://<workspace>--<sandbox>[--<service>].<domain>/, the URL the CLI prints.
+  # (API and SDK clients get the gateway's own value, which carries the port the
+  # gateway binds in the pod, :8080; drop the port.)
+  # The gateway does not authenticate requests to these hosts, so they are fenced
+  # by allowedCidrs only. They are published per workspace: routes and policies
+  # match <workspace>--* for the workspaces listed here, never the whole domain,
+  # so nothing else under the domain is affected and a workspace that is not
+  # listed is not reachable.
   serviceHosts:
     enabled: false
     workspaces: [default]

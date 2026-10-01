@@ -110,7 +110,8 @@ check_args remote-access \
   --set gateway.oidc.issuer=https://issuer.example \
   --set gateway.oidc.audience=osh-client \
   --set gateway.oidc.clientId=osh-client \
-  --set gateway.oidc.authOnly=true
+  --set gateway.oidc.authOnly=true \
+  --set gateway.tls.enabled=true
 check_args rbac-roles \
   --set gateway.oidc.issuer=https://issuer.example \
   --set gateway.oidc.audience=osh-client \

@@ -45,9 +45,10 @@
 #      that is not plain http(s) to a host name, credentials in the URL, nothing
 #      listed) fails the render, naming the value and never echoing credentials.
 #   8. remote access (gatewayIngress): values that cannot work (no OIDC, no domain, a
-#      host outside it, gateway TLS, service hosts without an allowlist, a malformed
-#      CIDR, one OIDC role without the other) fail the render; the gateway's listener,
-#      Service and NetworkPolicy follow the bind port; the Istio routes and policies
+#      host outside it, a gateway without TLS or with a client CA, service hosts
+#      without an allowlist, a malformed CIDR, one OIDC role without the other) fail
+#      the render; the gateway serves TLS on its usual port, with a certificate that
+#      names this release's Service; the Istio routes and policies
 #      are exactly the documented ones, in the ingress gateway's namespace; and the
 #      provider hook authenticates with the client-credentials grant under OIDC.
 #      8b: in every render, nothing applies to the shared ingress gateway as a whole:
@@ -289,16 +290,16 @@ try good-7-binaries '' t "${inference_common[@]}" --set "inferenceProvider.baseU
 # ingress gateway. The names start with good-8/bad-8, so checks 4 and 5 (r*.yaml) skip them.
 ingress_common=(--set gatewayIngress.enabled=true --set gatewayIngress.domain=example.org
 	--set gateway.oidc.issuer=https://issuer.example --set gateway.oidc.audience=osh-client
-	--set gateway.oidc.clientId=osh-client --set gateway.oidc.authOnly=true)
+	--set gateway.oidc.clientId=osh-client --set gateway.oidc.authOnly=true
+	--set gateway.tls.enabled=true)
 ingress_services=(--set gatewayIngress.serviceHosts.enabled=true
 	--set-json 'gatewayIngress.allowedCidrs=["203.0.113.0/24","2001:db8::/32"]')
 try good-8-ingress '' t "${ingress_common[@]}"
 try good-8-services '' t "${ingress_common[@]}" "${ingress_services[@]}"
 try good-8-host '' t "${ingress_common[@]}" --set gatewayIngress.host=osh.example.org
-# Another release name and namespace, and pod sysctls the operator already sets.
+# Another release name and namespace.
 try good-8-long-names '' prod-sandboxes "${ingress_common[@]}" "${ingress_services[@]}" \
-	--namespace a-rather-long-release-namespace-name \
-	--set-json 'podSecurityContext.sysctls=[{"name":"net.ipv4.ping_group_range","value":"0 0"}]'
+	--namespace a-rather-long-release-namespace-name
 # RBAC roles instead of authentication-only, and an issuer with neither (upstream's defaults).
 try good-8-rbac-roles '' t "${ingress_common[@]}" --set gateway.oidc.authOnly=false \
 	--set gateway.oidc.rolesClaim=groups --set gateway.oidc.adminRole=osh-admin --set gateway.oidc.userRole=osh-user
@@ -315,7 +316,10 @@ try bad-8-dot-domain 'example.org.' t "${ingress_common[@]}" --set gatewayIngres
 try bad-8-host-elsewhere 'openshell.other.org' t "${ingress_common[@]}" --set gatewayIngress.host=openshell.other.org
 try bad-8-host-two-labels 'a.b.example.org' t "${ingress_common[@]}" --set gatewayIngress.host=a.b.example.org
 try bad-8-host-service-shape 'a--b.example.org' t "${ingress_common[@]}" --set gatewayIngress.host=a--b.example.org
-try bad-8-tls 'gateway.tls.enabled' t "${ingress_common[@]}" --set gateway.tls.enabled=true
+# Behind the ingress gateway the gateway serves TLS, and takes no client certificate:
+# the ingress gateway has none to present.
+try bad-8-no-tls 'requires gateway.tls.enabled=true' t "${ingress_common[@]}" --set gateway.tls.enabled=false
+try bad-8-client-ca 'gateway.tls.clientCa.enabled' t "${ingress_common[@]}" --set gateway.tls.clientCa.enabled=true
 try bad-8-services-no-cidrs 'gatewayIngress.allowedCidrs' t "${ingress_common[@]}" \
 	--set gatewayIngress.serviceHosts.enabled=true
 try bad-8-cidr 'office' t "${ingress_common[@]}" --set-json 'gatewayIngress.allowedCidrs=["office"]'
@@ -355,11 +359,6 @@ try bad-8-istio-gateway-empty 'gatewayIngress.istioGateway' t "${ingress_common[
 # A 0.9.x values file that still enables the removed APIRule must not lose its route silently.
 try bad-8-apirule-leftover 'gatewayApirule' t --set gatewayApirule.enabled=true \
 	--set gatewayApirule.host=openshell.example.org
-# Pod security settings the operator already has: the sysctl is not listed twice (the API
-# server rejects a duplicate), and a null context still renders.
-try good-8-sysctl-present '' t "${ingress_common[@]}" "${ingress_services[@]}" \
-	--set-json 'podSecurityContext.sysctls=[{"name":"net.ipv4.ip_unprivileged_port_start","value":"0"}]'
-try good-8-null-pod-security '' t --set-json 'podSecurityContext=null'
 
 # 4 and 5. Renders for the NetworkPolicy and RBAC checks. Named rbac-*, so check 2's
 # render-*.yaml glob skips them, and check 4's r*.yaml glob takes them.
@@ -1057,7 +1056,7 @@ if userinfo_err.exists() and "secretpw" in userinfo_err.read_text():
 # bad-* cases above); these renders must succeed, and the removed APIRule is gone.
 INGRESS_RENDERS = ("good-8-ingress", "good-8-services", "good-8-host",
                    "good-8-long-names", "good-8-rbac-roles", "good-8-oidc-default-roles",
-                   "good-8-allow", "good-8-allow-services", "good-8-sysctl-present", "good-8-null-pod-security")
+                   "good-8-allow", "good-8-allow-services")
 for name in INGRESS_RENDERS:
     rendered(name)
 
@@ -1086,39 +1085,41 @@ def flag(args, name):
     """The values of every occurrence of a gateway flag."""
     return [args[i + 1] for i, a in enumerate(args) if a == name and i + 1 < len(args)]
 
-# The gateway's listener. Upstream prints a service URL with the bind port unless it is
-# http on 80, so with published service hosts the gateway binds 80 (which a non-root
-# container may only do with the unprivileged-port sysctl) and takes the service domain
-# from a wildcard --server-san; the Service adds an http-* port on the same listener.
-UNPRIVILEGED_PORTS = {"name": "net.ipv4.ip_unprivileged_port_start", "value": "0"}
-OPERATOR_SYSCTL = {"name": "net.ipv4.ping_group_range", "value": "0 0"}
-LISTENER = {  # render -> (bind port, pod sysctls, --server-san, Service ports on the listener)
-    "render-shared-true": (8080, None, [], {"grpc": 8080}),
-    "good-8-ingress": (8080, None, [], {"grpc": 8080}),
-    "good-8-services": (80, [UNPRIVILEGED_PORTS], ["*.example.org"], {"grpc": 8080, "http-services": 80}),
-    "good-8-long-names": (80, [OPERATOR_SYSCTL, UNPRIVILEGED_PORTS], ["*.example.org"],
-                          {"grpc": 8080, "http-services": 80}),
-    # The operator already lists the sysctl: one entry, not two.
-    "good-8-sysctl-present": (80, [UNPRIVILEGED_PORTS], ["*.example.org"], {"grpc": 8080, "http-services": 80}),
+# The gateway's listener. Behind the ingress gateway it serves TLS on its usual port,
+# without a client CA (the ingress gateway has no client certificate to present). It then
+# reports https service URLs, which upstream's CLI prints with the gateway endpoint's port:
+# https://<host>/ through the ingress. No privileged port, so no pod sysctl. With published
+# service hosts it takes the service domain from a wildcard --server-san, and the Service
+# adds an http-* port on the same listener.
+LISTENER = {  # render -> (TLS, --server-san, Service ports on the listener)
+    "render-shared-true": (False, [], {"grpc": 8080}),
+    "good-8-ingress": (True, [], {"grpc": 8080}),
+    "good-8-services": (True, ["*.example.org"], {"grpc": 8080, "http-services": 80}),
+    "good-8-long-names": (True, ["*.example.org"], {"grpc": 8080, "http-services": 80}),
 }
-for name, (port, sysctls, sans, service_ports) in LISTENER.items():
+for name, (tls, sans, service_ports) in LISTENER.items():
     if name != "render-shared-true" and not succeeded(name):
         continue
     gateway, pod, service, policy = gateway_parts(name)
     args = gateway["args"]
-    got = (flag(args, "--port"), (pod.get("securityContext") or {}).get("sysctls"), flag(args, "--server-san"),
-           [p["containerPort"] for p in gateway["ports"] if p["name"] == "grpc"])
-    if got != ([str(port)], sysctls, sans, [port]):
-        failures.append(f"{name}: gateway (--port, pod sysctls, --server-san, grpc containerPort) is {got}, "
-                        f"want {([str(port)], sysctls, sans, [port])}")
+    got = (flag(args, "--port"), [p["containerPort"] for p in gateway["ports"] if p["name"] == "grpc"],
+           (pod.get("securityContext") or {}).get("sysctls"), flag(args, "--server-san"))
+    if got != (["8080"], [8080], None, sans):
+        failures.append(f"{name}: gateway (--port, grpc containerPort, pod sysctls, --server-san) is {got}, "
+                        f"want {(['8080'], [8080], None, sans)}")
+    got = (flag(args, "--tls-cert"), flag(args, "--tls-key"), "--tls-client-ca" in args, "--disable-tls" in args)
+    want = ((["/etc/openshell-tls/server/tls.crt"], ["/etc/openshell-tls/server/tls.key"], False, False)
+            if tls else ([], [], False, True))
+    if got != want:
+        failures.append(f"{name}: gateway TLS (--tls-cert, --tls-key, has --tls-client-ca, has --disable-tls) "
+                        f"is {got}, want {want}")
     ports = {p["name"]: (p["port"], p["targetPort"]) for p in service["spec"]["ports"]
              if p["name"] in ("grpc", "http-services")}
     if ports != {n: (p, "grpc") for n, p in service_ports.items()}:
         failures.append(f"{name}: the Service's listener ports are {ports}, want {service_ports} -> grpc")
     allowed = [p["port"] for p in policy["spec"]["ingress"][0]["ports"]] if policy else []
-    if port not in allowed or (port != 8080 and 8080 in allowed):
-        failures.append(f"{name}: the driver pod's NetworkPolicy admits ports {allowed}, "
-                        f"which must include the gateway's bind port {port} and no stale 8080")
+    if 8080 not in allowed:
+        failures.append(f"{name}: the driver pod's NetworkPolicy admits ports {allowed}, not the gateway's 8080")
 
 # OIDC authorization flags. Upstream defaults the roles to openshell-admin/openshell-user,
 # so authentication-only mode needs both passed empty; without authOnly or roles the
@@ -1211,6 +1212,24 @@ for name, want in INGRESS_OBJECTS.items():
     for key in sorted(set(got) | set(want)):
         if got.get(key) != want.get(key):
             failures.append(f"{name}: {'/'.join(key)} is {got.get(key)}, want {want.get(key)}")
+# The PKI hook mints the gateway's server certificate for the names clients verify it
+# under: this release's Service (sandboxes, the provider hook, the ingress gateway) and
+# loopback (a port-forward). Upstream's own defaults name a release called "openshell",
+# so without these no client in the cluster could verify a gateway that serves TLS.
+def pki_sans(name):
+    job = next(d for d in docs(work / f"{name}.yaml") if d.get("kind") == "Job"
+               and d["metadata"]["name"].endswith("-jwt-pki-hook"))
+    return [a.split("=", 1)[1] for a in job["spec"]["template"]["spec"]["containers"][0]["args"]
+            if a.startswith("--server-san=")]
+
+for name, (ns, fullname) in (("render-shared-true", T), ("good-8-long-names", (
+        "a-rather-long-release-namespace-name", "prod-sandboxes-openshell-driver-kyma"))):
+    if name != "render-shared-true" and not succeeded(name):
+        continue
+    want = [fullname, f"{fullname}.{ns}", f"{fullname}.{ns}.svc", f"{fullname}.{ns}.svc.cluster.local",
+            "localhost", "127.0.0.1"]
+    if pki_sans(name) != want:
+        failures.append(f"{name}: the PKI hook's --server-san are {pki_sans(name)}, want {want}")
 # Nothing of it without gatewayIngress: not by default, and not with OIDC alone.
 for name in ("render-shared-true", "good-8-oidc-default-roles"):
     stray = sorted("/".join(k) for k in ingress_objects(name))

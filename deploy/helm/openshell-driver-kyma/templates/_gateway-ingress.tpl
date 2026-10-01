@@ -15,18 +15,6 @@ every inbound connection that does not arrive through the gateway's relay.
 {{- end -}}
 
 {{/*
-The port the gateway binds in the pod. Upstream prints a service URL as
-<scheme>://<host>:<bind port>/ and leaves the port out only for http on 80
-(openshell-server src/service_routing.rs endpoint_url at the pinned tag), so with
-published service hosts the gateway binds 80: the URL is then http://<host>/,
-which the Kyma gateway's http server redirects to https. Otherwise it binds
-gateway.grpcPort, as before. The Service keeps gateway.grpcPort either way.
-*/}}
-{{- define "openshell-driver-kyma.gatewayBindPort" -}}
-{{- if include "openshell-driver-kyma.serviceHostsEnabled" . -}}80{{- else -}}{{ .Values.gateway.grpcPort }}{{- end -}}
-{{- end -}}
-
-{{/*
 Name prefix of the policies rendered into gatewayIngress.ingressNamespace. It
 carries the release namespace, so two releases never collide there.
 */}}
@@ -92,8 +80,14 @@ root namespace, where a policy without a selector applies to every workload. */ 
 {{- if not (and $oidc.issuer $oidc.audience $oidc.clientId) -}}
 {{- fail "REFUSING to publish an unauthenticated gateway: gatewayIngress.enabled=true requires gateway.oidc.issuer, gateway.oidc.audience and gateway.oidc.clientId. Without OIDC the gateway accepts every caller, and anyone reaching the public host could create sandboxes." -}}
 {{- end -}}
-{{- if .Values.gateway.tls.enabled -}}
-{{- fail "gatewayIngress.enabled=true cannot be combined with gateway.tls.enabled=true: the ingress gateway forwards plaintext HTTP/2 to the gateway pod. Set gateway.tls.enabled=false." -}}
+{{- /* Upstream's shape for a gateway behind a TLS-terminating proxy that re-encrypts
+(its chart's grpcRoute.backendTLSPolicy): the gateway serves TLS and takes no client
+certificate, because the proxy has none to present. */ -}}
+{{- if not .Values.gateway.tls.enabled -}}
+{{- fail "gatewayIngress.enabled=true requires gateway.tls.enabled=true: the gateway terminates TLS itself and the ingress gateway re-encrypts to it, so the hop into the pod is encrypted and the service URLs the gateway reports are https. An install from before 0.10.0 must regenerate its PKI first (CHANGELOG.md, 0.10.0 upgrade note)." -}}
+{{- end -}}
+{{- if .Values.gateway.tls.clientCa.enabled -}}
+{{- fail "gatewayIngress.enabled=true cannot be combined with gateway.tls.clientCa.enabled=true: the ingress gateway presents no client certificate to the gateway. Callers authenticate with OIDC." -}}
 {{- end -}}
 {{- if not $in.domain -}}
 {{- fail "gatewayIngress.enabled=true requires gatewayIngress.domain: the cluster's wildcard domain (the Kyma gateway's *.<domain>), without the leading \"*.\"." -}}
