@@ -268,9 +268,14 @@ inference_try good-8-inference-oidc-only-hook-client '' --set "inferenceProvider
 	--set gateway.oidc.issuer=https://issuer.example --set gateway.oidc.audience=osh-client \
 	--set gateway.oidc.clientCredentialsSecret.name=oidc-client \
 	--set gateway.oidc.clientCredentialsSecret.clientId=osh-hook
-# ...and the hook dials http:// with no client certificate, so it cannot reach a gateway
-# with TLS: in three series, both together fail; TLS alone and the provider alone render.
-inference_try bad-3h-inference-tls 'gateway.tls.enabled' --set "inferenceProvider.baseUrl=$inference_url" \
+# ...and against a gateway with TLS the hook has a path only under OIDC, where it registers
+# the gateway and trusts the chart CA. Without OIDC both together fail; TLS alone, the
+# provider alone, and both with OIDC render.
+inference_try bad-3h-inference-tls 'requires gateway.oidc.issuer' --set "inferenceProvider.baseUrl=$inference_url" \
+	--set gateway.tls.enabled=true
+inference_try good-8-inference-oidc-tls '' --set "inferenceProvider.baseUrl=$inference_url" \
+	--set gateway.oidc.issuer=https://issuer.example --set gateway.oidc.audience=osh-client \
+	--set gateway.oidc.clientId=osh-client --set gateway.oidc.clientCredentialsSecret.name=oidc-client \
 	--set gateway.tls.enabled=true
 try good-3h-tls-no-inference '' t --set gateway.tls.enabled=true
 try good-3h-inference-no-tls '' t "${inference_common[@]}" --set "inferenceProvider.baseUrl=$inference_url" \
@@ -1422,6 +1427,36 @@ for name, want in (("good-8-inference-oidc", "osh-client"), ("good-8-inference-o
     got = {e["name"]: e.get("value") for e in hook_of(name)[0]}.get("OIDC_CLIENT_ID")
     if got != want:
         failures.append(f"{name}: the hook logs in as client {got!r}, want {want!r}")
+# Against a gateway that serves TLS the hook dials https:// and trusts the chart CA: it
+# mounts only ca.crt of the client TLS Secret (it presents no client certificate) and puts
+# it where upstream's CLI reads a registered gateway's CA, once `gateway add` has registered
+# the gateway. The health port stays plain HTTP. Without TLS none of it is rendered.
+CA_DIR = 'ca_dir="${XDG_CONFIG_HOME:-${HOME}/.config}/openshell/gateways/in-cluster/mtls"'
+CA_COPY = 'cp /pki/ca.crt "${ca_dir}/ca.crt"'
+for name, tls in (("good-8-inference-oidc-tls", True), ("good-8-inference-oidc", False)):
+    if rendered(name) is None:
+        continue
+    job = next(d for d in docs(work / f"{name}.yaml") if d.get("kind") == "Job"
+               and d["metadata"]["name"].endswith("-inference-provider-hook"))
+    pod = job["spec"]["template"]["spec"]
+    env, script = hook_of(name)
+    urls = {e["name"]: e.get("value") or "" for e in env}
+    volume = [v for v in pod.get("volumes", []) if v.get("name") == "gateway-ca"]
+    mount = [m for m in pod["containers"][0].get("volumeMounts", []) if m.get("name") == "gateway-ca"]
+    if tls:
+        ok = (urls.get("GATEWAY_URL", "").startswith("https://t-openshell-driver-kyma.")
+              and volume == [{"name": "gateway-ca", "secret": {"secretName": "t-openshell-driver-kyma-client-tls",
+                                                              "items": [{"key": "ca.crt", "path": "ca.crt"}]}}]
+              and mount == [{"name": "gateway-ca", "mountPath": "/pki", "readOnly": True}]
+              and CA_DIR in script and CA_COPY in script
+              and script.index("openshell gateway add") < script.index(CA_COPY) < script.index("osh() {"))
+    else:
+        ok = (urls.get("GATEWAY_URL", "").startswith("http://t-openshell-driver-kyma.")
+              and not volume and not mount and "/pki" not in script)
+    if not ok or not urls.get("GATEWAY_HEALTH_URL", "").startswith("http://"):
+        failures.append(f"{name}: with gateway TLS {'on' if tls else 'off'} the hook has GATEWAY_URL "
+                        f"{urls.get('GATEWAY_URL')!r}, GATEWAY_HEALTH_URL {urls.get('GATEWAY_HEALTH_URL')!r}, "
+                        f"CA volume {volume}, mount {mount}, CA copy in script: {CA_COPY in script}")
 # Without OIDC nothing changes: no registration, no OIDC environment.
 env, script = hook_of("rbac-inference")
 if "gateway add" in script or '--gateway-endpoint "${GATEWAY_URL}"' not in script or any(

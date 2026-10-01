@@ -23,6 +23,8 @@
 # OPENSHELL_OIDC_CLIENT_SECRET for a token with the client-credentials grant and
 # stores it, and every later call names that gateway. The client secret comes
 # from gateway.oidc.clientCredentialsSecret and is never expanded in the script.
+# When the gateway serves TLS (gateway.tls.enabled, which needs OIDC here), the
+# hook dials https:// and trusts the chart CA, mounted from the client TLS Secret.
 #
 # The chart never touches the API key — it stays inside the Secret
 # named by .Values.inferenceProvider.credentialSecret.{name,key}.
@@ -128,10 +130,11 @@ spec:
               drop: [ALL]
           env:
             - name: GATEWAY_URL
-              value: "http://{{ include "openshell-driver-kyma.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.gateway.grpcPort }}"
+              value: "{{ ternary "https" "http" .Values.gateway.tls.enabled }}://{{ include "openshell-driver-kyma.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.gateway.grpcPort }}"
             - name: GATEWAY_HEALTH_URL
               # Gateway HTTP healthz lives on a different port from the gRPC
-              # port. Requires `gw-health` to be in the chart's Service.
+              # port, in plain HTTP whatever gateway.tls.enabled says. Requires
+              # `gw-health` to be in the chart's Service.
               value: "http://{{ include "openshell-driver-kyma.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.gateway.healthPort }}"
             - name: PROVIDER_NAME
               value: {{ include "openshell-driver-kyma.inferenceProviderName" . | quote }}
@@ -163,6 +166,11 @@ spec:
             - name: profile
               mountPath: /profile
               readOnly: true
+            {{- if .Values.gateway.tls.enabled }}
+            - name: gateway-ca
+              mountPath: /pki
+              readOnly: true
+            {{- end }}
           command:
             - /bin/sh
             - -eu
@@ -218,6 +226,14 @@ spec:
               openshell gateway add "${GATEWAY_URL}" --name in-cluster \
                 --oidc-issuer "${OIDC_ISSUER}" --oidc-client-id "${OIDC_CLIENT_ID}" \
                 --oidc-audience "${OIDC_AUDIENCE}"
+              {{- if .Values.gateway.tls.enabled }}
+              # The gateway's certificate is signed by the chart CA. The CLI reads a
+              # registered gateway's CA from that gateway's directory (upstream
+              # openshell-cli src/tls.rs, with_default_paths, at the pinned tag).
+              ca_dir="${XDG_CONFIG_HOME:-${HOME}/.config}/openshell/gateways/in-cluster/mtls"
+              mkdir -p "${ca_dir}"
+              cp /pki/ca.crt "${ca_dir}/ca.crt"
+              {{- end }}
               osh() { openshell --gateway in-cluster "$@"; }
               {{- else }}
               osh() { openshell --gateway-endpoint "${GATEWAY_URL}" "$@"; }
@@ -285,4 +301,14 @@ spec:
         - name: profile
           configMap:
             name: {{ include "openshell-driver-kyma.fullname" . }}-inference-profile
+        {{- if .Values.gateway.tls.enabled }}
+        # Only the CA certificate of the client TLS Secret: the hook presents no
+        # client certificate.
+        - name: gateway-ca
+          secret:
+            secretName: {{ include "openshell-driver-kyma.clientTlsSecretName" . }}
+            items:
+              - key: ca.crt
+                path: ca.crt
+        {{- end }}
 {{- end }}

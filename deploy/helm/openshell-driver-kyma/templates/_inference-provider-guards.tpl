@@ -74,12 +74,12 @@ pinned tag). The hook therefore authenticates with the client-credentials grant
 {{- fail "inferenceProvider.enabled=true with gateway.oidc.issuer requires gateway.oidc.clientCredentialsSecret.name (and .key): a Secret you manage in .Release.Namespace holding the OIDC client secret, which the provider hook exchanges for a token. Without one, leave inferenceProvider disabled and register the profile and provider from an authenticated CLI session (docs/production-deployment.md)." -}}
 {{- end -}}
 {{- end -}}
-{{- /* The hook dials the gateway at http:// (GATEWAY_URL and GATEWAY_HEALTH_URL in
-inference-provider-hook.yaml, whatever gateway.tls.enabled says) and mounts no
-client certificate, so against a gateway that terminates TLS every call fails
-and so does the install. */ -}}
-{{- if .Values.gateway.tls.enabled -}}
-{{- fail "inferenceProvider.enabled=true cannot be combined with gateway.tls.enabled=true: the provider hook always dials the gateway over http:// and presents no client certificate, so it cannot reach a gateway that terminates TLS. Set inferenceProvider.enabled=false and register the profile and provider from a CLI session that trusts the gateway's CA (docs/production-deployment.md), or set gateway.tls.enabled=false." -}}
+{{- /* Against a gateway that serves TLS the hook dials https:// and trusts the
+chart CA only on its OIDC path, where it registers the gateway and the CLI reads
+that gateway's CA (inference-provider-hook.yaml). Without OIDC it has no such
+path: every call would fail, and so would the install. */ -}}
+{{- if and .Values.gateway.tls.enabled (not .Values.gateway.oidc.issuer) -}}
+{{- fail "inferenceProvider.enabled=true with gateway.tls.enabled=true requires gateway.oidc.issuer: the provider hook reaches a gateway that serves TLS only as a registered OIDC gateway. Set gateway.oidc (the hook then logs in with the client-credentials grant and trusts the chart CA), or set inferenceProvider.enabled=false and register the profile and provider from a CLI session that trusts the gateway's CA (docs/production-deployment.md), or set gateway.tls.enabled=false." -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
