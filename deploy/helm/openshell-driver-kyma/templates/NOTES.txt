@@ -11,11 +11,18 @@ behind OIDC. Register it once with the openshell CLI (a browser opens for login)
     --oidc-issuer {{ .Values.gateway.oidc.issuer }} \
     --oidc-client-id {{ .Values.gateway.oidc.clientId }} \
     --oidc-audience {{ .Values.gateway.oidc.audience }}
+{{- if eq .Values.gatewayIngress.policyAction "DENY" }}
+
+If that host answers `403 RBAC: access denied` to everyone, the ingress gateway
+already allowlists per host: set gatewayIngress.policyAction=ALLOW (see the
+value's comment before you do).
+{{- end }}
 {{- if .Values.gatewayIngress.serviceHosts.enabled }}
 
 `openshell service expose <sandbox> <port>` prints URLs of the form
 http://<workspace>--<sandbox>.{{ .Values.gatewayIngress.domain }}/ (redirected to https),
-reachable from gatewayIngress.allowedCidrs. The service must listen on 127.0.0.1.
+reachable from gatewayIngress.allowedCidrs, for the workspaces
+{{ join ", " .Values.gatewayIngress.serviceHosts.workspaces }}. The service must listen on 127.0.0.1.
 {{- end }}
 {{- end }}
 {{- if .Values.inferenceProvider.enabled }}

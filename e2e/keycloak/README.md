@@ -27,13 +27,19 @@ defaults (roles `openshell-admin` / `openshell-user` in `realm_access.roles`):
 OSH_DOMAIN=<cluster-domain> OSH_ALLOWED_CIDRS=<your CIDR blocks> e2e/keycloak/deploy.sh
 ```
 
+Set `OSH_POLICY_ACTION=ALLOW` if the ingress gateway already has ALLOW
+AuthorizationPolicies (the default, `DENY`, is for one without; same rule as the
+chart's `gatewayIngress.policyAction`).
+
 Keycloak is published at `keycloak.<cluster-domain>` through the cluster's
-Istio ingress gateway, admitted for your CIDR blocks and for the cluster's own
+Istio ingress gateway, reachable from your CIDR blocks and from the cluster's own
 pod and node networks (the OpenShell gateway and the provider hook reach the
 issuer through that public host; the ingress gateway's JWKS fetch uses the
 in-cluster Service). Credentials are generated into Secrets in the cluster and
 never printed; the script ends with the values `remote-access-check.sh` needs
-and the command that reads the `dev` password. `OSH_DELETE=1` removes it all.
+and the command that reads the `dev` password. The script labels the namespace
+and the Secret it creates and refuses to deploy into, overwrite or delete
+anything it did not create. `OSH_DELETE=1` removes it all.
 
 ## Test
 
@@ -41,7 +47,9 @@ and the command that reads the `dev` password. `OSH_DELETE=1` removes it all.
 e2e/keycloak/test.sh
 ```
 
-Renders the manifests, checks them and the realm for literal credentials, then
+Renders the manifests in both policy actions, checks them and the realm for
+literal credentials, runs the script against a `kubectl` stand-in to prove it
+leaves a foreign namespace alone, then
 imports the realm into a throwaway Keycloak in Docker and checks the tokens:
 the client-credentials grant, and a browser login with PKCE on a loopback
 redirect, each for issuer, audience, roles and the claims the gateway

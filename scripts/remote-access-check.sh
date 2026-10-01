@@ -19,9 +19,13 @@
 # OSH_OIDC_CLIENT_ID), OSH_OIDC_AUDIENCE (the tokens' audience; default the client id),
 # OSH_OIDC_JWKS_URI (JWKS URL for the ingress gateway, e.g. an in-cluster one),
 # OSH_AUTH_ONLY=1 (accept every authenticated identity instead of upstream's roles),
+# OSH_POLICY_ACTION (ALLOW when the ingress gateway already has ALLOW policies; the
+# chart's default, DENY, is for a gateway without any),
 # OSH_GATEWAY_NAME (kyma), OSH_SKIP_INSTALL=1 (check an install that is already
-# there), OSH_CHECK_IDLE=1 (also hold an idle stream for 400 s), OSH_DRY_RUN=1 (render
-# the chart with the values this script would install, print them and exit).
+# there), OSH_CHECK_IDLE=1 (also hold an idle stream for 400 s), OSH_REVERT=1 (afterwards
+# upgrade the release back to OSH_VALUES alone and check its ingress policies are gone),
+# OSH_DRY_RUN=1 (render the chart with the values this script would install, print them
+# and exit).
 #
 # e2e/keycloak/deploy.sh sets up a test identity provider and prints these values.
 #
@@ -77,17 +81,26 @@ fi
 if [[ ${OSH_AUTH_ONLY:-} == 1 ]]; then
 	helm_args+=(--set gateway.oidc.authOnly=true)
 fi
+if [[ -n ${OSH_POLICY_ACTION:-} ]]; then
+	helm_args+=(--set "gatewayIngress.policyAction=$OSH_POLICY_ACTION")
+fi
 if [[ ${OSH_DRY_RUN:-} == 1 ]]; then
 	helm template "$RELEASE" "$CHART" -n "$NS" -f "$OSH_VALUES" "${helm_args[@]}" >/dev/null
 	printf '%s\n' "${helm_args[@]}"
 	exit 0
 fi
 
+# The provider the chart's hook registers with these values; empty when the values do
+# not enable inferenceProvider (the hook template then renders nothing).
+provider=$(helm template "$RELEASE" "$CHART" -n "$NS" -f "$OSH_VALUES" "${helm_args[@]}" \
+	--show-only templates/inference-provider-hook.yaml 2>/dev/null \
+	| awk '/- name: PROVIDER_NAME/ { getline; gsub(/^[[:space:]]*value:[[:space:]]*"?|"?[[:space:]]*$/, ""); print; exit }' || true)
+
 if [[ ${OSH_SKIP_INSTALL:-} != 1 ]]; then
 	log "upgrading $RELEASE with gatewayIngress"
 	if helm upgrade "$RELEASE" "$CHART" -n "$NS" -f "$OSH_VALUES" "${helm_args[@]}" \
 		--wait --timeout 10m >/dev/null; then
-		pass "helm upgrade with gatewayIngress (provider hook included)"
+		pass "helm upgrade with gatewayIngress${provider:+ (the provider hook ran)}"
 	else
 		fail "helm upgrade with gatewayIngress (kubectl -n $NS get pods,jobs)"
 	fi
@@ -126,8 +139,10 @@ for _ in $(seq 1 36); do
 	sleep 5
 done
 check "sandbox reaches Ready (phase: ${ready:-none})" test "$ready" = Ready
-out=$(osh sandbox exec --name "$SANDBOX" -- sh -c 'echo exec-ok' 2>&1 || true)
-check "sandbox exec through the ingress" grep -q exec-ok <<<"$out"
+# The marker is computed in the sandbox, so an error that echoes the command cannot match.
+# shellcheck disable=SC2016 # the sandbox's shell expands it
+out=$(osh sandbox exec --name "$SANDBOX" -- sh -c 'echo exec-$((6 * 7))' 2>&1 || true)
+check "sandbox exec through the ingress" grep -q exec-42 <<<"$out"
 
 log "sandbox service URL"
 url=$(osh service expose "$SANDBOX" 8080 2>&1 | grep -oE 'https?://[^ ]+' | head -1 || true)
@@ -141,22 +156,39 @@ check "https://default--$SANDBOX.<domain>/ serves the sandbox's directory listin
 code=$(http_code "https://default--no-such-sandbox.$OSH_DOMAIN/")
 check "an unknown sandbox host is answered by the gateway, not by a sandbox (HTTP $code, want 404 or 503)" \
 	test "$code" = 404 -o "$code" = 503
+code=$(http_code "https://unpublished--$SANDBOX.$OSH_DOMAIN/")
+check "a workspace that is not published is not served (HTTP $code, want 403 or 404)" \
+	test "$code" = 403 -o "$code" = 404
 
-if kubectl -n "$NS" get job -l "app.kubernetes.io/instance=$RELEASE" -o name 2>/dev/null | grep -q inference-provider-hook \
-	|| grep -qE '^inferenceProvider:' "$OSH_VALUES"; then
+if [[ -n $provider ]]; then
 	log "provider registered by the hook (client credentials)"
-	check "openshell provider list succeeds with the user's token" osh provider list
+	out=$(osh provider list 2>&1 || true)
+	check "provider $provider is registered: the hook's client-credentials login worked" \
+		grep -qw -- "$provider" <<<"$out"
 fi
 
 if [[ ${OSH_CHECK_IDLE:-} == 1 ]]; then
 	log "idle stream for 400 s (Envoy's stream idle timeout is 300 s)"
-	out=$(osh sandbox exec --name "$SANDBOX" -- sh -c 'sleep 400; echo idle-ok' 2>&1 || true)
-	check "an exec stream idle for 400 s survives" grep -q idle-ok <<<"$out"
+	# shellcheck disable=SC2016 # the sandbox's shell expands it
+	out=$(osh sandbox exec --name "$SANDBOX" -- sh -c 'sleep 400; echo idle-$((6 * 7))' 2>&1 || true)
+	check "an exec stream idle for 400 s survives" grep -q idle-42 <<<"$out"
 fi
 
 log "cleanup"
 osh service delete "$SANDBOX" >/dev/null 2>&1 || true
 check "sandbox delete" osh sandbox delete "$SANDBOX"
+
+if [[ ${OSH_REVERT:-} == 1 ]]; then
+	log "reverting $RELEASE to $OSH_VALUES alone"
+	if helm upgrade "$RELEASE" "$CHART" -n "$NS" -f "$OSH_VALUES" --wait --timeout 10m >/dev/null; then
+		pass "helm upgrade back to the values file"
+	else
+		fail "helm upgrade back to the values file (kubectl -n $NS get pods)"
+	fi
+	left=$(kubectl -n istio-system get requestauthentication,authorizationpolicy -o name 2>/dev/null \
+		| grep -c -- "$NS-$fullname-openshell-" || true)
+	check "no ingress policy of this release is left in istio-system (found $left)" test "$left" = 0
+fi
 
 printf '\n'
 printf '%s\n' "${results[@]}" | sed "s/${OSH_DOMAIN//./\\.}/<domain>/g"

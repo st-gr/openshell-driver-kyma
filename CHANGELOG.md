@@ -7,8 +7,8 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 ## [0.10.0] — 2026-09-30
 
 **UPGRADE NOTE: `gatewayApirule` is removed.** Move to `gatewayIngress` (table
-below) before `helm upgrade`; a values file that still carries `gatewayApirule`
-is ignored, so the gateway silently loses its public route.
+below) before `helm upgrade`; the chart refuses a values file that still enables
+`gatewayApirule`, so the gateway cannot silently lose its public route.
 
 ### Added
 
@@ -16,20 +16,28 @@ is ignored, so the gateway silently loses its public route.
   cluster's Istio ingress gateway with OIDC, so the `openshell` CLI works
   without a port-forward. Renders a VirtualService for `openshell.<domain>` in
   the release namespace and, on the ingress gateway in `istio-system`, a
-  RequestAuthentication plus an ALLOW AuthorizationPolicy that requires a token
-  of the issuer (and, with `allowedCidrs`, a source address). The gateway
-  validates the same token again. The chart refuses to publish a gateway
-  without `gateway.oidc.{issuer,audience,clientId}`.
+  RequestAuthentication plus an AuthorizationPolicy that lets a request through
+  only with a token of the issuer (and, with `allowedCidrs`, from a listed
+  source address). The gateway validates the same token again. The chart
+  refuses to publish a gateway without `gateway.oidc.{issuer,audience,clientId}`.
+- **`gatewayIngress.policyAction`** chooses how those policies are written:
+  `DENY` (default) for an ingress gateway without ALLOW policies, naming only
+  the chart's own hosts and leaving every other host alone; `ALLOW` for a
+  gateway that already allowlists per host. An ALLOW policy on a gateway
+  without any would make it deny every other application's hosts; see
+  production-deployment before choosing.
 - **Published service URLs (`gatewayIngress.serviceHosts`)**:
   `openshell service expose` prints `http://<workspace>--<sandbox>.<domain>/`
-  (redirected to HTTPS), routed by a wildcard VirtualService to the gateway and
-  fenced by `allowedCidrs`. The gateway then binds port 80 in its pod (safe
-  sysctl `net.ipv4.ip_unprivileged_port_start=0`) and takes the domain from
-  `--server-san`. The policy admits `allowedCidrs` to every host under the
-  domain; see production-deployment.
+  (redirected to HTTPS), routed to the gateway and fenced by `allowedCidrs`.
+  Published per workspace (`serviceHosts.workspaces`, default `[default]`):
+  routes and policies match `<workspace>--*`, never the whole domain. The
+  gateway then binds port 80 in its pod (safe sysctl
+  `net.ipv4.ip_unprivileged_port_start=0`) and takes the domain from
+  `--server-san`.
 - **`gateway.oidc.authOnly`**, `rolesClaim`, `clientId`, `jwksUri` and
   `clientCredentialsSecret`. `authOnly: true` selects upstream's
-  authentication-only mode (both roles passed empty); `adminRole` and
+  authentication-only mode (both roles passed empty; every authenticated
+  identity is then a platform admin); `adminRole` and
   `userRole` must now be set together.
 - **`inferenceProvider` with OIDC**: the provider hook logs in with the
   client-credentials grant when `gateway.oidc.clientCredentialsSecret` names

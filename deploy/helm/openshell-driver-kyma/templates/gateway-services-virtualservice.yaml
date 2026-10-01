@@ -1,9 +1,12 @@
 {{- if include "openshell-driver-kyma.serviceHostsEnabled" . -}}
 # Browser route for the URLs `openshell service expose` prints:
-# <workspace>--<sandbox>[--<service>].<domain>. Only authorities of that shape are
-# routed; an exact-host VirtualService of another application keeps precedence
-# over this wildcard. The destination is the Service's http-services port, so the
-# ingress gateway speaks HTTP/1.1 to the gateway and WebSocket upgrades pass.
+# <workspace>--<sandbox>[--<service>].<domain>. Only authorities of that shape, in a
+# workspace of gatewayIngress.serviceHosts.workspaces, are routed: the policies in
+# gateway-ingress-auth.yaml fence exactly those hosts, so a workspace that is not
+# listed must not be routed either. An exact-host VirtualService of another
+# application keeps precedence over this wildcard. The destination is the Service's
+# http-services port, so the ingress gateway speaks HTTP/1.1 to the gateway and
+# WebSocket upgrades pass.
 apiVersion: networking.istio.io/v1
 kind: VirtualService
 metadata:
@@ -19,7 +22,7 @@ spec:
   http:
     - match:
         - authority:
-            regex: '^[a-z0-9]+(-[a-z0-9]+)*--[a-z0-9]+(-[a-z0-9]+)*(--[a-z0-9]+(-[a-z0-9]+)*)?\.{{ regexReplaceAll "\\." .Values.gatewayIngress.domain "\\." }}(:[0-9]+)?$'
+            regex: '^({{ join "|" .Values.gatewayIngress.serviceHosts.workspaces }})--[a-z0-9]+(-[a-z0-9]+)*(--[a-z0-9]+(-[a-z0-9]+)*)?\.{{ regexReplaceAll "\\." .Values.gatewayIngress.domain "\\." }}(:[0-9]+)?$'
       route:
         - destination:
             host: {{ include "openshell-driver-kyma.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local

@@ -43,10 +43,21 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- $podSecurity := deepCopy .Values.podSecurityContext }}
+      {{- $podSecurity := deepCopy (default (dict) .Values.podSecurityContext) }}
       {{- if and .Values.gateway.enabled (lt (int (include "openshell-driver-kyma.gatewayBindPort" .)) 1024) }}
-      {{- /* The gateway runs as a non-root user and binds a port below 1024. */}}
-      {{- $_ := set $podSecurity "sysctls" (append (default (list) $podSecurity.sysctls) (dict "name" "net.ipv4.ip_unprivileged_port_start" "value" "0")) }}
+      {{- /* The gateway runs as a non-root user and binds a port below 1024. The
+      sysctl is added unless the operator already lists it: the API server rejects
+      a pod that names a sysctl twice. */}}
+      {{- $sysctls := default (list) $podSecurity.sysctls }}
+      {{- $present := false }}
+      {{- range $sysctls }}
+      {{- if eq .name "net.ipv4.ip_unprivileged_port_start" }}
+      {{- $present = true }}
+      {{- end }}
+      {{- end }}
+      {{- if not $present }}
+      {{- $_ := set $podSecurity "sysctls" (append $sysctls (dict "name" "net.ipv4.ip_unprivileged_port_start" "value" "0")) }}
+      {{- end }}
       {{- end }}
       securityContext:
         {{- toYaml $podSecurity | nindent 8 }}

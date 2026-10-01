@@ -350,7 +350,7 @@ gateway:
   # clientCredentialsSecret (docs/production-deployment.md).
   oidc:
     issuer: ""
-    audience: ""              # the token's `aud`; for SAP IAS the client id
+    audience: ""              # a value the access token's `aud` claim must contain
     # The OIDC client the CLI logs in with (`openshell gateway add --oidc-client-id`),
     # also used by the provider hook's client-credentials grant.
     clientId: ""
@@ -358,12 +358,14 @@ gateway:
     # Empty lets Istio discover it from the issuer; the gateway always does.
     jwksUri: ""
     # Authorization. Upstream defaults the roles to `openshell-admin` and
-    # `openshell-user`, read from the `realm_access.roles` claim, so with the
-    # three values below empty a token needs those roles. Either
-    #   - set authOnly: true to accept every identity the issuer authenticates
-    #     (upstream's authentication-only mode; both roles are passed empty), or
-    #   - set rolesClaim (for example `groups`), adminRole and userRole.
-    # adminRole and userRole must be set together.
+    # `openshell-user`, read from the `realm_access.roles` claim, so with
+    # rolesClaim, adminRole and userRole empty a token needs those roles. Either
+    #   - set rolesClaim (for example `groups`), adminRole and userRole
+    #     (adminRole and userRole must be set together), or
+    #   - set authOnly: true (upstream's authentication-only mode; both roles
+    #     are passed empty). EVERY identity the issuer authenticates is then a
+    #     platform admin of this gateway: who may log in is decided in the
+    #     identity provider alone.
     authOnly: false
     rolesClaim: ""
     adminRole: ""
@@ -487,18 +489,31 @@ gatewayIngress:
   ingressNamespace: istio-system
   ingressSelector:
     istio: ingressgateway
+  # How the ingress policies are written. It follows the ingress gateway, not taste:
+  #   DENY  for a gateway with NO ALLOW AuthorizationPolicy (Istio then lets every
+  #         request through). The chart denies what must not reach its own hosts and
+  #         leaves every other host alone.
+  #   ALLOW for a gateway that already has ALLOW policies (Istio then denies whatever
+  #         no policy allows). The chart adds ALLOW rules for its own hosts.
+  # NEVER set ALLOW on a gateway without such policies: its first ALLOW policy makes
+  # it deny every other application's hosts. With DENY on a gateway that allowlists,
+  # this chart's hosts answer `403 RBAC: access denied` until you set ALLOW. Check with
+  #   kubectl -n istio-system get authorizationpolicies
+  policyAction: DENY
   # Source addresses or CIDR blocks (Istio remoteIpBlocks). Optional extra fence
   # for `host`; required for serviceHosts.
   allowedCidrs: []
   # Publish the URLs `openshell service expose` prints, as
   # http://<workspace>--<sandbox>[--<service>].<domain>/ (redirected to https).
-  # A browser sends no token, so these hosts are fenced by allowedCidrs only, and
-  # Istio's host matching takes only a prefix wildcard: the policy admits
-  # allowedCidrs to EVERY host under `domain`, not only to sandbox service hosts.
+  # A browser sends no token, so these hosts are fenced by allowedCidrs only.
+  # They are published per workspace: routes and policies match <workspace>--*
+  # for the workspaces listed here, never the whole domain, so nothing else under
+  # the domain is affected and a workspace that is not listed is not reachable.
   # With this on, the gateway binds port 80 in the pod (the pod gets the safe
   # sysctl net.ipv4.ip_unprivileged_port_start=0) so the URLs carry no port.
   serviceHosts:
     enabled: false
+    workspaces: [default]
 
 # Optional: declaratively configure an inference provider through upstream's
 # provider-profile model. The chart renders a provider profile (a ConfigMap:

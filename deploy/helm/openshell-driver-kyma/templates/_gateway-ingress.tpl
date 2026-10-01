@@ -42,6 +42,10 @@ openshell-user and rejects a gateway with exactly one of them empty
 */}}
 {{- define "openshell-driver-kyma.gatewayOidcGuards" -}}
 {{- $oidc := .Values.gateway.oidc -}}
+{{- /* A string is always true in a template: "false" would switch role checks off. */ -}}
+{{- if not (kindIs "bool" $oidc.authOnly) -}}
+{{- fail (printf "gateway.oidc.authOnly must be a boolean (true or false), got the %s %q." (kindOf $oidc.authOnly) (toString $oidc.authOnly)) -}}
+{{- end -}}
 {{- if and $oidc.authOnly (or $oidc.adminRole $oidc.userRole) -}}
 {{- fail "gateway.oidc.authOnly=true cannot be combined with gateway.oidc.adminRole or gateway.oidc.userRole: authOnly accepts every authenticated identity, roles restrict them. Set one or the other." -}}
 {{- end -}}
@@ -53,7 +57,35 @@ openshell-user and rejects a gateway with exactly one of them empty
 {{- define "openshell-driver-kyma.gatewayIngressGuards" -}}
 {{- $oidc := .Values.gateway.oidc -}}
 {{- $in := .Values.gatewayIngress -}}
+{{- /* Removed in 0.10.0. Helm ignores unknown values, so a values file that still
+enables it would render cleanly and drop the gateway's public route. */ -}}
+{{- with .Values.gatewayApirule -}}
+{{- if .enabled -}}
+{{- fail "gatewayApirule was removed in 0.10.0, and gatewayApirule.enabled=true would silently drop the gateway's public route. Move to gatewayIngress (the values migration table in CHANGELOG.md) and remove the gatewayApirule block." -}}
+{{- end -}}
+{{- end -}}
+{{- /* A string is always true in a template: "false" would publish the gateway. */ -}}
+{{- if not (kindIs "bool" $in.enabled) -}}
+{{- fail (printf "gatewayIngress.enabled must be a boolean (true or false), got the %s %q." (kindOf $in.enabled) (toString $in.enabled)) -}}
+{{- end -}}
+{{- if not (kindIs "bool" $in.serviceHosts.enabled) -}}
+{{- fail (printf "gatewayIngress.serviceHosts.enabled must be a boolean (true or false), got the %s %q." (kindOf $in.serviceHosts.enabled) (toString $in.serviceHosts.enabled)) -}}
+{{- end -}}
 {{- if $in.enabled -}}
+{{- if not (has $in.policyAction (list "DENY" "ALLOW")) -}}
+{{- fail (printf "gatewayIngress.policyAction %q must be DENY or ALLOW: DENY for an ingress gateway without ALLOW AuthorizationPolicies (the default), ALLOW for one that already allowlists per host." (toString $in.policyAction)) -}}
+{{- end -}}
+{{- /* The policies render into the ingress gateway's namespace, usually the mesh's
+root namespace, where a policy without a selector applies to every workload. */ -}}
+{{- if not (and (kindIs "map" $in.ingressSelector) $in.ingressSelector) -}}
+{{- fail "gatewayIngress.ingressSelector must be a non-empty map of the ingress gateway's pod labels (for example istio: ingressgateway): a policy without a selector in the mesh's root namespace would apply to every workload." -}}
+{{- end -}}
+{{- if not $in.ingressNamespace -}}
+{{- fail "gatewayIngress.ingressNamespace must name the namespace of the Istio ingress gateway (for example istio-system)." -}}
+{{- end -}}
+{{- if not $in.istioGateway -}}
+{{- fail "gatewayIngress.istioGateway must name the Istio Gateway the routes attach to, as <namespace>/<name> (for example kyma-system/kyma-gateway)." -}}
+{{- end -}}
 {{- if not (and .Values.gateway.enabled .Values.gatewayService.enabled) -}}
 {{- fail "gatewayIngress.enabled=true requires gateway.enabled=true and gatewayService.enabled=true: the VirtualService routes to this release's Service, which exposes the gateway's port only with gatewayService.enabled." -}}
 {{- end -}}
@@ -85,6 +117,14 @@ openshell-user and rejects a gateway with exactly one of them empty
 {{- end -}}
 {{- if eq (int .Values.gateway.grpcPort) 80 -}}
 {{- fail "gatewayIngress.serviceHosts.enabled=true cannot be combined with gateway.grpcPort=80: the Service's http-services port is 80." -}}
+{{- end -}}
+{{- if not (and (kindIs "slice" $in.serviceHosts.workspaces) $in.serviceHosts.workspaces) -}}
+{{- fail "gatewayIngress.serviceHosts.enabled=true requires gatewayIngress.serviceHosts.workspaces: the workspaces whose sandbox service URLs are published (for example [default]). Routes and policies match their hosts as <workspace>--*, never the whole domain." -}}
+{{- end -}}
+{{- range $in.serviceHosts.workspaces -}}
+{{- if or (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" (toString .))) (contains "--" (toString .)) -}}
+{{- fail (printf "gatewayIngress.serviceHosts.workspaces entry %q is not a workspace name: lowercase letters, digits and single hyphens." (toString .)) -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

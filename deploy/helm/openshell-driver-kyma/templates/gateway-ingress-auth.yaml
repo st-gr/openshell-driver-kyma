@@ -1,9 +1,15 @@
 {{- if .Values.gatewayIngress.enabled -}}
 {{- $prefix := include "openshell-driver-kyma.gatewayIngressPolicyPrefix" . -}}
 {{- $in := .Values.gatewayIngress -}}
-# Policies on the cluster's Istio ingress gateway, in its namespace. With any ALLOW
-# policy on that gateway Istio denies what no rule allows, so these are also what
-# lets the hosts through on a cluster that allowlists per host.
+# Policies on the cluster's Istio ingress gateway, in its namespace.
+#
+# gatewayIngress.policyAction follows that gateway. Without any ALLOW policy Istio
+# lets every request through, and the first ALLOW policy would make the gateway deny
+# every other application's hosts: there the chart writes DENY policies (the default),
+# which name only its own hosts. A gateway that already has ALLOW policies denies
+# whatever no policy allows: there the chart writes ALLOW policies for its hosts.
+# Either way a request reaches the CLI host only with a token of the issuer (and from
+# allowedCidrs when set), and a sandbox service host only from allowedCidrs.
 #
 # The RequestAuthentication selects the whole ingress gateway: a request to any
 # host that carries an invalid token of this issuer is answered 401 there.
@@ -28,9 +34,13 @@ spec:
         - {{ .Values.gateway.oidc.audience | quote }}
       # The gateway validates the same token again.
       forwardOriginalToken: true
+{{- $allow := eq $in.policyAction "ALLOW" }}
+{{- $host := include "openshell-driver-kyma.gatewayIngressHost" . }}
+{{- $principal := printf "%s/*" .Values.gateway.oidc.issuer }}
 ---
 # The CLI host: a valid token of the issuer and, when allowedCidrs is set, a
-# source address in it.
+# source address in it. Hosts are listed with and without a port: Istio matches
+# them against the authority as the client sent it.
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
 metadata:
@@ -42,12 +52,13 @@ spec:
   selector:
     matchLabels:
       {{- toYaml $in.ingressSelector | nindent 6 }}
-  action: ALLOW
+  action: {{ $in.policyAction }}
   rules:
+    {{- if $allow }}
     - from:
         - source:
             requestPrincipals:
-              - {{ printf "%s/*" .Values.gateway.oidc.issuer | quote }}
+              - {{ $principal | quote }}
             {{- with $in.allowedCidrs }}
             remoteIpBlocks:
               {{- toYaml . | nindent 14 }}
@@ -55,12 +66,36 @@ spec:
       to:
         - operation:
             hosts:
-              - {{ include "openshell-driver-kyma.gatewayIngressHost" . | quote }}
+              - {{ $host | quote }}
+              - {{ printf "%s:*" $host | quote }}
+    {{- else }}
+    - from:
+        - source:
+            notRequestPrincipals:
+              - {{ $principal | quote }}
+      to:
+        - operation:
+            hosts:
+              - {{ $host | quote }}
+              - {{ printf "%s:*" $host | quote }}
+    {{- with $in.allowedCidrs }}
+    - from:
+        - source:
+            notRemoteIpBlocks:
+              {{- toYaml . | nindent 14 }}
+      to:
+        - operation:
+            hosts:
+              - {{ $host | quote }}
+              - {{ printf "%s:*" $host | quote }}
+    {{- end }}
+    {{- end }}
 {{- if $in.serviceHosts.enabled }}
 ---
 # Sandbox service hosts: browsers carry no token, so the source address is the
-# fence. Istio's hosts take only a prefix wildcard, so this admits allowedCidrs
-# to every host under the domain, not only to sandbox service hosts.
+# fence. They are matched per workspace, as <workspace>--*: Istio's hosts take only
+# a prefix or a suffix wildcard, and the domain's wildcard would also cover the CLI
+# host and every other application under the domain.
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
 metadata:
@@ -72,15 +107,17 @@ spec:
   selector:
     matchLabels:
       {{- toYaml $in.ingressSelector | nindent 6 }}
-  action: ALLOW
+  action: {{ $in.policyAction }}
   rules:
     - from:
         - source:
-            remoteIpBlocks:
+            {{ ternary "remoteIpBlocks" "notRemoteIpBlocks" $allow }}:
               {{- toYaml $in.allowedCidrs | nindent 14 }}
       to:
         - operation:
             hosts:
-              - {{ printf "*.%s" $in.domain | quote }}
+              {{- range $in.serviceHosts.workspaces }}
+              - {{ printf "%s--*" . | quote }}
+              {{- end }}
 {{- end }}
 {{- end }}

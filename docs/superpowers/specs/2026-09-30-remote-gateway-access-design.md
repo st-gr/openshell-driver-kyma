@@ -36,11 +36,11 @@ default auth-only).
 | # | Decision | Why |
 |---|----------|-----|
 | D1 | OIDC end to end with SAP IAS: the edge validates the JWT, the gateway validates the same JWT. | Upstream's intended cloud mode; per-user identity, workspaces and audit work; the edge check is defense in depth. |
-| D2 | Plain Istio resources: `VirtualService`s in the release namespace, `RequestAuthentication` + `AuthorizationPolicy` on the ingress gateway in `istio-system`. | APIRule v2 needs a sidecar on the gateway pod (PeerAuthentication, NetworkPolicy, probe changes). The cluster already keeps its per-host ALLOW allowlists in `istio-system`; this design renders ours the same way. |
+| D2 | Plain Istio resources: `VirtualService`s in the release namespace, `RequestAuthentication` + `AuthorizationPolicy` on the ingress gateway in `istio-system`, written as DENY or ALLOW policies per `gatewayIngress.policyAction`. | APIRule v2 needs a sidecar on the gateway pod (PeerAuthentication, NetworkPolicy, probe changes). DENY (default) names only the chart's hosts and is safe on a gateway without ALLOW policies, where an ALLOW policy would shut out every other host; ALLOW is for a gateway that already allowlists per host, as the user's does. |
 | D3 | No tunnel. The CLI sends gRPC with a bearer straight through Istio. | Istio carries gRPC; the tunnel exists for edges that reject POSTs. |
 | D4 | Gateway stays plaintext in-pod (`--disable-tls`). | Upstream: "Kubernetes deployments must leave `mtls_auth` unset and use OIDC or a trusted access proxy." The ingress→pod hop is plaintext like today's supervisor hop. |
 | D5 | With published service hosts (`serviceHosts.enabled`) the gateway binds **port 80** in-pod (safe sysctl) and gets `--server-san *.<domain>`; otherwise its listener is unchanged. | `endpoint_url` prints `<scheme>://<host>:<bind-port>/` and omits the port only for http/80; Kyma's `http:80` server redirects to HTTPS. Result: `http://<ws>--<sb>.<domain>/`, copy-pasteable. |
-| D6 | Service hosts are published only behind `allowedCidrs` (Istio `remoteIpBlocks`). | Browsers carry no bearer; IP allowlisting is the cluster's existing pattern. The chart refuses to publish service hosts without CIDRs. |
+| D6 | Service hosts are published only behind `allowedCidrs`, and per workspace (`serviceHosts.workspaces`): routes and policies match `<workspace>--*`. | Browsers carry no bearer; IP allowlisting is the cluster's existing pattern. Istio hosts take only prefix or suffix wildcards, and the domain's wildcard would cover the CLI host and other applications. The chart refuses to publish service hosts without CIDRs. |
 | D7 | `gatewayIngress` replaces `gatewayApirule`. | The APIRule block was never verified and cannot work without a sidecar. Breaking → 0.10.0. |
 | D8 | `gateway.oidc.authOnly: true` selects upstream's authentication-only mode explicitly; the chart default stays `false`. | Upstream defaults the roles to `openshell-admin`/`openshell-user` read from `realm_access.roles`, so empty role values mean RBAC with those defaults, which IAS tokens never satisfy. `authOnly` passes both roles empty, so any identity IAS issues is accepted and the hook's technical client needs no group claims. Making it an explicit switch keeps existing OIDC installs from loosening silently. |
 | D9 | In-cluster automation (inference-provider hook Job, smokes) authenticates with the client-credentials grant of the **same** IAS application. | Same `aud` for people (PKCE) and the Job (secret); upstream's CLI switches to client credentials when `OPENSHELL_OIDC_CLIENT_SECRET` is set. |
@@ -51,11 +51,11 @@ default auth-only).
 laptop CLI ─OIDC code+PKCE (browser)─▶ SAP IAS
 laptop CLI ─gRPC + bearer─▶ https://openshell.<domain>     Kyma ingress gateway (TLS, *.<domain> cert)
     RequestAuthentication: issuer = IAS, audiences = [<client-id>], forwardOriginalToken
-    AuthorizationPolicy ALLOW: host openshell.<domain>, requestPrincipals "<issuer>/*" [+ remoteIpBlocks]
+    AuthorizationPolicy (DENY or ALLOW, per policyAction): host openshell.<domain> only with a principal "<issuer>/*" [and from allowedCidrs]
     → VirtualService → Service <release>:8080 (h2c) → gateway (plaintext in-pod, OIDC validates the bearer)
 
 browser ─▶ https://default--web.<domain>/                    (URL printed by `openshell service expose`)
-    AuthorizationPolicy ALLOW: hosts *.<domain>, remoteIpBlocks = allowedCidrs
+    AuthorizationPolicy (same action): hosts <workspace>--* of the published workspaces only from allowedCidrs
     → wildcard VirtualService (authority regex `<ws>--<sb>[--<svc>].<domain>`) → Service :80 `http-services` (HTTP/1.1) → gateway :80 in-pod → relay → sandbox loopback
 
 hook Job / smokes ─client credentials (OPENSHELL_NO_BROWSER=1, OPENSHELL_OIDC_CLIENT_SECRET)─▶ Service :8080
@@ -82,9 +82,11 @@ gatewayIngress:
   ingressNamespace: istio-system  # where RequestAuthentication/AuthorizationPolicies render
   ingressSelector:                # workload selector of those policies
     istio: ingressgateway
+  policyAction: DENY              # DENY for an ingress gateway without ALLOW policies, ALLOW for one that already allowlists (D2)
   allowedCidrs: []                # remoteIpBlocks. Required for serviceHosts; optional extra fence for the CLI host.
   serviceHosts:
-    enabled: false                # publish *.<domain> sandbox service URLs (browser)
+    enabled: false                # publish sandbox service URLs (browser)
+    workspaces: [default]         # the workspaces whose service hosts are routed and fenced (D6)
 
 gateway:
   oidc:
@@ -114,7 +116,7 @@ New, rendered only when `gatewayIngress.enabled`:
 - `gateway-services-virtualservice.yaml` (when `serviceHosts.enabled`) —
   `VirtualService <fullname>-sandbox-services`: `hosts: ["*.<domain>"]`, same
   gateway, one `http` route with
-  `match.authority.regex: ^[a-z0-9]+(-[a-z0-9]+)*--[a-z0-9]+(-[a-z0-9]+)*(--[a-z0-9]+(-[a-z0-9]+)*)?\.<domain, dots escaped>(:[0-9]+)?$`
+  `match.authority.regex: ^(<listed workspaces, |-joined>)--[a-z0-9]+(-[a-z0-9]+)*(--[a-z0-9]+(-[a-z0-9]+)*)?\.<domain, dots escaped>(:[0-9]+)?$`
   to the Service's `http-services` port (80) and `timeout: 0s`. Exact-host
   VirtualServices of other apps keep precedence (Envoy matches exact domains
   before wildcards); non-matching `*.<domain>` hosts get Envoy's 404.
@@ -125,13 +127,16 @@ New, rendered only when `gatewayIngress.enabled`:
     one `jwtRules` entry `{issuer, audiences: [audience], forwardOriginalToken: true}`
     plus `jwksUri` when set. It validates only requests that carry a token of
     this issuer; requests without one pass to the policies.
-  - `AuthorizationPolicy …-openshell-cli` (ALLOW): `to.operation.hosts: [<host>]`,
-    `from.source.requestPrincipals: ["<issuer>/*"]` (the issuer verbatim), plus
-    `from.source.remoteIpBlocks: <allowedCidrs>` when non-empty (both in one
-    `source`, so they AND).
-  - `AuthorizationPolicy …-openshell-services` (ALLOW, when
-    `serviceHosts.enabled`): `to.operation.hosts: ["*.<domain>"]`,
-    `from.source.remoteIpBlocks: <allowedCidrs>`.
+  - `AuthorizationPolicy …-openshell-cli`, `to.operation.hosts: [<host>, "<host>:*"]`
+    (Istio matches the authority as sent, so the port form is listed too):
+    with `policyAction: ALLOW`, one rule `from.source.requestPrincipals: ["<issuer>/*"]`
+    plus `remoteIpBlocks: <allowedCidrs>` when non-empty (one `source`, so they
+    AND); with `DENY`, a rule `notRequestPrincipals: ["<issuer>/*"]` and, with
+    CIDRs, a second rule `notRemoteIpBlocks: <allowedCidrs>` (rules OR, so a
+    request passes only with a token and from a listed address).
+  - `AuthorizationPolicy …-openshell-services` (when `serviceHosts.enabled`):
+    `to.operation.hosts: ["<workspace>--*", …]` for the listed workspaces, with
+    `remoteIpBlocks` (ALLOW) or `notRemoteIpBlocks` (DENY) `<allowedCidrs>`.
 
 Changed:
 
@@ -214,11 +219,16 @@ auth. `curl` works without `--resolve` now (public DNS).
 
 ## 7. Security considerations
 
-- **Allowlist breadth.** Istio `hosts` take only prefix wildcards, so the
-  services policy allows `allowedCidrs` to *every* `*.<domain>` host, wider
-  than the cluster's per-app allowlists (same IP ranges). Documented in
-  production-deployment; operators who want tighter scope keep
-  `serviceHosts.enabled: false` and use the port-forward URLs.
+- **Policy action (found in review).** An ingress gateway without ALLOW
+  policies lets everything through, and the first ALLOW policy flips it to
+  deny-by-default for every host. The chart therefore defaults to DENY
+  policies that name only its own hosts, and writes ALLOW policies only when
+  the operator states the gateway already allowlists (`policyAction: ALLOW`).
+- **Service-host scope (found in review).** A `*.<domain>` policy would also
+  cover the CLI host (voiding the token check for sources in `allowedCidrs`)
+  and every other application. Service hosts are matched per workspace, as
+  `<workspace>--*`, and the route is limited to the same workspaces, so an
+  unlisted workspace is not reachable rather than unfenced.
 - **Unauthenticated callers.** With OIDC on, every gateway caller needs a
   bearer, including in-cluster ones; the gateway's ClusterIP stays reachable
   from the cluster (NetworkPolicy unchanged) but is no longer anonymous.

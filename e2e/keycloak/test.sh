@@ -15,9 +15,63 @@ NAME="osh-keycloak-test-$$"
 trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true; rm -rf "$WORK"' EXIT
 
 # 1 and 2: static checks.
-OSH_RENDER_ONLY=1 OSH_DOMAIN=example.org OSH_ALLOWED_CIDRS=203.0.113.0/24,2001:db8::/32 \
-	OSH_CLUSTER_CIDRS=10.96.0.0/13,10.250.0.0/16 "$DIR/deploy.sh" >"$WORK/manifests.yaml"
-python3 - "$WORK/manifests.yaml" "$DIR/realm.json" <<'PY'
+render() { # output-file [VAR=value...]
+	local out=$1
+	shift
+	env OSH_RENDER_ONLY=1 OSH_DOMAIN=example.org OSH_ALLOWED_CIDRS=203.0.113.0/24,2001:db8::/32 \
+		OSH_CLUSTER_CIDRS=10.96.0.0/13,10.250.0.0/16 "$@" "$DIR/deploy.sh" >"$out"
+}
+render "$WORK/manifests.yaml"
+render "$WORK/manifests-allow.yaml" OSH_POLICY_ACTION=ALLOW
+for bad in OSH_POLICY_ACTION=allow OSH_DOMAIN='*.example.org' OSH_ALLOWED_CIDRS=office; do
+	if render /dev/null "$bad" 2>/dev/null; then
+		echo "KEYCLOAK_FIXTURE_FAIL: deploy.sh accepted $bad"
+		exit 1
+	fi
+done
+
+# deploy.sh against a kubectl stand-in: it must not adopt or delete what it did not create.
+# The stand-in logs every call; STUB_NS_LABEL is the fixture label of the namespace (empty:
+# not ours), STUB_NS_MISSING=1 means the namespace does not exist.
+mkdir "$WORK/bin"
+cat >"$WORK/bin/kubectl" <<'STUB'
+#!/usr/bin/env bash
+echo "$*" >>"$STUB_LOG"
+case "$*" in
+"get namespace keycloak -o jsonpath="*)
+	[[ ${STUB_NS_MISSING:-} == 1 ]] && exit 1
+	printf '%s' "${STUB_NS_LABEL:-}"
+	;;
+esac
+exit 0
+STUB
+chmod +x "$WORK/bin/kubectl"
+stub() { # log-name [VAR=value...]: run deploy.sh with the stand-in; prints its exit status
+	local log="$WORK/$1.log" rc=0
+	shift
+	: >"$log"
+	env PATH="$WORK/bin:$PATH" STUB_LOG="$log" "$@" "$DIR/deploy.sh" >/dev/null 2>&1 || rc=$?
+	echo "$rc"
+}
+mutating='(^| )(apply|create|delete|label|rollout)( |$)'
+rc=$(stub foreign-deploy OSH_DOMAIN=example.org OSH_ALLOWED_CIDRS=203.0.113.0/24 OSH_CLUSTER_CIDRS=10.0.0.0/8)
+if [[ $rc == 0 ]] || grep -qE "$mutating" "$WORK/foreign-deploy.log"; then
+	echo "KEYCLOAK_FIXTURE_FAIL: deploy.sh deployed into a namespace 'keycloak' it did not create (exit $rc):"
+	grep -E "$mutating" "$WORK/foreign-deploy.log" | head -3
+	exit 1
+fi
+rc=$(stub foreign-delete OSH_DELETE=1)
+if [[ $rc == 0 ]] || grep -qE "$mutating" "$WORK/foreign-delete.log"; then
+	echo "KEYCLOAK_FIXTURE_FAIL: OSH_DELETE=1 touched a namespace 'keycloak' it did not create (exit $rc)"
+	exit 1
+fi
+rc=$(stub own-delete OSH_DELETE=1 STUB_NS_LABEL=keycloak)
+if [[ $rc != 0 ]] || ! grep -q "^delete namespace keycloak" "$WORK/own-delete.log"; then
+	echo "KEYCLOAK_FIXTURE_FAIL: OSH_DELETE=1 (without OSH_DOMAIN) did not remove the fixture's own namespace (exit $rc)"
+	exit 1
+fi
+
+python3 - "$WORK/manifests.yaml" "$DIR/realm.json" "$WORK/manifests-allow.yaml" <<'PY'
 import json, re, sys, yaml
 docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
 realm = json.load(open(sys.argv[2]))
@@ -54,13 +108,21 @@ if route and service:
         failures.append(f"the VirtualService is {route['spec']}, want {want}")
     if [(p["name"], p["port"]) for p in service["spec"]["ports"]] != [("http", 8080)]:
         failures.append(f"the Service ports are {service['spec']['ports']}")
-policy = one("AuthorizationPolicy")
-if policy:
-    want = {"selector": {"matchLabels": {"istio": "ingressgateway"}}, "action": "ALLOW",
-            "rules": [{"from": [{"source": {"remoteIpBlocks": ["203.0.113.0/24", "2001:db8::/32", "10.96.0.0/13", "10.250.0.0/16"]}}],
-                       "to": [{"operation": {"hosts": ["keycloak.example.org"]}}]}]}
-    if policy["spec"] != want or policy["metadata"]["namespace"] != "istio-system":
-        failures.append(f"the AuthorizationPolicy is {policy['spec']} in {policy['metadata']['namespace']}, want {want} in istio-system")
+# The policy follows the ingress gateway, like the chart's: DENY (default) on a gateway that
+# lets everything through, where an ALLOW policy would shut out every other host; ALLOW on
+# one that already allowlists.
+def policy_of(documents):
+    found = [d for d in documents if d["kind"] == "AuthorizationPolicy"]
+    return found[0] if len(found) == 1 else None
+BLOCKS = ["203.0.113.0/24", "2001:db8::/32", "10.96.0.0/13", "10.250.0.0/16"]
+allow_docs = [d for d in yaml.safe_load_all(open(sys.argv[3])) if d]
+for action, key, documents in (("DENY", "notRemoteIpBlocks", docs), ("ALLOW", "remoteIpBlocks", allow_docs)):
+    policy = policy_of(documents)
+    want = {"selector": {"matchLabels": {"istio": "ingressgateway"}}, "action": action,
+            "rules": [{"from": [{"source": {key: BLOCKS}}],
+                       "to": [{"operation": {"hosts": ["keycloak.example.org", "keycloak.example.org:*"]}}]}]}
+    if not policy or policy["spec"] != want or policy["metadata"]["namespace"] != "istio-system":
+        failures.append(f"with OSH_POLICY_ACTION={action} the AuthorizationPolicy is {policy and policy['spec']}, want {want} in istio-system")
 fence = one("NetworkPolicy")
 if fence:
     want = {"podSelector": {"matchLabels": {"app": "keycloak"}}, "policyTypes": ["Ingress"],

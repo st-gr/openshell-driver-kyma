@@ -57,9 +57,12 @@ validate its signature, issuer and audience. You need:
 
 - keep the defaults and grant those roles in your provider, or name your own
   with `gateway.oidc.rolesClaim`, `adminRole` and `userRole` (both roles must
-  be set together). The client the provider hook uses needs the user role too;
+  be set together). The client the provider hook uses needs the **admin**
+  role: it registers a platform-wide provider profile. The Secret holding its
+  client secret is therefore a platform-admin credential;
 - or set `gateway.oidc.authOnly: true` to accept every identity the issuer
-  authenticates. Who may log in is then decided in the provider alone.
+  authenticates. Every such identity is then a platform admin of the gateway,
+  across all workspaces: who may log in is decided in the provider alone.
 
 ## 2. Decide on chart values
 
@@ -123,13 +126,16 @@ gatewayService:
 gatewayIngress:
   enabled: true
   domain: "<your-cluster-id>.kyma.ondemand.com"   # the Kyma gateway's *.<domain>
+  # DENY or ALLOW: read "Choose the policy action" in step 3 before installing.
+  policyAction: DENY
   # Source addresses allowed through the ingress gateway. Optional for the CLI
   # host (a token is required either way), required for serviceHosts.
   allowedCidrs: ["203.0.113.0/24"]
-  # Publish `openshell service expose` URLs. Read "Reaching a service inside a
-  # sandbox" below first: this admits allowedCidrs to every host of the domain.
+  # Publish `openshell service expose` URLs for these workspaces; see "Reaching
+  # a service inside a sandbox" below.
   serviceHosts:
     enabled: true
+    workspaces: [default]
 
 # `inferenceProvider` works with OIDC when gateway.oidc.clientCredentialsSecret
 # names the client secret: its post-install Job logs in with the
@@ -219,7 +225,32 @@ Installing with `gatewayIngress.enabled` creates a RequestAuthentication and
 AuthorizationPolicies in `istio-system`, so the installing identity needs
 rights there. The RequestAuthentication selects the whole ingress gateway: a
 request to any host that carries an invalid token of your issuer is answered
-401 there. Requests without a token, or with another issuer's, are unaffected.
+401 there. Requests without a token, or with another issuer's, pass it
+untouched and are judged by the AuthorizationPolicies alone.
+
+### Choose the policy action
+
+`gatewayIngress.policyAction` must match your ingress gateway, because Istio
+changes behaviour with the first ALLOW policy on a workload:
+
+```bash
+kubectl -n istio-system get authorizationpolicies
+```
+
+- **No policy with action ALLOW selects the ingress gateway** (a stock Kyma
+  cluster): Istio lets every request through. Keep `policyAction: DENY`. The
+  chart writes DENY policies that name only its own hosts, and every other
+  application behind the gateway is left alone. `ALLOW` here would be an
+  outage: the gateway would start denying every host no policy allows, which
+  is every other application.
+- **The ingress gateway already has ALLOW policies** (it allowlists per host):
+  Istio denies whatever no policy allows, so this chart's hosts answer
+  `403 RBAC: access denied` until you set `policyAction: ALLOW`, which adds
+  ALLOW rules for them.
+
+Either way the result is the same for this chart's hosts: the gateway host is
+reached only with a valid token of your issuer (and, with `allowedCidrs`, from
+a listed address), and sandbox service hosts only from `allowedCidrs`.
 
 ### 3b. Register the inference provider
 
@@ -361,11 +392,14 @@ to HTTPS; no port-forward and no `--resolve`. Three things to know:
 - A browser sends no token, so these hosts are fenced by
   `gatewayIngress.allowedCidrs` only. Put authentication into the service
   itself if the address ranges are shared.
-- Istio's host matching takes only a prefix wildcard, so the policy admits
-  `allowedCidrs` to **every** host under the cluster domain, not only to
-  sandbox service hosts. On a cluster that allowlists other applications per
-  host, that widens their fence to the same address ranges. Leave
-  `serviceHosts.enabled: false` and use the port-forward URLs if that matters.
+- Service hosts are published per workspace. Routes and policies match
+  `<workspace>--*` for the workspaces in `gatewayIngress.serviceHosts.workspaces`
+  (default `[default]`), never the whole domain, so no other host under the
+  domain is affected. A workspace that is not listed is not reachable from
+  outside: add it to the list and `helm upgrade`.
+- The fence is at the ingress gateway. A pod inside the cluster reaches a
+  service URL through the gateway's Service without passing it, as it always
+  could with the port-forward URLs.
 - The gateway then binds port 80 in its pod (so the printed URL carries no
   port), which adds the safe sysctl `net.ipv4.ip_unprivileged_port_start=0` to
   the pod. The in-cluster Service port stays `gateway.grpcPort`.

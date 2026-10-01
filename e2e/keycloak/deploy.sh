@@ -12,14 +12,21 @@
 #   OSH_DOMAIN         the cluster's wildcard domain, without "*."
 #   OSH_ALLOWED_CIDRS  comma-separated source CIDR blocks that may reach Keycloak
 # Optional:
+#   OSH_POLICY_ACTION  DENY (default) for an ingress gateway without ALLOW policies, ALLOW
+#                      for one that already allowlists per host; as the chart's
+#                      gatewayIngress.policyAction, and for the same reason.
 #   OSH_CLUSTER_CIDRS  comma-separated in-cluster source ranges (pod and node networks).
 #                      The OpenShell gateway and the provider hook reach the issuer through
 #                      the same public host. Default: kube-system/shoot-info (Gardener).
 #   KEYCLOAK_NAMESPACE (keycloak), OSH_NAMESPACE (openshell-system), KEYCLOAK_IMAGE
 #   OSH_RENDER_ONLY=1  print the manifests and exit; needs no cluster
-#   OSH_DELETE=1       remove everything this script created
+#   OSH_DELETE=1       remove what this script created (needs no other variable)
 #
-# Credentials are generated in the cluster, never printed and never rendered:
+# The script labels the namespace and the Secret it creates (openshell.test/fixture=keycloak)
+# and refuses to deploy into, overwrite or delete anything without that label.
+#
+# Credentials are generated here and stored only in the cluster: never printed, never
+# rendered, never passed as a command-line argument:
 #   <KEYCLOAK_NAMESPACE>/keycloak-credentials  admin-password (admin console, user admin),
 #                                              user-password (realm user dev),
 #                                              client-secret (client openshell-ci)
@@ -28,29 +35,61 @@
 # Requires: kubectl (with KUBECONFIG set), openssl.
 set -euo pipefail
 
-: "${OSH_DOMAIN:?set OSH_DOMAIN to the cluster wildcard domain}"
-: "${OSH_ALLOWED_CIDRS:?set OSH_ALLOWED_CIDRS (comma-separated)}"
 NS=${KEYCLOAK_NAMESPACE:-keycloak}
 OSH_NS=${OSH_NAMESPACE:-openshell-system}
 # Keycloak 26.4, pinned by digest (docker buildx imagetools inspect quay.io/keycloak/keycloak:26.4).
 KEYCLOAK_IMAGE=${KEYCLOAK_IMAGE:-quay.io/keycloak/keycloak@sha256:9409c59bdfb65dbffa20b11e6f18b8abb9281d480c7ca402f51ed3d5977e6007}
-HOST="keycloak.${OSH_DOMAIN}"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FIXTURE_LABEL=openshell.test/fixture
+
+die() {
+	echo "$*" >&2
+	exit 1
+}
+# fixture_label KIND NAME / -n NAMESPACE KIND NAME: the object's fixture label, empty when
+# it has none; fails when the object does not exist.
+fixture_label() { kubectl get "$@" -o jsonpath='{.metadata.labels.openshell\.test/fixture}'; }
 
 if [[ ${OSH_DELETE:-} == 1 ]]; then
-	kubectl -n istio-system delete authorizationpolicy keycloak-test-idp --ignore-not-found
-	kubectl delete namespace "$NS" --ignore-not-found
-	kubectl -n "$OSH_NS" delete secret openshell-oidc-client --ignore-not-found
+	if label=$(fixture_label namespace "$NS" 2>/dev/null); then
+		[[ $label == keycloak ]] \
+			|| die "namespace $NS was not created by this script (no label $FIXTURE_LABEL=keycloak); not deleting it"
+		kubectl -n istio-system delete authorizationpolicy keycloak-test-idp --ignore-not-found
+		kubectl delete namespace "$NS"
+	fi
+	if label=$(fixture_label -n "$OSH_NS" secret openshell-oidc-client 2>/dev/null) && [[ $label == keycloak ]]; then
+		kubectl -n "$OSH_NS" delete secret openshell-oidc-client
+	fi
 	exit 0
 fi
+
+: "${OSH_DOMAIN:?set OSH_DOMAIN to the cluster wildcard domain}"
+: "${OSH_ALLOWED_CIDRS:?set OSH_ALLOWED_CIDRS (comma-separated)}"
+ACTION=${OSH_POLICY_ACTION:-DENY}
+[[ $ACTION == DENY || $ACTION == ALLOW ]] \
+	|| die "OSH_POLICY_ACTION must be DENY (an ingress gateway without ALLOW policies) or ALLOW (one that already allowlists)"
+domain_re='^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)+$'
+[[ $OSH_DOMAIN =~ $domain_re ]] || die "OSH_DOMAIN is not a lowercase DNS name (give the domain alone, without \"*.\")"
+# check_cidrs NAME LIST: every comma-separated entry is an address or CIDR block.
+check_cidrs() {
+	local entry cidr_re='^(([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?|[0-9a-fA-F:]*:[0-9a-fA-F:]*(/[0-9]{1,3})?)$'
+	local -a entries
+	IFS=',' read -r -a entries <<<"$2"
+	for entry in "${entries[@]}"; do
+		[[ ${entry// /} =~ $cidr_re ]] || die "$1 entry '$entry' is not an IP address or CIDR block"
+	done
+}
+check_cidrs OSH_ALLOWED_CIDRS "$OSH_ALLOWED_CIDRS"
+HOST="keycloak.${OSH_DOMAIN}"
 
 CLUSTER_CIDRS=${OSH_CLUSTER_CIDRS:-}
 if [[ -z $CLUSTER_CIDRS && ${OSH_RENDER_ONLY:-} != 1 ]]; then
 	CLUSTER_CIDRS=$(kubectl -n kube-system get configmap shoot-info \
 		-o jsonpath='{.data.podNetwork},{.data.nodeNetwork}' 2>/dev/null || true)
 	[[ $CLUSTER_CIDRS == *,* && $CLUSTER_CIDRS != , ]] \
-		|| { echo "cannot read the pod and node networks from kube-system/shoot-info; set OSH_CLUSTER_CIDRS" >&2; exit 1; }
+		|| die "cannot read the pod and node networks from kube-system/shoot-info; set OSH_CLUSTER_CIDRS"
 fi
+[[ -z $CLUSTER_CIDRS ]] || check_cidrs OSH_CLUSTER_CIDRS "$CLUSTER_CIDRS"
 
 # yaml_list INDENT ITEMS: a comma-separated list as YAML sequence items.
 yaml_list() {
@@ -64,8 +103,9 @@ yaml_list() {
 }
 
 manifests() {
-	local realm_sum
+	local realm_sum blocks=notRemoteIpBlocks
 	realm_sum=$(openssl dgst -sha256 -r "$DIR/realm.json" | cut -d' ' -f1)
+	[[ $ACTION == ALLOW ]] && blocks=remoteIpBlocks
 	cat <<YAML
 apiVersion: apps/v1
 kind: Deployment
@@ -207,9 +247,10 @@ spec:
             port:
               number: 8080
 ---
-# Admits the listed addresses to Keycloak's host on the ingress gateway: the operator's,
-# and the cluster's own (the OpenShell gateway and the provider hook reach the issuer
-# through the public host).
+# Keycloak's host on the ingress gateway is reachable from the listed addresses only: the
+# operator's, and the cluster's own (the OpenShell gateway and the provider hook reach the
+# issuer through the public host). DENY names only this host, so it is safe on a gateway
+# without ALLOW policies; ALLOW is for a gateway that already denies what nothing allows.
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
 metadata:
@@ -219,16 +260,17 @@ spec:
   selector:
     matchLabels:
       istio: ingressgateway
-  action: ALLOW
+  action: ${ACTION}
   rules:
     - from:
         - source:
-            remoteIpBlocks:
+            ${blocks}:
 $(yaml_list '              ' "${OSH_ALLOWED_CIDRS},${CLUSTER_CIDRS}")
       to:
         - operation:
             hosts:
               - "${HOST}"
+              - "${HOST}:*"
 YAML
 }
 
@@ -237,22 +279,34 @@ if [[ ${OSH_RENDER_ONLY:-} == 1 ]]; then
 	exit 0
 fi
 
-kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f -
-kubectl label namespace "$NS" pod-security.kubernetes.io/enforce=baseline --overwrite >/dev/null
+kubectl get namespace "$OSH_NS" >/dev/null 2>&1 \
+	|| die "namespace $OSH_NS does not exist: install the chart first, or set OSH_NAMESPACE"
+if label=$(fixture_label namespace "$NS" 2>/dev/null); then
+	[[ $label == keycloak ]] \
+		|| die "namespace $NS exists and was not created by this script (no label $FIXTURE_LABEL=keycloak); set KEYCLOAK_NAMESPACE to another name"
+else
+	kubectl create namespace "$NS"
+	kubectl label namespace "$NS" "$FIXTURE_LABEL=keycloak" pod-security.kubernetes.io/enforce=baseline >/dev/null
+fi
+if label=$(fixture_label -n "$OSH_NS" secret openshell-oidc-client 2>/dev/null) && [[ $label != keycloak ]]; then
+	die "$OSH_NS/openshell-oidc-client exists and was not created by this script: it may hold your real client secret. Not overwriting it."
+fi
 kubectl -n "$NS" create configmap openshell-realm --from-file=realm.json="$DIR/realm.json" \
 	--dry-run=client -o yaml | kubectl apply -f -
+# printf is a shell builtin, so no credential appears in a process's arguments.
 if ! kubectl -n "$NS" get secret keycloak-credentials >/dev/null 2>&1; then
 	kubectl -n "$NS" create secret generic keycloak-credentials \
-		--from-literal=admin-password="$(openssl rand -hex 16)" \
-		--from-literal=user-password="$(openssl rand -hex 12)" \
-		--from-literal=client-secret="$(openssl rand -hex 32)" >/dev/null
+		--from-file=admin-password=<(printf %s "$(openssl rand -hex 16)") \
+		--from-file=user-password=<(printf %s "$(openssl rand -hex 12)") \
+		--from-file=client-secret=<(printf %s "$(openssl rand -hex 32)") >/dev/null
 	echo "created $NS/keycloak-credentials"
 fi
-# The chart's Secret holds the same client secret; the pipe keeps it off the terminal.
+# The chart's Secret holds the same client secret.
+client_secret=$(kubectl -n "$NS" get secret keycloak-credentials -o jsonpath='{.data.client-secret}' | base64 -d)
+[[ -n $client_secret ]] || die "$NS/keycloak-credentials has no client-secret"
 kubectl -n "$OSH_NS" create secret generic openshell-oidc-client \
-	--from-literal=client-secret="$(kubectl -n "$NS" get secret keycloak-credentials \
-		-o jsonpath='{.data.client-secret}' | base64 -d)" \
-	--dry-run=client -o yaml | kubectl apply -f - >/dev/null
+	--from-file=client-secret=<(printf %s "$client_secret") --dry-run=client -o yaml \
+	| kubectl label --local -f - "$FIXTURE_LABEL=keycloak" -o yaml | kubectl apply -f - >/dev/null
 echo "synced $OSH_NS/openshell-oidc-client"
 manifests | kubectl apply -f -
 kubectl -n "$NS" rollout status deployment/keycloak --timeout=300s
@@ -270,6 +324,7 @@ For scripts/remote-access-check.sh:
   OSH_HOOK_CLIENT_ID=openshell-ci
   OSH_OIDC_JWKS_URI=http://keycloak.${NS}.svc.cluster.local:8080/realms/openshell/protocol/openid-connect/certs
   OSH_CLIENT_SECRET=openshell-oidc-client
+  OSH_POLICY_ACTION=${ACTION}
 
 Remove it again with OSH_DELETE=1 $0
 NEXT
