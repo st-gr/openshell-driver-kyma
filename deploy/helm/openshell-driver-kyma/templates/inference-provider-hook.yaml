@@ -145,7 +145,7 @@ spec:
             - name: OIDC_ISSUER
               value: {{ .Values.gateway.oidc.issuer | quote }}
             - name: OIDC_CLIENT_ID
-              value: {{ .Values.gateway.oidc.clientId | quote }}
+              value: {{ default .Values.gateway.oidc.clientId .Values.gateway.oidc.clientCredentialsSecret.clientId | quote }}
             - name: OIDC_AUDIENCE
               value: {{ .Values.gateway.oidc.audience | quote }}
             - name: OPENSHELL_OIDC_CLIENT_SECRET

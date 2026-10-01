@@ -373,6 +373,9 @@ gateway:
     clientCredentialsSecret:
       name: ""
       key: client-secret
+      # The client the secret belongs to, when the provider uses a separate
+      # confidential client for this grant (Keycloak). Empty = clientId.
+      clientId: ""
   # Inbound TLS at the gateway pod.
   #
   # When `enabled: false` (default), the chart passes `--disable-tls` to

@@ -67,8 +67,8 @@ with Unauthenticated (openshell-server src/multiplex.rs AuthGrpcRouter at the
 pinned tag). The hook therefore authenticates with the client-credentials grant
 (inference-provider-hook.yaml), which needs the client and its secret. */ -}}
 {{- if .Values.gateway.oidc.issuer -}}
-{{- if not .Values.gateway.oidc.clientId -}}
-{{- fail "inferenceProvider.enabled=true with gateway.oidc.issuer requires gateway.oidc.clientId: the provider hook authenticates to the gateway with that client's client-credentials grant." -}}
+{{- if not (or .Values.gateway.oidc.clientCredentialsSecret.clientId .Values.gateway.oidc.clientId) -}}
+{{- fail "inferenceProvider.enabled=true with gateway.oidc.issuer requires gateway.oidc.clientId, or gateway.oidc.clientCredentialsSecret.clientId when the provider uses a separate confidential client: the provider hook authenticates to the gateway with that client's client-credentials grant." -}}
 {{- end -}}
 {{- if not (and .Values.gateway.oidc.clientCredentialsSecret.name .Values.gateway.oidc.clientCredentialsSecret.key) -}}
 {{- fail "inferenceProvider.enabled=true with gateway.oidc.issuer requires gateway.oidc.clientCredentialsSecret.name (and .key): a Secret you manage in .Release.Namespace holding the OIDC client secret, which the provider hook exchanges for a token. Without one, leave inferenceProvider disabled and register the profile and provider from an authenticated CLI session (docs/production-deployment.md)." -}}

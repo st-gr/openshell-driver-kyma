@@ -252,6 +252,16 @@ inference_try bad-3h-inference-oidc-no-client 'gateway.oidc.clientId' \
 inference_try good-8-inference-oidc '' --set "inferenceProvider.baseUrl=$inference_url" \
 	--set gateway.oidc.issuer=https://issuer.example --set gateway.oidc.audience=osh-client \
 	--set gateway.oidc.clientId=osh-client --set gateway.oidc.clientCredentialsSecret.name=oidc-client
+# A provider with a separate confidential client for the grant (Keycloak): the hook logs in
+# with that client, the CLI keeps gateway.oidc.clientId; either one satisfies the hook.
+inference_try good-8-inference-oidc-hook-client '' --set "inferenceProvider.baseUrl=$inference_url" \
+	--set gateway.oidc.issuer=https://issuer.example --set gateway.oidc.audience=osh-client \
+	--set gateway.oidc.clientId=osh-client --set gateway.oidc.clientCredentialsSecret.name=oidc-client \
+	--set gateway.oidc.clientCredentialsSecret.clientId=osh-hook
+inference_try good-8-inference-oidc-only-hook-client '' --set "inferenceProvider.baseUrl=$inference_url" \
+	--set gateway.oidc.issuer=https://issuer.example --set gateway.oidc.audience=osh-client \
+	--set gateway.oidc.clientCredentialsSecret.name=oidc-client \
+	--set gateway.oidc.clientCredentialsSecret.clientId=osh-hook
 # ...and the hook dials http:// with no client certificate, so it cannot reach a gateway
 # with TLS: in three series, both together fail; TLS alone and the provider alone render.
 inference_try bad-3h-inference-tls 'gateway.tls.enabled' --set "inferenceProvider.baseUrl=$inference_url" \
@@ -1188,6 +1198,16 @@ if rendered("good-8-inference-oidc") is not None:
     if "--gateway-endpoint" in script or "openshell --gateway in-cluster" not in script:
         failures.append("good-8-inference-oidc: under OIDC the hook must address the registered gateway "
                         "(--gateway in-cluster), never --gateway-endpoint, which sends no token")
+# The grant's client is gateway.oidc.clientCredentialsSecret.clientId when set, else the CLI's.
+for name, want in (("good-8-inference-oidc", "osh-client"), ("good-8-inference-oidc-hook-client", "osh-hook"),
+                   ("good-8-inference-oidc-only-hook-client", "osh-hook")):
+    if name == "good-8-inference-oidc" and not succeeded(name):
+        continue
+    if name != "good-8-inference-oidc" and rendered(name) is None:
+        continue
+    got = {e["name"]: e.get("value") for e in hook_of(name)[0]}.get("OIDC_CLIENT_ID")
+    if got != want:
+        failures.append(f"{name}: the hook logs in as client {got!r}, want {want!r}")
 # Without OIDC nothing changes: no registration, no OIDC environment.
 env, script = hook_of("rbac-inference")
 if "gateway add" in script or '--gateway-endpoint "${GATEWAY_URL}"' not in script or any(
