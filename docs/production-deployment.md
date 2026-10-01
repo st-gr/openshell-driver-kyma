@@ -394,9 +394,17 @@ the CLI on a `kubectl port-forward` to the gateway (the setup in
 `--resolve default--web.openshell.localhost:8080:127.0.0.1`. A server bound to
 `0.0.0.0` or `[::]` opens the relay but never answers.
 
-With `gatewayIngress.serviceHosts.enabled`, the same command prints a public
-URL, `http://default--web.<cluster-domain>/`, which the Kyma gateway redirects
-to HTTPS; no port-forward and no `--resolve`. Three things to know:
+With `gatewayIngress.serviceHosts.enabled` the service is published at
+`https://default--web.<cluster-domain>/`; no port-forward and no `--resolve`.
+
+Read the printed URL with care. Through the remote gateway the `openshell` CLI
+prints `http://default--web.<cluster-domain>:443/`: it takes the scheme from
+the gateway (which serves plain HTTP behind the ingress) and the port from the
+gateway endpoint. Use the host with `https://`. API and SDK clients get
+`http://default--web.<cluster-domain>/` from the gateway, which the Kyma
+gateway redirects to HTTPS.
+
+Things to know:
 
 - A browser sends no token, so these hosts are fenced by
   `gatewayIngress.allowedCidrs` only. Put authentication into the service
@@ -409,9 +417,10 @@ to HTTPS; no port-forward and no `--resolve`. Three things to know:
 - The fence is at the ingress gateway. A pod inside the cluster reaches a
   service URL through the gateway's Service without passing it, as it always
   could with the port-forward URLs.
-- The gateway then binds port 80 in its pod (so the printed URL carries no
-  port), which adds the safe sysctl `net.ipv4.ip_unprivileged_port_start=0` to
-  the pod. The in-cluster Service port stays `gateway.grpcPort`.
+- The gateway then binds port 80 in its pod, so that the URL it hands to API
+  and SDK clients carries no port. That adds the safe sysctl
+  `net.ipv4.ip_unprivileged_port_start=0` to the pod. The in-cluster Service
+  port stays `gateway.grpcPort`.
 
 Sandbox pods themselves are never published.
 

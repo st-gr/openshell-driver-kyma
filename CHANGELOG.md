@@ -27,12 +27,16 @@ below) before `helm upgrade`; the chart refuses a values file that still enables
   without any would make it deny every other application's hosts; see
   production-deployment before choosing.
 - **Published service URLs (`gatewayIngress.serviceHosts`)**:
-  `openshell service expose` prints `http://<workspace>--<sandbox>.<domain>/`
-  (redirected to HTTPS), routed to the gateway and fenced by `allowedCidrs`.
+  services exposed with `openshell service expose` are reachable at
+  `https://<workspace>--<sandbox>.<domain>/`, routed to the gateway and fenced
+  by `allowedCidrs`. (Through the remote gateway upstream's CLI prints the URL
+  as `http://<host>:443/`, the gateway's scheme with the endpoint's port; use
+  the host with `https://`.)
   Published per workspace (`serviceHosts.workspaces`, default `[default]`):
   routes and policies match `<workspace>--*`, never the whole domain. The
   gateway then binds port 80 in its pod (safe sysctl
-  `net.ipv4.ip_unprivileged_port_start=0`) and takes the domain from
+  `net.ipv4.ip_unprivileged_port_start=0`), so the URL API and SDK clients
+  receive is `http://<host>/` (redirected to HTTPS), and takes the domain from
   `--server-san`.
 - **`gateway.oidc.authOnly`**, `rolesClaim`, `clientId`, `jwksUri` and
   `clientCredentialsSecret`. `authOnly: true` selects upstream's

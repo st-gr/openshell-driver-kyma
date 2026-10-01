@@ -143,8 +143,14 @@ port=$(kubectl -n "$NS" get deploy "$fullname" \
 check "gateway binds port 80 (got $port)" test "$port" = 80
 
 log "the edge refuses a call without a token"
-code=$(http_code -X POST -H 'content-type: application/grpc' "https://$HOST/openshell.v1.OpenShell/ListSandboxes")
-check "POST without a bearer is refused at the edge (HTTP $code, want 403)" test "$code" = 403
+code=$(http_code "https://$HOST/")
+check "a request without a bearer is refused at the edge (HTTP $code, want 403)" test "$code" = 403
+# Envoy refuses a gRPC call in gRPC's own terms: HTTP 200 with grpc-status 7 (permission
+# denied). Status 16 (unauthenticated) would be the gateway's answer: the edge let it through.
+grpc=$(curl -s -m 20 -o /dev/null -D - -X POST -H 'content-type: application/grpc' \
+	"https://$HOST/openshell.v1.OpenShell/ListSandboxes" | tr -d '\r' \
+	| awk -F': ' 'tolower($1) == "grpc-status" { print $2 }' || true)
+check "a gRPC call without a bearer is refused at the edge (grpc-status ${grpc:-none}, want 7)" test "$grpc" = 7
 
 log "CLI through the ingress (a browser opens for the OIDC login)"
 openshell gateway add "https://$HOST" --name "$GW" --oidc-issuer "$OSH_OIDC_ISSUER" \
@@ -167,8 +173,11 @@ check "sandbox exec through the ingress" grep -q exec-42 <<<"$out"
 
 log "sandbox service URL"
 url=$(osh service expose "$SANDBOX" 8080 2>&1 | grep -oE 'https?://[^ ]+' | head -1 || true)
-check "service expose prints http://default--$SANDBOX.<domain>/ (got ${url/$OSH_DOMAIN/<domain>})" \
-	test "$url" = "http://default--$SANDBOX.$OSH_DOMAIN/"
+# Upstream's CLI prints the URL with the scheme the gateway reports (http: TLS ends at the
+# ingress) and the port of the gateway endpoint (443). The host is what the chart controls;
+# the URL that works is https://<host>/, checked below.
+check "service expose names the host default--$SANDBOX.<domain> (printed: ${url/$OSH_DOMAIN/<domain>})" \
+	grep -q "//default--$SANDBOX\.${OSH_DOMAIN//./\\.}[:/]" <<<"$url"
 code=$(http_code "http://default--$SANDBOX.$OSH_DOMAIN/")
 check "the printed http:// URL redirects to https (HTTP $code, want 301)" test "$code" = 301
 body=$(curl -s -m 20 "https://default--$SANDBOX.$OSH_DOMAIN/" || true)

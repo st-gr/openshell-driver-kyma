@@ -21,7 +21,7 @@ openshell gateway add https://openshell.<domain> --name kyma \
   --oidc-client-id <client-id> --oidc-audience <client-id>   # browser login once
 openshell sandbox create --detach --name web --from python:3.12-slim \
   -- python3 -m http.server 8080 --bind 127.0.0.1
-openshell service expose web 8080        # → http://default--web.<domain>/  (opens in a browser)
+openshell service expose web 8080        # service at https://default--web.<domain>/ (the CLI prints http://…:443/, see D5)
 openshell sandbox connect web            # works, including long idle shells
 ```
 
@@ -39,7 +39,7 @@ default auth-only).
 | D2 | Plain Istio resources: `VirtualService`s in the release namespace, `RequestAuthentication` + `AuthorizationPolicy` on the ingress gateway in `istio-system`, written as DENY or ALLOW policies per `gatewayIngress.policyAction`. | APIRule v2 needs a sidecar on the gateway pod (PeerAuthentication, NetworkPolicy, probe changes). DENY (default) names only the chart's hosts and is safe on a gateway without ALLOW policies, where an ALLOW policy would shut out every other host; ALLOW is for a gateway that already allowlists per host, as the user's does. |
 | D3 | No tunnel. The CLI sends gRPC with a bearer straight through Istio. | Istio carries gRPC; the tunnel exists for edges that reject POSTs. |
 | D4 | Gateway stays plaintext in-pod (`--disable-tls`). | Upstream: "Kubernetes deployments must leave `mtls_auth` unset and use OIDC or a trusted access proxy." The ingress→pod hop is plaintext like today's supervisor hop. |
-| D5 | With published service hosts (`serviceHosts.enabled`) the gateway binds **port 80** in-pod (safe sysctl) and gets `--server-san *.<domain>`; otherwise its listener is unchanged. | `endpoint_url` prints `<scheme>://<host>:<bind-port>/` and omits the port only for http/80; Kyma's `http:80` server redirects to HTTPS. Result: `http://<ws>--<sb>.<domain>/`, copy-pasteable. |
+| D5 | With published service hosts (`serviceHosts.enabled`) the gateway binds **port 80** in-pod (safe sysctl) and gets `--server-san *.<domain>`; otherwise its listener is unchanged. | The gateway builds a service URL as `<scheme>://<host>:<bind port>/` and leaves the port out only for http/80; Kyma's `http:80` server redirects to HTTPS. **Live-run correction:** that is the URL API and SDK clients receive. Upstream's CLI rewrites the port to the gateway endpoint's and keeps the gateway's scheme, so through the remote gateway it prints `http://<host>:443/`; the service is at `https://<host>/`. Printing a correct URL from the CLI needs TLS in the gateway pod (§11). |
 | D6 | Service hosts are published only behind `allowedCidrs`, and per workspace (`serviceHosts.workspaces`): routes and policies match `<workspace>--*`. | Browsers carry no bearer; IP allowlisting is the cluster's existing pattern. Istio hosts take only prefix or suffix wildcards, and the domain's wildcard would cover the CLI host and other applications. The chart refuses to publish service hosts without CIDRs. |
 | D7 | `gatewayIngress` replaces `gatewayApirule`. | The APIRule block was never verified and cannot work without a sidecar. Breaking → 0.10.0. |
 | D8 | `gateway.oidc.authOnly: true` selects upstream's authentication-only mode explicitly; the chart default stays `false`. | Upstream defaults the roles to `openshell-admin`/`openshell-user` read from `realm_access.roles`, so empty role values mean RBAC with those defaults, which IAS tokens never satisfy. `authOnly` passes both roles empty, so any identity IAS issues is accepted and the hook's technical client needs no group claims. Making it an explicit switch keeps existing OIDC installs from loosening silently. |
@@ -216,10 +216,10 @@ openshell gateway add https://openshell.<domain> --name kyma \
   --oidc-client-id <client-id> --oidc-audience <client-id>
 openshell gateway select kyma
 openshell sandbox create --detach --name web --from python:3.12-slim -- python3 -m http.server 8080 --bind 127.0.0.1
-openshell service expose web 8080      # → http://default--web.<domain>/
+openshell service expose web 8080      # prints http://default--web.<domain>:443/; open https://default--web.<domain>/
 ```
 
-The printed URL redirects to HTTPS at Kyma's `http:80` server. The browser must
+The CLI's printed URL needs its scheme corrected (D5); API clients get `http://<host>/`, which Kyma's `http:80` server redirects. The browser must
 come from an `allowedCidrs` range; the sandbox service itself may add its own
 auth. `curl` works without `--resolve` now (public DNS).
 

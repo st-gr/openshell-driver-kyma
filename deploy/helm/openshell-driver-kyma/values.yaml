@@ -520,14 +520,17 @@ gatewayIngress:
   # Source addresses or CIDR blocks (Istio remoteIpBlocks). Optional extra fence
   # for `host`; required for serviceHosts.
   allowedCidrs: []
-  # Publish the URLs `openshell service expose` prints, as
-  # http://<workspace>--<sandbox>[--<service>].<domain>/ (redirected to https).
+  # Publish sandbox services (`openshell service expose`) at
+  # https://<workspace>--<sandbox>[--<service>].<domain>/. Through the remote
+  # gateway the CLI prints that URL as http://<host>:443/ (the gateway's scheme,
+  # the endpoint's port): use the host with https://.
   # A browser sends no token, so these hosts are fenced by allowedCidrs only.
   # They are published per workspace: routes and policies match <workspace>--*
   # for the workspaces listed here, never the whole domain, so nothing else under
   # the domain is affected and a workspace that is not listed is not reachable.
   # With this on, the gateway binds port 80 in the pod (the pod gets the safe
-  # sysctl net.ipv4.ip_unprivileged_port_start=0) so the URLs carry no port.
+  # sysctl net.ipv4.ip_unprivileged_port_start=0), so the URL it hands to API
+  # and SDK clients is http://<host>/, which the Kyma gateway redirects to https.
   serviceHosts:
     enabled: false
     workspaces: [default]
