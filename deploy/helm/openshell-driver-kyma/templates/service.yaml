@@ -19,6 +19,14 @@ spec:
       port: {{ .Values.gateway.grpcPort }}
       targetPort: grpc
       protocol: TCP
+    {{- if include "openshell-driver-kyma.serviceHostsEnabled" . }}
+    # The same gateway listener under an http-* name: Istio then speaks HTTP/1.1 to
+    # it for sandbox service URLs, which lets WebSocket upgrades through.
+    - name: http-services
+      port: 80
+      targetPort: grpc
+      protocol: TCP
+    {{- end }}
     - name: gw-health
       port: {{ .Values.gateway.healthPort }}
       targetPort: gw-health

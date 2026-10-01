@@ -16,13 +16,15 @@
 # ANTHROPIC_MODEL (see the sandboxEnv helper in _driver-env.tpl), and sandboxes
 # attach the provider with `openshell sandbox create --provider <name>`.
 #
-# Auth note: this script assumes the gateway runs with
-# --disable-tls + allow_unauthenticated_users=true (the default when
-# gateway.oidc.issuer is unset). A gateway with OIDC enabled refuses the
-# Job's token-less CLI calls, so the chart refuses inferenceProvider.enabled
-# together with gateway.oidc.issuer (inferenceProviderGuards); in an
-# OIDC-enabled cluster the operator registers the profile and provider from
-# an authenticated CLI session (docs/production-deployment.md).
+# Auth note: without gateway.oidc.issuer the gateway runs with --disable-tls and
+# allow_unauthenticated_users=true, and the hook dials it directly. With an
+# issuer the gateway refuses calls without a bearer token, so the hook registers
+# the gateway once (`openshell gateway add ... --oidc-*`); the CLI exchanges
+# OPENSHELL_OIDC_CLIENT_SECRET for a token with the client-credentials grant and
+# stores it, and every later call names that gateway. The client secret comes
+# from gateway.oidc.clientCredentialsSecret and is never expanded in the script.
+# When the gateway serves TLS (gateway.tls.enabled, which needs OIDC here), the
+# hook dials https:// and trusts the chart CA, mounted from the client TLS Secret.
 #
 # The chart never touches the API key — it stays inside the Secret
 # named by .Values.inferenceProvider.credentialSecret.{name,key}.
@@ -128,10 +130,11 @@ spec:
               drop: [ALL]
           env:
             - name: GATEWAY_URL
-              value: "http://{{ include "openshell-driver-kyma.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.gateway.grpcPort }}"
+              value: "{{ ternary "https" "http" .Values.gateway.tls.enabled }}://{{ include "openshell-driver-kyma.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.gateway.grpcPort }}"
             - name: GATEWAY_HEALTH_URL
               # Gateway HTTP healthz lives on a different port from the gRPC
-              # port. Requires `gw-health` to be in the chart's Service.
+              # port, in plain HTTP whatever gateway.tls.enabled says. Requires
+              # `gw-health` to be in the chart's Service.
               value: "http://{{ include "openshell-driver-kyma.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.gateway.healthPort }}"
             - name: PROVIDER_NAME
               value: {{ include "openshell-driver-kyma.inferenceProviderName" . | quote }}
@@ -139,6 +142,21 @@ spec:
               value: {{ include "openshell-driver-kyma.inferenceProfileId" . | quote }}
             - name: CLI_VERSION
               value: {{ .Values.upstream.version | quote }}
+            {{- if .Values.gateway.oidc.issuer }}
+            - name: OPENSHELL_NO_BROWSER
+              value: "1"
+            - name: OIDC_ISSUER
+              value: {{ .Values.gateway.oidc.issuer | quote }}
+            - name: OIDC_CLIENT_ID
+              value: {{ default .Values.gateway.oidc.clientId .Values.gateway.oidc.clientCredentialsSecret.clientId | quote }}
+            - name: OIDC_AUDIENCE
+              value: {{ .Values.gateway.oidc.audience | quote }}
+            - name: OPENSHELL_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.gateway.oidc.clientCredentialsSecret.name | quote }}
+                  key: {{ .Values.gateway.oidc.clientCredentialsSecret.key | quote }}
+            {{- end }}
             - name: ANTHROPIC_API_KEY
               valueFrom:
                 secretKeyRef:
@@ -148,6 +166,11 @@ spec:
             - name: profile
               mountPath: /profile
               readOnly: true
+            {{- if .Values.gateway.tls.enabled }}
+            - name: gateway-ca
+              mountPath: /pki
+              readOnly: true
+            {{- end }}
           command:
             - /bin/sh
             - -eu
@@ -196,6 +219,26 @@ spec:
                 sleep 2
               done
 
+              # The gateway every call below addresses. With OIDC the CLI registers
+              # it once and exchanges OPENSHELL_OIDC_CLIENT_SECRET, which it reads
+              # from its own environment, for a token (client-credentials grant).
+              {{- if .Values.gateway.oidc.issuer }}
+              openshell gateway add "${GATEWAY_URL}" --name in-cluster \
+                --oidc-issuer "${OIDC_ISSUER}" --oidc-client-id "${OIDC_CLIENT_ID}" \
+                --oidc-audience "${OIDC_AUDIENCE}"
+              {{- if .Values.gateway.tls.enabled }}
+              # The gateway's certificate is signed by the chart CA. The CLI reads a
+              # registered gateway's CA from that gateway's directory (upstream
+              # openshell-cli src/tls.rs, with_default_paths, at the pinned tag).
+              ca_dir="${XDG_CONFIG_HOME:-${HOME}/.config}/openshell/gateways/in-cluster/mtls"
+              mkdir -p "${ca_dir}"
+              cp /pki/ca.crt "${ca_dir}/ca.crt"
+              {{- end }}
+              osh() { openshell --gateway in-cluster "$@"; }
+              {{- else }}
+              osh() { openshell --gateway-endpoint "${GATEWAY_URL}" "$@"; }
+              {{- end }}
+
               # 4. Register the provider profile (upstream's profile model).
               #    Idempotent, and it runs again on every `helm upgrade`: import
               #    a new profile, or update the one that exists. The profile is
@@ -205,7 +248,7 @@ spec:
               #      optimistic concurrency); `export` reports it.
               #    - `lint` rejects an id that is already registered, so it runs
               #      on the import path only; `update` validates the file itself.
-              if current=$(openshell --gateway-endpoint "${GATEWAY_URL}" provider profile export "${PROFILE_ID}" --global 2>/dev/null); then
+              if current=$(osh provider profile export "${PROFILE_ID}" --global 2>/dev/null); then
                 version=$(printf '%s\n' "${current}" | sed -n 's/^resource_version: *//p')
                 if [ -z "${version}" ]; then
                   echo "[hook] provider profile ${PROFILE_ID} exists but reports no resource_version" >&2
@@ -213,12 +256,12 @@ spec:
                 fi
                 echo "[hook] provider profile ${PROFILE_ID} exists (resource_version ${version}); updating..."
                 { echo "resource_version: ${version}"; cat /profile/profile.yaml; } > /tmp/profile.yaml
-                openshell --gateway-endpoint "${GATEWAY_URL}" provider profile update -f /tmp/profile.yaml --global "${PROFILE_ID}"
+                osh provider profile update -f /tmp/profile.yaml --global "${PROFILE_ID}"
               else
                 echo "[hook] validating provider profile ${PROFILE_ID}..."
-                openshell --gateway-endpoint "${GATEWAY_URL}" provider profile lint -f /profile/profile.yaml --global
+                osh provider profile lint -f /profile/profile.yaml --global
                 echo "[hook] registering provider profile ${PROFILE_ID}..."
-                openshell --gateway-endpoint "${GATEWAY_URL}" provider profile import -f /profile/profile.yaml --global
+                osh provider profile import -f /profile/profile.yaml --global
               fi
 
               # 5. Create the provider from that profile with the API key.
@@ -231,13 +274,13 @@ spec:
               #    its type. Otherwise the hook fails, and never deletes it:
               #    sandboxes may be attached to it.
               echo "[hook] configuring provider ${PROVIDER_NAME}..."
-              if openshell --gateway-endpoint "${GATEWAY_URL}" provider create \
+              if osh provider create \
                    --name "${PROVIDER_NAME}" --type "${PROFILE_ID}" \
                    --credential ANTHROPIC_API_KEY --global-profile; then
                 echo "[hook] provider created"
               else
                 echo "[hook] provider create failed (likely AlreadyExists); checking the existing provider"
-                if ! existing=$(openshell --gateway-endpoint "${GATEWAY_URL}" provider get "${PROVIDER_NAME}"); then
+                if ! existing=$(osh provider get "${PROVIDER_NAME}"); then
                   echo "[hook] cannot read provider ${PROVIDER_NAME} to check its type; see the errors above" >&2
                   exit 1
                 fi
@@ -250,7 +293,7 @@ spec:
                   exit 1
                 fi
                 echo "[hook] provider ${PROVIDER_NAME} already has type '${PROFILE_ID}'; updating its key"
-                openshell --gateway-endpoint "${GATEWAY_URL}" provider update "${PROVIDER_NAME}" \
+                osh provider update "${PROVIDER_NAME}" \
                   --credential ANTHROPIC_API_KEY
               fi
               echo "[hook] done. Create sandboxes with: openshell sandbox create --provider ${PROVIDER_NAME} ..."
@@ -258,4 +301,14 @@ spec:
         - name: profile
           configMap:
             name: {{ include "openshell-driver-kyma.fullname" . }}-inference-profile
+        {{- if .Values.gateway.tls.enabled }}
+        # Only the CA certificate of the client TLS Secret: the hook presents no
+        # client certificate.
+        - name: gateway-ca
+          secret:
+            secretName: {{ include "openshell-driver-kyma.clientTlsSecretName" . }}
+            items:
+              - key: ca.crt
+                path: ca.crt
+        {{- end }}
 {{- end }}

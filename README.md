@@ -26,7 +26,7 @@ openshell-gateway ── Unix domain socket ── openshell-driver-kyma (Rust, 
                                                          namespace PSA labels, /healthz /readyz)
 ```
 
-**Version 0.9.1.** Upgrading from 0.8.0 needs every sandbox deleted first and
+**Version 0.10.0.** Upgrading from 0.8.0 needs every sandbox deleted first and
 some values removed; see the [CHANGELOG](CHANGELOG.md).
 
 ## Quick start
@@ -43,7 +43,7 @@ private-in-cluster-upstream variants and troubleshooting) start at
 and download flow, plus the SAP AI Core variant, is in
 [`docs/walkthrough-claude-files.md`](docs/walkthrough-claude-files.md).
 
-For production deploys (OIDC user auth, public Kyma APIRule, image
+For production deploys (OIDC user auth, remote access through the Kyma ingress gateway, image
 digests pinned), see [`docs/production-deployment.md`](docs/production-deployment.md).
 
 For private VPN routing through SAP Cloud Connector, see

@@ -119,22 +119,18 @@ gateway:
 gatewayService:
   enabled: true
 
-# ─── Gateway APIRule (Kyma) ───────────────────────────────────────────────
-# Public exposure of the gateway via the Kyma API gateway. Refused unless
-# gateway.oidc.issuer is set (chart guards against accidentally publishing
-# an unauthenticated gateway).
-gatewayApirule:
+# ─── Remote access (Kyma ingress) ─────────────────────────────────────────
+# Publishes the gateway through the cluster's Istio ingress gateway. Refused
+# unless gateway.oidc.{issuer,audience,clientId} are set (the chart never
+# publishes an unauthenticated gateway) and gateway.tls.enabled is true (the
+# gateway serves TLS; the ingress gateway re-encrypts to it). An install from
+# before 0.10.0 regenerates its PKI first. See docs/production-deployment.md.
+gatewayIngress:
   enabled: false
-  host: ""               # e.g. openshell.your-cluster-id.kyma.ondemand.com
-  gateway: kyma-system/kyma-gateway
-  rules:
-    - path: /*
-      methods: [POST]
-      jwt:
-        authentications: []
-        # authentications:
-        #   - issuer: https://my-tenant.accounts.ondemand.com
-        #     jwksUri: https://my-tenant.accounts.ondemand.com/oauth2/certs
+  domain: ""               # e.g. your-cluster-id.kyma.ondemand.com
+  allowedCidrs: []         # e.g. ["203.0.113.0/24"]; required for serviceHosts
+  serviceHosts:
+    enabled: false
 
 # ─── Inference provider (sandbox model traffic) ───────────────────────────
 # Architecture (upstream OpenShell v0.1.2's provider-profile model):

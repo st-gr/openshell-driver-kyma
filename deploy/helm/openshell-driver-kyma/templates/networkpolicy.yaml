@@ -1,11 +1,14 @@
 {{- if .Values.networkPolicy.enabled -}}
+{{- if not (kindIs "slice" .Values.networkPolicy.extraEgress) -}}
+{{- fail (printf "networkPolicy.extraEgress must be a list of NetworkPolicy egress rules, got the %s %q." (kindOf .Values.networkPolicy.extraEgress) (toString .Values.networkPolicy.extraEgress)) -}}
+{{- end -}}
 # NetworkPolicy for the driver+gateway pod.
 #
 # Default-deny ingress except:
 #   - the driver's /healthz + /readyz port (the kubelet's probes; any pod
 #     can reach it, tighten via your own overlay if needed)
 #   - the gateway's gRPC + health + metrics ports when gateway.enabled
-#     (so port-forward, sidecar mesh, or APIRule reverse proxy can
+#     (so port-forward and the ingress gateway of gatewayIngress can
 #     reach them)
 #
 # Default-deny egress except:
@@ -22,6 +25,9 @@
 #   - with driver.otlpEndpoint, the driver's trace export on that
 #     endpoint's port (openshell-driver-kyma.otlpPort) to anywhere, as for
 #     the apiserver: the chart does not know the collector's address.
+#   - networkPolicy.extraEgress, as given: rules only the operator can know, such as
+#     an OIDC issuer published through this cluster's own ingress gateway (a CNI that
+#     applies policy after DNAT sees that connection on the ingress pod's port).
 #
 # Sandbox pods are fenced by upstream's own per-namespace NetworkPolicies
 # (openshell-sandbox-workloads, openshell-sandbox-supervisors). NetworkPolicies
@@ -69,6 +75,10 @@ spec:
     - ports:
         - port: {{ . }}
           protocol: TCP
+    {{- end }}
+    {{- with .Values.networkPolicy.extraEgress }}
+    # networkPolicy.extraEgress, as given.
+    {{- toYaml . | nindent 4 }}
     {{- end }}
 {{- end }}
 {{- if and .Values.networkPolicy.enabled .Values.bedrockBridge.enabled }}

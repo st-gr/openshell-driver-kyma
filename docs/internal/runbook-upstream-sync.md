@@ -146,6 +146,15 @@ Two traps this exposed:
   v0.0.99 alike). To exercise the failure path, break the driver on a scratch
   branch and dispatch the smoke against that branch.
 
+### `rendered gateway config accepted upstream` is red with `GATEWAY_ARGS_REJECTED`
+
+`scripts/check-gateway-config.sh` runs the pinned gateway image with the chart's
+rendered command line plus `--help`: with the defaults, with remote access on
+and with RBAC roles. Upstream renamed or removed a flag the chart passes
+(`--server-san`, `--oidc-roles-claim`, `--oidc-admin-role`, …); the output
+carries upstream's own `unexpected argument` message. Fix the flag in
+`deploy/helm/openshell-driver-kyma/templates/deployment.yaml`.
+
 ### An upstream release is broken
 
 Unrelated PRs no longer turn red when upstream ships: their smokes install

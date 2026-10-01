@@ -2,6 +2,8 @@
 {{- include "openshell-driver-kyma.inferenceProviderGuards" . -}}
 {{- include "openshell-driver-kyma.gatewayTlsGuards" . -}}
 {{- include "openshell-driver-kyma.gatewayGuards" . -}}
+{{- include "openshell-driver-kyma.gatewayOidcGuards" . -}}
+{{- include "openshell-driver-kyma.gatewayIngressGuards" . -}}
 {{- include "openshell-driver-kyma.workspaceGuards" . -}}
 {{- include "openshell-driver-kyma.sandboxEnvGuards" . -}}
 {{- include "openshell-driver-kyma.driverValueGuards" . -}}
@@ -148,6 +150,18 @@ spec:
             - {{ . | quote }}
             - --oidc-audience
             - {{ $.Values.gateway.oidc.audience | quote }}
+            {{- with $.Values.gateway.oidc.rolesClaim }}
+            - --oidc-roles-claim
+            - {{ . | quote }}
+            {{- end }}
+            {{- if $.Values.gateway.oidc.authOnly }}
+            # Authentication-only: upstream defaults the roles to openshell-admin and
+            # openshell-user, so both are passed empty to switch role checks off.
+            - --oidc-admin-role
+            - ""
+            - --oidc-user-role
+            - ""
+            {{- else }}
             {{- with $.Values.gateway.oidc.adminRole }}
             - --oidc-admin-role
             - {{ . | quote }}
@@ -156,6 +170,13 @@ spec:
             - --oidc-user-role
             - {{ . | quote }}
             {{- end }}
+            {{- end }}
+            {{- end }}
+            {{- if include "openshell-driver-kyma.serviceHostsEnabled" . }}
+            # A wildcard SAN is how upstream learns the domain of sandbox service
+            # URLs (its default, openshell.localhost, stays available).
+            - --server-san
+            - {{ printf "*.%s" .Values.gatewayIngress.domain | quote }}
             {{- end }}
             {{- with .Values.gateway.extraArgs }}
               {{- toYaml . | nindent 12 }}

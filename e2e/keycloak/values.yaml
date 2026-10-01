@@ -1,0 +1,19 @@
+# Chart values for an OpenShell release whose OIDC issuer is this directory's Keycloak,
+# or any issuer published through the cluster's own Istio ingress gateway.
+#
+# The gateway reaches the issuer's public host from inside the cluster. A CNI that applies
+# NetworkPolicy after DNAT (Calico) sees that connection going to the ingress gateway pod's
+# container port, 8443, which the chart's policy for the driver+gateway pod does not allow
+# by itself: the gateway then fails at startup with "OIDC discovery request failed".
+networkPolicy:
+  extraEgress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: istio-system
+          podSelector:
+            matchLabels:
+              istio: ingressgateway
+      ports:
+        - protocol: TCP
+          port: 8443

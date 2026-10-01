@@ -1,0 +1,93 @@
+{{- if .Values.gatewayIngress.enabled -}}
+{{- $prefix := include "openshell-driver-kyma.gatewayIngressPolicyPrefix" . -}}
+{{- $in := .Values.gatewayIngress -}}
+{{- $allow := eq $in.policyAction "ALLOW" -}}
+{{- $host := include "openshell-driver-kyma.gatewayIngressHost" . -}}
+{{- /* The source field of the fence: the address of the connection the ingress gateway
+accepted (ipBlocks), or the one Istio takes from X-Forwarded-For (remoteIpBlocks). */ -}}
+{{- $forwarded := eq $in.sourceAddress "forwarded" -}}
+{{- $blocks := ternary (ternary "remoteIpBlocks" "ipBlocks" $forwarded) (ternary "notRemoteIpBlocks" "notIpBlocks" $forwarded) $allow -}}
+# Source-address fences on the cluster's Istio ingress gateway, in its namespace.
+#
+# The ingress gateway is shared with every other application of the cluster, so
+# nothing here may apply to it as a whole: every rule names this release's hosts.
+# There is no RequestAuthentication. It has no host scope, and one on the ingress
+# gateway makes Envoy answer 401 to every Bearer token it cannot validate, on every
+# host: other applications' logins and API keys break. The OpenShell gateway
+# validates the caller's token itself, as upstream intends.
+#
+# gatewayIngress.policyAction follows the ingress gateway. Without any ALLOW policy
+# Istio lets every request through, and the first ALLOW policy would make the gateway
+# deny every other application's hosts: there the chart writes DENY policies (the
+# default), which name only its own hosts. A gateway that already has ALLOW policies
+# denies whatever no policy allows: there the chart writes ALLOW policies for its hosts.
+#
+# Two limits of "its own hosts". A DENY rule is matched by host only on HTTP servers:
+# for a TCP or TLS-passthrough server of the same ingress gateway Istio builds the rule
+# without its hosts and keeps the source addresses, so the chart refuses DENY with
+# allowedCidrs when the cluster has such a server (_gateway-ingress.tpl). And
+# <workspace>--* is a prefix: it also matches another application's host whose name
+# begins with "<workspace>--".
+{{- if or $allow $in.allowedCidrs }}
+---
+# The CLI host. With allowedCidrs, only those source addresses reach it; under ALLOW
+# without them, every source does (the gateway authenticates). Under DENY without
+# them there is nothing to deny and no policy. Hosts are listed with and without a
+# port: Istio matches them against the authority as the client sent it.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: {{ $prefix }}-openshell-cli
+  namespace: {{ $in.ingressNamespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- toYaml $in.ingressSelector | nindent 6 }}
+  action: {{ $in.policyAction }}
+  rules:
+    - to:
+        - operation:
+            hosts:
+              - {{ $host | quote }}
+              - {{ printf "%s:*" $host | quote }}
+      {{- with $in.allowedCidrs }}
+      from:
+        - source:
+            {{ $blocks }}:
+              {{- toYaml . | nindent 14 }}
+      {{- end }}
+{{- end }}
+{{- if $in.serviceHosts.enabled }}
+---
+# Sandbox service hosts: the gateway does not authenticate a browser's request to a
+# service URL, so the source address is the only fence. They are matched per
+# workspace, as <workspace>--*: Istio's hosts take only a prefix or a suffix wildcard,
+# and the domain's wildcard would also cover the CLI host and every other application
+# under the domain.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: {{ $prefix }}-openshell-services
+  namespace: {{ $in.ingressNamespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- toYaml $in.ingressSelector | nindent 6 }}
+  action: {{ $in.policyAction }}
+  rules:
+    - from:
+        - source:
+            {{ $blocks }}:
+              {{- toYaml $in.allowedCidrs | nindent 14 }}
+      to:
+        - operation:
+            hosts:
+              {{- range $in.serviceHosts.workspaces }}
+              - {{ printf "%s--*" . | quote }}
+              {{- end }}
+{{- end }}
+{{- end }}
