@@ -1003,6 +1003,71 @@ if (chart / "templates" / "gateway-apirule.yaml").exists():
 if "gatewayIngress" not in (yaml.safe_load(values) or {}):
     failures.append("values.yaml has no gatewayIngress block")
 
+def gateway_parts(name):
+    """(gateway container, pod spec, the release's Service, the driver pod's NetworkPolicy)."""
+    documents = docs(work / f"{name}.yaml")
+    pod = driver_deployment(documents, name)["spec"]["template"]["spec"]
+    gateway = next(c for c in pod["containers"] if c["name"] == "gateway")
+    service = next(d for d in documents if d.get("kind") == "Service"
+                   and any(p["name"] == "grpc" for p in d["spec"]["ports"]))
+    policy = next((d for d in documents if d.get("kind") == "NetworkPolicy"
+                   and d["metadata"]["name"].endswith("-driver")), None)
+    return gateway, pod, service, policy
+
+def flag(args, name):
+    """The values of every occurrence of a gateway flag."""
+    return [args[i + 1] for i, a in enumerate(args) if a == name and i + 1 < len(args)]
+
+# The gateway's listener. Upstream prints a service URL with the bind port unless it is
+# http on 80, so with published service hosts the gateway binds 80 (which a non-root
+# container may only do with the unprivileged-port sysctl) and takes the service domain
+# from a wildcard --server-san; the Service adds an http-* port on the same listener.
+UNPRIVILEGED_PORTS = {"name": "net.ipv4.ip_unprivileged_port_start", "value": "0"}
+OPERATOR_SYSCTL = {"name": "net.ipv4.ping_group_range", "value": "0 0"}
+LISTENER = {  # render -> (bind port, pod sysctls, --server-san, Service ports on the listener)
+    "render-shared-true": (8080, None, [], {"grpc": 8080}),
+    "good-8-ingress": (8080, None, [], {"grpc": 8080}),
+    "good-8-services": (80, [UNPRIVILEGED_PORTS], ["*.example.org"], {"grpc": 8080, "http-services": 80}),
+    "good-8-long-names": (80, [OPERATOR_SYSCTL, UNPRIVILEGED_PORTS], ["*.example.org"],
+                          {"grpc": 8080, "http-services": 80}),
+}
+for name, (port, sysctls, sans, service_ports) in LISTENER.items():
+    if name != "render-shared-true" and not succeeded(name):
+        continue
+    gateway, pod, service, policy = gateway_parts(name)
+    args = gateway["args"]
+    got = (flag(args, "--port"), (pod.get("securityContext") or {}).get("sysctls"), flag(args, "--server-san"),
+           [p["containerPort"] for p in gateway["ports"] if p["name"] == "grpc"])
+    if got != ([str(port)], sysctls, sans, [port]):
+        failures.append(f"{name}: gateway (--port, pod sysctls, --server-san, grpc containerPort) is {got}, "
+                        f"want {([str(port)], sysctls, sans, [port])}")
+    ports = {p["name"]: (p["port"], p["targetPort"]) for p in service["spec"]["ports"]
+             if p["name"] in ("grpc", "http-services")}
+    if ports != {n: (p, "grpc") for n, p in service_ports.items()}:
+        failures.append(f"{name}: the Service's listener ports are {ports}, want {service_ports} -> grpc")
+    allowed = [p["port"] for p in policy["spec"]["ingress"][0]["ports"]] if policy else []
+    if port not in allowed or (port != 8080 and 8080 in allowed):
+        failures.append(f"{name}: the driver pod's NetworkPolicy admits ports {allowed}, "
+                        f"which must include the gateway's bind port {port} and no stale 8080")
+
+# OIDC authorization flags. Upstream defaults the roles to openshell-admin/openshell-user,
+# so authentication-only mode needs both passed empty; without authOnly or roles the
+# chart passes neither and upstream's defaults apply.
+OIDC_FLAGS = {  # render -> (--oidc-roles-claim, --oidc-admin-role, --oidc-user-role)
+    "good-8-ingress": ([], [""], [""]),
+    "good-8-rbac-roles": (["groups"], ["osh-admin"], ["osh-user"]),
+    "good-8-oidc-default-roles": ([], [], []),
+}
+for name, want in OIDC_FLAGS.items():
+    if not succeeded(name):
+        continue
+    args = gateway_parts(name)[0]["args"]
+    got = (flag(args, "--oidc-roles-claim"), flag(args, "--oidc-admin-role"), flag(args, "--oidc-user-role"))
+    if got != want or flag(args, "--oidc-issuer") != ["https://issuer.example"] \
+            or flag(args, "--oidc-audience") != ["osh-client"]:
+        failures.append(f"{name}: gateway OIDC flags (roles claim, admin role, user role) are {got}, want {want}, "
+                        f"with issuer {flag(args, '--oidc-issuer')} and audience {flag(args, '--oidc-audience')}")
+
 if failures:
     print("CHART_RENDER_FAIL:")
     for f in failures:

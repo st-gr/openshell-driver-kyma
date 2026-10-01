@@ -70,6 +70,54 @@ if ! docker pull "$IMAGE" >/dev/null; then
   exit 1
 fi
 
+# The gateway's command line, as the chart renders it. Flags are parsed before the
+# config is read and `--help` stops the gateway right after parsing, so appending it
+# proves the pinned image knows every flag the chart passes: with the defaults, and
+# with remote access on, the render that passes the most.
+check_args() { # label [helm args...]
+  local label=$1 rc=0 out line args=()
+  shift
+  helm template check "$CHART" \
+    --set gateway.enabled=true \
+    --set gateway.sandboxJwt.enabled=true \
+    --set gatewayService.enabled=true \
+    "$@" --show-only templates/deployment.yaml > "$WORK/args-deployment.yaml"
+  python3 - "$WORK/args-deployment.yaml" > "$WORK/args.txt" <<'PY'
+import sys, yaml
+doc = yaml.safe_load(open(sys.argv[1]))
+for c in doc["spec"]["template"]["spec"]["containers"]:
+    if c["name"] == "gateway":
+        print("\n".join(c["args"]))
+        break
+else:
+    sys.exit("no gateway container in rendered Deployment")
+PY
+  while IFS= read -r line; do args+=("$line"); done < "$WORK/args.txt"
+  out="$(docker run --rm --entrypoint openshell-gateway "$IMAGE" "${args[@]}" --help 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "GATEWAY_ARGS_REJECTED ($label, exit $rc)"
+    head -5 <<<"$out"
+    exit 1
+  fi
+  echo "GATEWAY_ARGS_ACCEPTED ($label, ${#args[@]} args)"
+}
+check_args defaults
+check_args remote-access \
+  --set gatewayIngress.enabled=true \
+  --set gatewayIngress.domain=example.org \
+  --set gatewayIngress.serviceHosts.enabled=true \
+  --set-json 'gatewayIngress.allowedCidrs=["203.0.113.0/24"]' \
+  --set gateway.oidc.issuer=https://issuer.example \
+  --set gateway.oidc.audience=osh-client \
+  --set gateway.oidc.clientId=osh-client \
+  --set gateway.oidc.authOnly=true
+check_args rbac-roles \
+  --set gateway.oidc.issuer=https://issuer.example \
+  --set gateway.oidc.audience=osh-client \
+  --set gateway.oidc.rolesClaim=groups \
+  --set gateway.oidc.adminRole=osh-admin \
+  --set gateway.oidc.userRole=osh-user
+
 rc=0
 out="$(docker run --rm -v "$WORK/gateway.toml:/etc/openshell/gateway.toml:ro" \
   --entrypoint openshell-gateway "$IMAGE" \

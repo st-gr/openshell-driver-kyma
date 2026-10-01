@@ -43,8 +43,13 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- $podSecurity := deepCopy .Values.podSecurityContext }}
+      {{- if and .Values.gateway.enabled (lt (int (include "openshell-driver-kyma.gatewayBindPort" .)) 1024) }}
+      {{- /* The gateway runs as a non-root user and binds a port below 1024. */}}
+      {{- $_ := set $podSecurity "sysctls" (append (default (list) $podSecurity.sysctls) (dict "name" "net.ipv4.ip_unprivileged_port_start" "value" "0")) }}
+      {{- end }}
       securityContext:
-        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+        {{- toYaml $podSecurity | nindent 8 }}
       containers:
         - name: driver
           image: {{ include "openshell-driver-kyma.image" . }}
@@ -124,7 +129,7 @@ spec:
             - --bind-address
             - "0.0.0.0"
             - --port
-            - {{ .Values.gateway.grpcPort | quote }}
+            - {{ include "openshell-driver-kyma.gatewayBindPort" . | quote }}
             - --health-port
             - {{ .Values.gateway.healthPort | quote }}
             - --metrics-port
@@ -150,6 +155,18 @@ spec:
             - {{ . | quote }}
             - --oidc-audience
             - {{ $.Values.gateway.oidc.audience | quote }}
+            {{- with $.Values.gateway.oidc.rolesClaim }}
+            - --oidc-roles-claim
+            - {{ . | quote }}
+            {{- end }}
+            {{- if $.Values.gateway.oidc.authOnly }}
+            # Authentication-only: upstream defaults the roles to openshell-admin and
+            # openshell-user, so both are passed empty to switch role checks off.
+            - --oidc-admin-role
+            - ""
+            - --oidc-user-role
+            - ""
+            {{- else }}
             {{- with $.Values.gateway.oidc.adminRole }}
             - --oidc-admin-role
             - {{ . | quote }}
@@ -159,12 +176,19 @@ spec:
             - {{ . | quote }}
             {{- end }}
             {{- end }}
+            {{- end }}
+            {{- if include "openshell-driver-kyma.serviceHostsEnabled" . }}
+            # A wildcard SAN is how upstream learns the domain of sandbox service
+            # URLs (its default, openshell.localhost, stays available).
+            - --server-san
+            - {{ printf "*.%s" .Values.gatewayIngress.domain | quote }}
+            {{- end }}
             {{- with .Values.gateway.extraArgs }}
               {{- toYaml . | nindent 12 }}
             {{- end }}
           ports:
             - name: grpc
-              containerPort: {{ .Values.gateway.grpcPort }}
+              containerPort: {{ include "openshell-driver-kyma.gatewayBindPort" . }}
               protocol: TCP
             - name: gw-health
               containerPort: {{ .Values.gateway.healthPort }}

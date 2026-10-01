@@ -5,7 +5,7 @@
 #   - the driver's /healthz + /readyz port (the kubelet's probes; any pod
 #     can reach it, tighten via your own overlay if needed)
 #   - the gateway's gRPC + health + metrics ports when gateway.enabled
-#     (so port-forward, sidecar mesh, or APIRule reverse proxy can
+#     (so port-forward and the ingress gateway of gatewayIngress can
 #     reach them)
 #
 # Default-deny egress except:
@@ -48,7 +48,7 @@ spec:
         - port: {{ .Values.driver.healthPort }}
           protocol: TCP
       {{- if .Values.gateway.enabled }}
-        - port: {{ .Values.gateway.grpcPort }}
+        - port: {{ include "openshell-driver-kyma.gatewayBindPort" . }}
           protocol: TCP
         - port: {{ .Values.gateway.healthPort }}
           protocol: TCP
