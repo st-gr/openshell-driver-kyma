@@ -1,329 +1,385 @@
-# Remote gateway access on Kyma — design
+# Remote gateway access on Kyma — design (revision 2)
 
-**Status:** proposed (2026-09-30). Targets chart/driver 0.10.0.
-**Supersedes:** the unverified `gatewayApirule` block (removed by this design).
+**Status:** approved (2026-10-01), with the four recommended options of §11.
+Targets chart/driver 0.10.0.
+**Supersedes:** revision 1 of this document (2026-09-30). Revision 1 was
+implemented on PR #81 and live-tested; it is withdrawn because it broke a
+neighbouring application on the shared ingress gateway (§2). Nothing of it is
+released. The implementation plan is
+`docs/superpowers/plans/2026-10-01-remote-gateway-access-rev2.md`; the plan of
+2026-09-30 describes revision 1 and is kept as the record of what PR #81 holds.
 **Depends on:** v0.9.1 (sandbox pod exposure removed; `openshell service expose`
 documented).
 
 ## 1. Goal
 
-Use the OpenShell CLI and a browser against sandboxes on a Kyma cluster
-**without a `kubectl port-forward`**, the upstream way: publish the *gateway*
-(never the sandbox pods, which reset every inbound connection that does not
-come through the gateway's relay), authenticate users with OIDC, and let
-`openshell service expose` print URLs that work from the laptop.
-
-Success looks like:
+Use the OpenShell CLI and a browser against sandboxes on a Kyma cluster without a
+`kubectl port-forward`, the way upstream intends a Kubernetes gateway to be
+reached: the **gateway** terminates TLS and authenticates with OIDC; the cluster's
+ingress only routes to it. Sandbox pods are never published.
 
 ```bash
 openshell gateway add https://openshell.<domain> --name kyma \
-  --oidc-issuer https://<tenant>.accounts.ondemand.com \
-  --oidc-client-id <client-id> --oidc-audience <client-id>   # browser login once
+  --oidc-issuer <issuer> --oidc-client-id <client-id> --oidc-audience <audience>
 openshell sandbox create --detach --name web --from python:3.12-slim \
   -- python3 -m http.server 8080 --bind 127.0.0.1
-openshell service expose web 8080        # service at https://default--web.<domain>/ (the CLI prints http://…:443/, see D5)
+openshell service expose web 8080        # prints https://default--web.<domain>/
 openshell sandbox connect web            # works, including long idle shells
 ```
 
-Out of scope: the WebSocket tunnel (upstream's edge mode is
-Cloudflare-Access-specific: `/auth/connect` reads a `CF_Authorization`
-cookie), TLS between the ingress and the gateway pod (follow-up, §11), browser
-SSO for service URLs (no ext-authz on the cluster), RBAC roles (values stay,
-default auth-only).
+The identity provider is any OIDC provider that issues JWT access tokens. SAP IAS
+is the intended production provider (§8); the repository's Keycloak fixture is the
+test provider.
 
-## 2. Decisions
+Out of scope: TLS passthrough and client certificates end to end (§12), Gateway
+API objects (not installed on Kyma today; §12), browser SSO for service URLs,
+upstream's WebSocket tunnel (Cloudflare-Access-specific).
+
+## 2. What revision 1 got wrong
+
+| # | Defect | Consequence | Rule for this revision |
+|---|---|---|---|
+| W1 | A `RequestAuthentication` on the shared ingress gateway, to check OpenShell tokens at the edge. It has no host scope: Envoy answered 401 to **every** Bearer token it could not validate, on every host. | A neighbouring application's login looped, and API calls with Bearer keys to other hosts were refused, for about 24 minutes. | Nothing this chart renders may apply to the ingress gateway as a whole. Every policy in the ingress namespace names this release's hosts. No `RequestAuthentication`, ever. |
+| W2 | The claim "requests with another issuer's token are unaffected" went into the spec, the template and the docs without a test; the review accepted it; the acceptance run probed only OpenShell's hosts. | W1 reached a live cluster. | The acceptance run probes neighbouring hosts before and after the install with no token, a foreign JWT and a non-JWT Bearer key, and rolls back on any change (§10.2). |
+| W3 | "Bind port 80 so the printed service URL is right." Upstream's CLI replaces the URL's port with the gateway endpoint's and keeps the scheme the gateway reports. | The CLI printed `http://<host>:443/`. | The gateway reports `https` because it serves TLS (D3). No privileged port, no sysctl. |
+| W4 | An ALLOW policy flips an ingress gateway without ALLOW policies to deny-by-default; a `*.<domain>` policy covers other hosts. | Found in review, fixed before the live run. | Kept from revision 1: `policyAction`, per-workspace service hosts (D6, D7). |
+
+## 3. Upstream's model
+
+Upstream's chart (v0.1.2) offers three ways to reach a Kubernetes gateway. None
+has an authentication object at the edge; the gateway validates OIDC tokens
+itself.
+
+| Upstream | Edge | Gateway pod |
+|---|---|---|
+| `openshiftRoute` | TLS passthrough | terminates TLS |
+| `grpcRoute`, HTTPS listener, `server.disableTls=true` | terminates TLS | plaintext, OIDC |
+| `grpcRoute` + `backendTLSPolicy` | terminates TLS, re-encrypts, validates the pod's certificate against the chart's CA | TLS on, client certificates off, OIDC |
+
+This design is the third shape, written with Istio objects because Gateway API is
+not installed on Kyma today: the Kyma gateway terminates public TLS, a
+`VirtualService` routes by host, a `DestinationRule` originates TLS to the gateway
+pod and validates its certificate.
+
+## 4. Decisions
 
 | # | Decision | Why |
 |---|----------|-----|
-| D1 | OIDC end to end with SAP IAS: the edge validates the JWT, the gateway validates the same JWT. | Upstream's intended cloud mode; per-user identity, workspaces and audit work; the edge check is defense in depth. |
-| D2 | Plain Istio resources: `VirtualService`s in the release namespace, `RequestAuthentication` + `AuthorizationPolicy` on the ingress gateway in `istio-system`, written as DENY or ALLOW policies per `gatewayIngress.policyAction`. | APIRule v2 needs a sidecar on the gateway pod (PeerAuthentication, NetworkPolicy, probe changes). DENY (default) names only the chart's hosts and is safe on a gateway without ALLOW policies, where an ALLOW policy would shut out every other host; ALLOW is for a gateway that already allowlists per host, as the user's does. |
-| D3 | No tunnel. The CLI sends gRPC with a bearer straight through Istio. | Istio carries gRPC; the tunnel exists for edges that reject POSTs. |
-| D4 | Gateway stays plaintext in-pod (`--disable-tls`). | Upstream: "Kubernetes deployments must leave `mtls_auth` unset and use OIDC or a trusted access proxy." The ingress→pod hop is plaintext like today's supervisor hop. |
-| D5 | With published service hosts (`serviceHosts.enabled`) the gateway binds **port 80** in-pod (safe sysctl) and gets `--server-san *.<domain>`; otherwise its listener is unchanged. | The gateway builds a service URL as `<scheme>://<host>:<bind port>/` and leaves the port out only for http/80; Kyma's `http:80` server redirects to HTTPS. **Live-run correction:** that is the URL API and SDK clients receive. Upstream's CLI rewrites the port to the gateway endpoint's and keeps the gateway's scheme, so through the remote gateway it prints `http://<host>:443/`; the service is at `https://<host>/`. Printing a correct URL from the CLI needs TLS in the gateway pod (§11). |
-| D6 | Service hosts are published only behind `allowedCidrs`, and per workspace (`serviceHosts.workspaces`): routes and policies match `<workspace>--*`. | Browsers carry no bearer; IP allowlisting is the cluster's existing pattern. Istio hosts take only prefix or suffix wildcards, and the domain's wildcard would cover the CLI host and other applications. The chart refuses to publish service hosts without CIDRs. |
-| D7 | `gatewayIngress` replaces `gatewayApirule`. | The APIRule block was never verified and cannot work without a sidecar. Breaking → 0.10.0. |
-| D8 | `gateway.oidc.authOnly: true` selects upstream's authentication-only mode explicitly; the chart default stays `false`. | Upstream defaults the roles to `openshell-admin`/`openshell-user` read from `realm_access.roles`, so empty role values mean RBAC with those defaults, which IAS tokens never satisfy. `authOnly` passes both roles empty, so any identity IAS issues is accepted and the hook's technical client needs no group claims. Making it an explicit switch keeps existing OIDC installs from loosening silently. |
-| D9 | In-cluster automation (inference-provider hook Job, smokes) authenticates with the client-credentials grant of the **same** IAS application. | Same `aud` for people (PKCE) and the Job (secret); upstream's CLI switches to client credentials when `OPENSHELL_OIDC_CLIENT_SECRET` is set. |
+| D1 | The gateway is the only authenticator. No token check at the ingress. | Upstream's model; W1. The live run of revision 1 showed the gateway refusing unauthenticated gRPC on its own. |
+| D2 | Plain Istio objects, all host-scoped: `VirtualService`s and a `DestinationRule` in the release namespace; in the ingress namespace only `AuthorizationPolicy`s whose every rule names this release's hosts, and one Secret holding the public CA certificate. | W1. An `AuthorizationPolicy` rule with `hosts` is host-scoped; a `RequestAuthentication` is not. |
+| D3 | With remote access the gateway serves TLS (`gateway.tls.enabled`) without client-certificate verification, on its usual port, and the ingress re-encrypts to it. | Upstream's default is TLS on. The gateway then reports `https://<host>:8080/` and the CLI, replacing the port with the endpoint's, prints `https://<host>/` (upstream unit-tests exactly this case). The ingress-to-pod hop is encrypted and the pod's certificate verified. |
+| D4 | The ingress validates the gateway's certificate against the chart's CA (`DestinationRule` `credentialName`), not `insecureSkipVerify`. | Parity with `backendTLSPolicy`. Cost: one Secret with a public CA certificate in the ingress namespace, kept current by a hook (§6.4). |
+| D5 | The PKI hook mints the server certificate with this release's Service names. | Today it passes no names, so the certificate carries only upstream's defaults (`openshell`, `openshell.openshell.svc…`; verified on the live install) and no in-cluster client can verify it. `gateway.tls.enabled` has therefore never worked in this chart. Upstream's chart passes its Service names the same way. |
+| D6 | `gatewayIngress.policyAction` (`DENY` default, `ALLOW` for a gateway that already allowlists) decides how the source-address fence is written. | Unchanged from revision 1 (W4). |
+| D7 | Service hosts are published per workspace (`serviceHosts.workspaces`): routes and policies match `<workspace>--*`, behind `allowedCidrs`. | Unchanged from revision 1. Upstream's gateway runs only gRPC through its authenticators; requests to a service host go to the sandbox relay unauthenticated unless client certificates are required (source: `multiplex.rs`, `http.rs`; the live run of revision 1 served a token-less request). The source-address fence is therefore the only protection, and the chart refuses to publish service hosts without CIDRs. |
+| D8 | `gateway.oidc.authOnly` is explicit; `adminRole` and `userRole` are set together. | Unchanged: upstream defaults the roles to `openshell-admin` / `openshell-user`. |
+| D9 | The provider hook authenticates with the client-credentials grant and trusts the chart's CA. | Unchanged grant; new: the gateway speaks TLS inside the cluster too. |
+| D10 | `gatewayIngress` replaces `gatewayApirule`; a leftover `gatewayApirule.enabled` fails the render. | Unchanged. |
 
-## 3. Architecture and flows
+## 5. Architecture and flows
 
 ```text
-laptop CLI ─OIDC code+PKCE (browser)─▶ SAP IAS
-laptop CLI ─gRPC + bearer─▶ https://openshell.<domain>     Kyma ingress gateway (TLS, *.<domain> cert)
-    RequestAuthentication: issuer = IAS, audiences = [<client-id>], forwardOriginalToken
-    AuthorizationPolicy (DENY or ALLOW, per policyAction): host openshell.<domain> only with a principal "<issuer>/*" [and from allowedCidrs]
-    → VirtualService → Service <release>:8080 (h2c) → gateway (plaintext in-pod, OIDC validates the bearer)
+CLI ─OIDC code+PKCE─▶ issuer
+CLI ─gRPC + bearer, TLS─▶ https://openshell.<domain>      Kyma gateway (TLS, *.<domain> certificate)
+    [optional fence: AuthorizationPolicy, hosts openshell.<domain>, source addresses]
+    → VirtualService (host) → DestinationRule: TLS, CA-verified, SNI = Service name
+    → gateway pod :8080 (TLS; OIDC validates the bearer)
 
-browser ─▶ https://default--web.<domain>/                    (URL printed by `openshell service expose`)
-    AuthorizationPolicy (same action): hosts <workspace>--* of the published workspaces only from allowedCidrs
-    → wildcard VirtualService (authority regex `<ws>--<sb>[--<svc>].<domain>`) → Service :80 `http-services` (HTTP/1.1) → gateway :80 in-pod → relay → sandbox loopback
+browser ─▶ https://default--web.<domain>/
+    fence: AuthorizationPolicy, hosts <workspace>--*, source addresses (mandatory)
+    → VirtualService (*.<domain>, authority regex of the published workspaces)
+    → DestinationRule (same) → gateway pod :8080 → relay → sandbox loopback port
 
-hook Job / smokes ─client credentials (OPENSHELL_NO_BROWSER=1, OPENSHELL_OIDC_CLIENT_SECRET)─▶ Service :8080
-supervisors ─sandbox JWT─▶ Service :8080                       (unchanged)
-laptop port-forward ─▶ Service :8080                           (unchanged; now also needs a bearer)
+supervisors   ─sandbox JWT, TLS (chart CA)─▶ Service :8080
+provider hook ─client credentials, TLS (chart CA)─▶ Service :8080
 ```
 
-Request handling at the edge, in order: TLS termination with Kyma's wildcard
-certificate → JWT validation when a token is present (RequestAuthentication)
-→ ALLOW policies (deny-by-default on this cluster) → routing by host.
+The ingress gateway gains routes for this release's hosts and policies that name
+only those hosts. It gains nothing that selects it without a host and no token
+handling.
 
-Unchanged: driver, enrichment, namespaces, supervisor ↔ gateway, sandbox JWT.
+## 6. Chart surface
 
-## 4. Chart surface
+Relative to `main` (0.9.1). The code of revision 1 on PR #81 is reworked in place;
+§6.6 lists what changes there.
 
-### 4.1 Values
+### 6.1 Values
 
 ```yaml
 gatewayIngress:
   enabled: false
-  domain: ""                      # required: the cluster's wildcard domain, e.g. c-xxxxxxx.kyma.ondemand.com
+  domain: ""                      # required: the cluster's wildcard domain, without "*."
   host: ""                        # CLI/API host; empty = openshell.<domain>
   istioGateway: kyma-system/kyma-gateway
-  ingressNamespace: istio-system  # where RequestAuthentication/AuthorizationPolicies render
-  ingressSelector:                # workload selector of those policies
+  ingressNamespace: istio-system
+  ingressSelector:
     istio: ingressgateway
-  policyAction: DENY              # DENY for an ingress gateway without ALLOW policies, ALLOW for one that already allowlists (D2)
-  allowedCidrs: []                # remoteIpBlocks. Required for serviceHosts; optional extra fence for the CLI host.
+  policyAction: DENY              # DENY: gateway without ALLOW policies; ALLOW: one that already allowlists
+  allowedCidrs: []                # source addresses; required for serviceHosts, optional for the CLI host
   serviceHosts:
-    enabled: false                # publish sandbox service URLs (browser)
-    workspaces: [default]         # the workspaces whose service hosts are routed and fenced (D6)
+    enabled: false
+    workspaces: [default]
 
 gateway:
+  tls:
+    enabled: false                # must be true with gatewayIngress
+    clientCa:
+      enabled: false              # must stay false with gatewayIngress: the ingress presents no client certificate
   oidc:
-    issuer: ""                    # existing
-    audience: ""                  # existing; = the IAS client id
-    clientId: ""                  # new: public client id the CLI and the Job use
-    jwksUri: ""                   # new, optional, for the RequestAuthentication only: Istio discovers it from the issuer when empty; the gateway always does
-    authOnly: false               # new: true = authentication-only (both roles passed empty)
-    rolesClaim: ""                # new: passed as --oidc-roles-claim when set
-    adminRole: ""                 # existing; empty (with userRole) = upstream's default roles
-    userRole: ""                  # existing; must be set together with adminRole
-    clientCredentialsSecret:      # new: Secret with the IAS client secret, for the hook Job and smokes
+    issuer: ""
+    audience: ""
+    clientId: ""
+    authOnly: false
+    rolesClaim: ""
+    adminRole: ""
+    userRole: ""
+    clientCredentialsSecret:
       name: ""
       key: client-secret
+      clientId: ""
+
+networkPolicy:
+  extraEgress: []                 # e.g. an issuer published through this cluster's own ingress
 ```
 
-`gatewayApirule` is removed (values and template).
+Removed against revision 1: `gateway.oidc.jwksUri` (it fed only the
+`RequestAuthentication`).
 
-### 4.2 Templates
+### 6.2 Objects
 
-New, rendered only when `gatewayIngress.enabled`:
+In the release namespace, with `gatewayIngress.enabled`:
 
-- `gateway-virtualservice.yaml` — `VirtualService <fullname>-gateway` in the
-  release namespace: `hosts: [<host>]`, `gateways: [<istioGateway>]`, one
-  `http` route to `<fullname>.<ns>.svc.cluster.local:<gateway.grpcPort>`, with no
-  `timeout` field: Istio's default is no timeout, which the streaming RPCs
-  (`WatchSandboxes`, `Exec`, `RelayStream`) need, and its validation rejects an
-  explicit `0s` (found in the live run).
-- `gateway-services-virtualservice.yaml` (when `serviceHosts.enabled`) —
-  `VirtualService <fullname>-sandbox-services`: `hosts: ["*.<domain>"]`, same
-  gateway, one `http` route with
-  `match.authority.regex: ^(<listed workspaces, |-joined>)--[a-z0-9]+(-[a-z0-9]+)*(--[a-z0-9]+(-[a-z0-9]+)*)?\.<domain, dots escaped>(:[0-9]+)?$`
-  to the Service's `http-services` port (80), again without a `timeout`. Exact-host
-  VirtualServices of other apps keep precedence (Envoy matches exact domains
-  before wildcards); non-matching `*.<domain>` hosts get Envoy's 404.
-- `gateway-ingress-auth.yaml` — in `gatewayIngress.ingressNamespace`, named
-  `<release-namespace>-<fullname>-openshell-{jwt,cli,services}` so two releases
-  never collide there:
-  - `RequestAuthentication …-openshell-jwt`: `selector: <ingressSelector>`,
-    one `jwtRules` entry `{issuer, audiences: [audience], forwardOriginalToken: true}`
-    plus `jwksUri` when set. It validates only requests that carry a token of
-    this issuer; requests without one pass to the policies.
-  - `AuthorizationPolicy …-openshell-cli`, `to.operation.hosts: [<host>, "<host>:*"]`
-    (Istio matches the authority as sent, so the port form is listed too):
-    with `policyAction: ALLOW`, one rule `from.source.requestPrincipals: ["<issuer>/*"]`
-    plus `remoteIpBlocks: <allowedCidrs>` when non-empty (one `source`, so they
-    AND); with `DENY`, a rule `notRequestPrincipals: ["<issuer>/*"]` and, with
-    CIDRs, a second rule `notRemoteIpBlocks: <allowedCidrs>` (rules OR, so a
-    request passes only with a token and from a listed address).
-  - `AuthorizationPolicy …-openshell-services` (when `serviceHosts.enabled`):
-    `to.operation.hosts: ["<workspace>--*", …]` for the listed workspaces, with
-    `remoteIpBlocks` (ALLOW) or `notRemoteIpBlocks` (DENY) `<allowedCidrs>`.
+- `VirtualService <fullname>-gateway`: `hosts: [<host>]`, the Istio gateway, one
+  route to the Service's `grpc` port. No `timeout` field (Istio rejects `0s`; its
+  default is none, which the streaming RPCs need).
+- `VirtualService <fullname>-sandbox-services` (with `serviceHosts.enabled`):
+  `hosts: ["*.<domain>"]`, one route matched by the authority regex
+  `^(<published workspaces>)--<sandbox>(--<service>)?\.<domain>(:<port>)?$`, to the
+  Service's `http-services` port.
+- `DestinationRule <fullname>-gateway-tls`: `host: <fullname>.<ns>.svc.cluster.local`,
+  `exportTo: [<ingressNamespace>]` so only the ingress gateway uses it,
+  `trafficPolicy.tls: {mode: SIMPLE, credentialName: <ns>-<fullname>-gateway-ca,
+  sni: <service>, subjectAltNames: [<service>]}` with `<service>` the same FQDN, so
+  the name is verified whatever Istio's defaults are. `exportTo` also keeps the
+  rule from sandboxes with an Istio sidecar, which speak TLS to the gateway
+  themselves.
 
-Changed:
+In `ingressNamespace`, named `<ns>-<fullname>-…` so two releases never collide:
 
-- `deployment.yaml`: gateway `--port` becomes the bind port (`80` when
-  `serviceHosts.enabled`, else `gateway.grpcPort`; helper
-  `openshell-driver-kyma.gatewayBindPort`); `containerPort grpc` follows; the
-  pod gets `sysctls: [{name: net.ipv4.ip_unprivileged_port_start, value: "0"}]`
-  (appended to the operator's own) when the bind port is below 1024;
-  `--server-san *.<domain>` when `serviceHosts.enabled` (upstream derives the
-  service-routing domain from wildcard SANs even with TLS disabled, and keeps
-  `openshell.localhost`); `--oidc-roles-claim` when `rolesClaim` is set; with
-  `authOnly`, `--oidc-admin-role ""` and `--oidc-user-role ""`.
-- `service.yaml`: with `serviceHosts.enabled`, an extra port `http-services`
-  (80 → `targetPort: grpc`): under an `http-*` name Istio speaks HTTP/1.1 to
-  the gateway, so WebSocket upgrades of sandbox services pass. `grpc` stays
-  `gateway.grpcPort`.
-- `networkpolicy.yaml`: the driver-pod ingress rule lists the bind port, and
-  `networkPolicy.extraEgress` (operator-supplied rules) is appended to its
-  egress. Found in the live run: an issuer published through the cluster's own
-  ingress gateway is reached on the ingress pod's port (8443) where the CNI
-  applies policy after DNAT, which the chart's 443-only egress blocks.
-- `inference-provider-hook.yaml`: when `gateway.oidc.issuer` is set, the Job
-  gets `OPENSHELL_NO_BROWSER=1`, `OPENSHELL_OIDC_CLIENT_SECRET` from
-  `clientCredentialsSecret`, registers the gateway with
-  `openshell gateway add http://<svc>:<grpcPort> --name in-cluster --oidc-issuer … --oidc-client-id … --oidc-audience …`
-  and addresses it with `--gateway in-cluster` (`--gateway-endpoint` bypasses
-  the stored token).
-- `NOTES.txt`: prints the `gateway add` line and the service-URL shape when
-  ingress is enabled.
-- `scripts/check-gateway-config.sh`: runs the pinned gateway image with the
-  rendered command line plus `--help`, so an unknown flag fails the check.
+- `Secret <ns>-<fullname>-gateway-ca`: key `ca.crt`, the chart CA's public
+  certificate (§6.4), and, while its hook runs, the `Role` and `RoleBinding`
+  `<ns>-<fullname>-gateway-ca-hook` that let the hook write it.
+- `AuthorizationPolicy <ns>-<fullname>-openshell-cli`, hosts `[<host>, "<host>:*"]`:
+  with `policyAction: ALLOW`, one ALLOW rule, with `from.source.remoteIpBlocks`
+  when `allowedCidrs` is set and without `from` otherwise; with `DENY`, one DENY
+  rule `notRemoteIpBlocks` when `allowedCidrs` is set, and no policy at all
+  otherwise.
+- `AuthorizationPolicy <ns>-<fullname>-openshell-services` (with
+  `serviceHosts.enabled`): hosts `["<workspace>--*", …]`, `remoteIpBlocks` (ALLOW)
+  or `notRemoteIpBlocks` (DENY) `allowedCidrs`.
 
-### 4.3 Render guards (`{{ fail }}`)
+No `RequestAuthentication`. No policy rule without `to.operation.hosts`.
 
-| Condition | Message names |
-|-----------|---------------|
-| `gatewayIngress.enabled` without `gateway.enabled` + `gatewayService.enabled` | the Service the VirtualService routes to |
-| `gatewayIngress.enabled` without `gateway.oidc.issuer`, `audience` and `clientId` | the existing refusal to publish an unauthenticated gateway, kept verbatim in spirit |
-| `gatewayIngress.enabled` without `gatewayIngress.domain` | the wildcard domain |
-| `gatewayIngress.enabled` with `gateway.tls.enabled` | plaintext in-pod only (TLS origination is §11) |
-| `serviceHosts.enabled` with empty `allowedCidrs` | browser URLs have no auth |
-| `gatewayIngress.domain` not a lowercase DNS name (`*.`, scheme, trailing dot, uppercase) | the value |
-| `gatewayIngress.host` not one label under `domain`, or containing `--` | the value |
-| an `allowedCidrs` entry that is not an address or CIDR block | the entry |
-| `serviceHosts.enabled` with `gateway.grpcPort=80` | the Service's `http-services` port |
-| exactly one of `gateway.oidc.adminRole` / `userRole`, or `authOnly` with a role | upstream refuses the former at startup |
-| `inferenceProvider.enabled` with `gateway.oidc.issuer` and no `clientId` or `clientCredentialsSecret.name` | the hook cannot authenticate (today the pair is refused outright; this replaces that guard) |
+### 6.3 Gateway pod and Service
 
-### 4.4 RBAC
+- TLS on: `--tls-cert`, `--tls-key` from the server-TLS Secret (the existing wiring
+  of `gateway.tls.enabled`); no `--tls-client-ca`. The gateway keeps binding
+  `gateway.grpcPort` (8080), as upstream's chart does. Revision 1's port-80
+  binding, its sysctl and the bind-port helper are removed.
+- `--server-san "*.<domain>"` with `serviceHosts.enabled`, which is how upstream
+  learns the service-URL domain. `--oidc-*` flags as in revision 1.
+- Service: `grpc` (`gateway.grpcPort`) and, with `serviceHosts.enabled`,
+  `http-services` (80 → `grpc`), so Istio speaks HTTP/1.1 for browser traffic and
+  WebSocket upgrades pass. Both carry TLS to the pod.
+- The driver hands sandboxes `https://<Service>:<grpcPort>` and the client-TLS
+  Secret (existing logic of `gateway.tls.enabled`), so supervisors verify the
+  gateway against the chart CA.
+- Service URLs: the CLI prints `https://<workspace>--<sandbox>.<domain>/`. Clients
+  of the raw API or the SDK receive the gateway's own value,
+  `https://<host>:8080/`, as from any upstream gateway behind a port-mapping edge,
+  and must drop the port.
 
-None added for the driver. Installing the chart with `gatewayIngress.enabled`
-requires rights in `istio-system` (cluster-admin), which the chart's
-ClusterRoles already require.
+### 6.4 PKI
 
-## 5. IAS setup (operator)
+- The PKI hook (`openshell-gateway generate-certs`, upstream's own job) gains
+  `--server-san` for `<fullname>`, `<fullname>.<ns>`, `<fullname>.<ns>.svc`,
+  `<fullname>.<ns>.svc.cluster.local`, `localhost` and `127.0.0.1`, mirroring
+  upstream's chart. It applies whenever the hook runs, with or without remote
+  access.
+- CA for the ingress: the chart renders `Secret <ns>-<fullname>-gateway-ca` in
+  `ingressNamespace` **without data**, and a post-install/post-upgrade hook Job
+  writes `ca.crt` into it. The CA does not exist when the chart is rendered (the
+  PKI hook creates it), and a manifest without data means Helm never overwrites
+  what the Job wrote. Helm owns the Secret, so `helm uninstall` removes it. The
+  Job mounts only `ca.crt` of the server-TLS Secret (it never sees the key and
+  needs no access to Secrets in the release namespace) and may `get` and `patch`
+  exactly that one Secret in `ingressNamespace`, nothing else there. Its image
+  (`gatewayIngress.caHook.image`: a shell, `base64` and `kubectl`) is pinned by
+  digest. Until the Job has run on a first install the ingress answers 503.
 
-One IAS application of type OpenID Connect:
+### 6.5 Provider hook
 
-- client id → `gateway.oidc.clientId` and `gateway.oidc.audience`;
-- Authorization Code + PKCE enabled; redirect URI `http://127.0.0.1:*/callback`
-  (the CLI binds an ephemeral port; if IAS rejects wildcard ports, fall back
-  to the device grant: `OPENSHELL_NO_BROWSER=1` without a secret);
-- a client secret, stored by the operator in a Secret in the release
-  namespace (`clientCredentialsSecret`), used only by the hook Job and smokes;
-- issuer `https://<tenant>.accounts.ondemand.com` → `gateway.oidc.issuer`.
+With `gateway.oidc.issuer` and `gateway.tls.enabled`: `GATEWAY_URL` is
+`https://<Service>:<grpcPort>`; the Job mounts the CA (`ca.crt` of the client-TLS
+Secret) and, once `openshell gateway add … --oidc-*` has registered the gateway,
+places it at the CLI's CA location for that gateway
+(`${XDG_CONFIG_HOME:-$HOME/.config}/openshell/gateways/in-cluster/mtls/ca.crt`,
+read from upstream's `tls.rs` and `paths.rs`). The existing
+refusal of `inferenceProvider` + `gateway.tls.enabled` narrows to the case without
+OIDC.
 
-The chart never sees tenant, client id or secret values at build time; they
-are passed at install like today's OIDC values.
+### 6.6 Changes to the code on PR #81
 
-## 6. CLI and browser usage
+| Keep | Change | Remove |
+|---|---|---|
+| `gatewayIngress` values and guards; `policyAction`; per-workspace service hosts; `networkPolicy.extraEgress`; OIDC values, `authOnly`, role guards; hook client credentials and `clientCredentialsSecret.clientId`; `http-services` port; the leftover-`gatewayApirule` guard; the flag check in `check-gateway-config.sh`; `e2e/keycloak`; `remote-access-check.sh` | The CLI-host policy loses its token condition; the guard on `gatewayIngress` + `gateway.tls.enabled` inverts (TLS required, client CA forbidden); PKI hook gains SANs; provider hook over TLS; acceptance checks (§10.2); docs, NOTES and CHANGELOG | `RequestAuthentication`; `gateway.oidc.jwksUri`; the port-80 binding, its sysctl and helper; every statement about edge token validation and about `http://<host>:443/` |
 
-```bash
-openshell gateway add https://openshell.<domain> --name kyma \
-  --oidc-issuer https://<tenant>.accounts.ondemand.com \
-  --oidc-client-id <client-id> --oidc-audience <client-id>
-openshell gateway select kyma
-openshell sandbox create --detach --name web --from python:3.12-slim -- python3 -m http.server 8080 --bind 127.0.0.1
-openshell service expose web 8080      # prints http://default--web.<domain>:443/; open https://default--web.<domain>/
-```
+### 6.7 Render guards
 
-The CLI's printed URL needs its scheme corrected (D5); API clients get `http://<host>/`, which Kyma's `http:80` server redirects. The browser must
-come from an `allowedCidrs` range; the sandbox service itself may add its own
-auth. `curl` works without `--resolve` now (public DNS).
+Kept from revision 1: no publishing without `gateway.oidc.{issuer,audience,clientId}`;
+domain, host, CIDR and workspace shapes; boolean types; non-empty
+`ingressSelector`, `ingressNamespace`, `istioGateway`; `policyAction` in
+`DENY`/`ALLOW`; `serviceHosts` needs `allowedCidrs`; role pairing; leftover
+`gatewayApirule.enabled`.
 
-## 7. Security considerations
+New: `gatewayIngress.enabled` requires `gateway.tls.enabled=true`,
+`gateway.tls.clientCa.enabled=false` and a `gatewayIngress.caHook.image`.
 
-- **Policy action (found in review).** An ingress gateway without ALLOW
-  policies lets everything through, and the first ALLOW policy flips it to
-  deny-by-default for every host. The chart therefore defaults to DENY
-  policies that name only its own hosts, and writes ALLOW policies only when
-  the operator states the gateway already allowlists (`policyAction: ALLOW`).
-- **Service-host scope (found in review).** A `*.<domain>` policy would also
-  cover the CLI host (voiding the token check for sources in `allowedCidrs`)
-  and every other application. Service hosts are matched per workspace, as
-  `<workspace>--*`, and the route is limited to the same workspaces, so an
-  unlisted workspace is not reachable rather than unfenced.
-- **Unauthenticated callers.** With OIDC on, every gateway caller needs a
-  bearer, including in-cluster ones; the gateway's ClusterIP stays reachable
-  from the cluster (NetworkPolicy unchanged) but is no longer anonymous.
-- **Token exposure.** The bearer crosses ingress → pod in plaintext inside the
-  cluster network, as the sandbox JWT does today. §11 covers TLS origination.
-- **RequestAuthentication scope.** It selects the whole ingress gateway: a
-  request to *any* host carrying an invalid token of *our* issuer gets 401
-  there. Tokens of other issuers and token-less requests are unaffected.
-- **Wildcard VirtualService.** Routes only authorities matching the
-  `<ws>--<sb>[--<svc>]` regex; everything else under `*.<domain>` that no exact
-  VirtualService claims gets 404 at the edge (and is denied by the allowlists
-  first).
+## 7. Migration
+
+- From 0.9.x: `gatewayApirule` → `gatewayIngress` (table in the CHANGELOG).
+- **Existing installs that turn on `gateway.tls.enabled`** must regenerate the PKI
+  once, because the existing server certificate lacks the Service names and
+  upstream's job skips existing Secrets:
+  `kubectl delete secret -n <ns> <fullname>-server-tls <fullname>-client-tls <fullname>-jwt-keys`
+  before the upgrade (all three: the job refuses a partial set). Existing sandboxes
+  must be recreated: their pods carry the plaintext gateway endpoint and tokens of
+  the old signing key. Installs that never enable gateway TLS need nothing.
+- A port-forward to a TLS gateway needs the chart CA on the client
+  (`ca.crt` of the client-TLS Secret, in the gateway's `mtls/` directory); the docs
+  give the two commands.
+
+## 8. Identity providers and IAS
+
+The chart is provider-neutral: issuer, audience, the CLI's public client, the
+roles claim and role names (or `authOnly`), and for the provider hook a client
+secret with, where the provider needs one, a separate confidential client.
+
+SAP IAS is expected to work as such a provider and is **not verified**: no tenant
+was available. Three things must hold there, and the acceptance script proves
+them when someone runs it against a tenant:
+
+1. access tokens are JWTs whose `aud` contains the configured audience;
+2. a public client with PKCE accepts a loopback redirect on an arbitrary port
+   (otherwise the CLI's device grant, `OPENSHELL_NO_BROWSER=1`);
+3. group membership arrives in a claim the gateway can read (`rolesClaim`), or
+   `authOnly` is used; the hook's client needs the admin role under RBAC.
+
+The docs describe IAS as a configuration recipe marked unverified until then.
+Keycloak (`e2e/keycloak`, upstream's development realm) is the verified provider.
+
+## 9. Security considerations
+
+- **Shared ingress.** W1 is the governing constraint: host-scoped objects only.
+  The render check enforces it on every render (§10.1).
+- **Who can reach what.** The gateway API: anyone who can reach the CLI host
+  (optionally fenced by `allowedCidrs`), authenticated by the gateway. A published
+  service URL: any source in `allowedCidrs`, not authenticated by the gateway
+  (D7); put authentication into the service if the address ranges are shared.
+  In-cluster callers reach both through the Service without passing the ingress.
+- **No edge token check.** An unauthenticated request now reaches the gateway
+  and is refused there instead of at the ingress. That is upstream's model; the
+  optional source-address fence on the CLI host restores an outer layer.
+- **`authOnly`** makes every identity the issuer authenticates a platform admin.
+- **The hook's client secret** is a platform-admin credential under RBAC.
+- **The CA Secret in the ingress namespace** holds a public certificate; its hook
+  can patch only that Secret.
 - The chart keeps refusing to publish a gateway without OIDC.
 
-## 8. Error handling and failure modes
+## 10. Verification
 
-| Failure | Behaviour |
-|---------|-----------|
-| Token missing/expired at the edge | 403 `RBAC: access denied` (CLI: `openshell gateway login kyma`) |
-| Token valid at the edge, rejected by the gateway (audience mismatch) | gRPC `Unauthenticated`; the plan's live check covers both validators with one token |
-| Browser from a non-allowlisted IP | 403 at the edge |
-| Sandbox not Ready / service not exposed | gateway's own 404/503 service-routing errors, unchanged |
-| Hook Job cannot get a token | Job fails with the CLI's client-credentials error; `helm install` fails as today |
+### 10.1 Render checks (`scripts/check-chart-render.sh`)
 
-## 9. Verification
+- Exact objects for both policy actions, with and without `allowedCidrs` and
+  service hosts; the `DestinationRule`; the CA Secret's name and namespace.
+- **Blast-radius assertions, over every render in the suite:** no
+  `RequestAuthentication`; every `AuthorizationPolicy` rule has non-empty
+  `to.operation.hosts`, none starting with `*`; the only objects rendered into
+  `ingressNamespace` are `AuthorizationPolicy`s, the CA Secret and its hook's
+  `Role` and `RoleBinding`, which grant `get` and `patch` on that Secret alone.
+- PKI hook arguments carry the Service names; gateway arguments have the TLS
+  flags and no client CA; the guards of §6.7.
+- `scripts/check-gateway-config.sh` keeps proving the pinned image accepts the
+  rendered flags.
 
-The real thing is the acceptance gate; CI is a regression guard.
+### 10.2 Live acceptance (`scripts/remote-access-check.sh`)
 
-1. **Render checks** (`scripts/check-chart-render.sh`): a `render-ingress`
-   case (all on) asserting VirtualService hosts/gateways/destination/timeout,
-   the regex, RequestAuthentication issuer/audiences/`forwardOriginalToken`,
-   both AuthorizationPolicies' hosts/principals/ipBlocks and their namespace
-   (`ingressNamespace`), deployment args (`--port 80`, two `--server-san`,
-   `--oidc-*`), the sysctl, the NetworkPolicy port, the hook Job's OIDC env;
-   plus one `bad-*` case per guard in §4.3; `check 5` RBAC table unchanged;
-   `helm-lint.yml` renders the ingress case.
-2. **Live acceptance** (`scripts/remote-access-check.sh`, run from the laptop
-   with the kubeconfig and the IAS values in environment variables; writes no
-   domain or secret to disk; prints a pass/fail table):
-   - install/upgrade `ods` with `gatewayIngress` on;
-   - `openshell gateway add https://openshell.<domain> …` (browser login) then
-     `sandbox create` / `exec` / `delete` through the ingress;
-   - `curl -X POST https://openshell.<domain>/openshell.v1.OpenShell/ListSandboxes` without a token → 403;
-   - `service expose` + `curl https://default--web.<domain>/` → 200 from an
-     allowlisted IP; the named-service URL likewise;
-   - `sandbox connect`, idle for 6 minutes, then a keystroke → still attached
-     (catches Envoy's 5-minute stream-idle timeout; mitigation if it trips:
-     an opt-in EnvoyFilter on the ingress listener, `streamIdleTimeout` value);
-   - hook Job: `inferenceProvider.enabled` with OIDC → provider registered;
-   - cleanup, revert, nothing left in `istio-system` but the operator's own
-     policies.
-3. **No mock-OIDC smoke in CI.** The first draft proposed a kind smoke with a
-   mock issuer. Upstream's gateway accepts a plain-HTTP issuer only on a
-   numeric loopback address (`--oidc-dangerously-allow-insecure-http`), so an
-   in-cluster mock would need test-only sidecars in the gateway pod and the
-   hook Job, or a CA the gateway image trusts. CI instead proves what it can
-   without an issuer: the render checks above, and `check-gateway-config.sh`
-   running the pinned gateway image against the rendered command line. The
-   OIDC paths are proven by the live acceptance run.
+Runs only with the operator's explicit go-ahead. New against revision 1:
 
-## 10. Documentation and versioning
+- **Neighbour probes.** `OSH_NEIGHBOUR_URLS` lists URLs of other applications
+  behind the same ingress; the script refuses to install without it. Before the
+  install it records each one's HTTP status with no token, with a foreign JWT as
+  Bearer and with a non-JWT Bearer key; it repeats them every 10 s while the
+  upgrade runs and once after it. A difference that persists over two rounds
+  fails the run and rolls the release back to the revision it found, before
+  anything else happens. `scripts/remote-access-check-test.sh` proves that
+  without a cluster (a local neighbour that starts refusing Bearer tokens, and
+  stand-ins for helm and kubectl), and CI runs it.
+- **PKI.** The script does not upgrade a release whose gateway certificate lacks
+  the Service name unless `OSH_REGENERATE_PKI=1` tells it to delete the three PKI
+  Secrets first (§7).
+- The printed service URL must be `https://default--<sandbox>.<domain>/` exactly.
+- A call without a token must be refused by the **gateway** (`grpc-status 16`).
+- Kept: sandbox create and exec through the ingress, the service URL serving the
+  sandbox's page, an unpublished workspace not served, the hook's provider present
+  by name, an exec stream idle for 400 s.
 
-- `docs/production-deployment.md`: the "Public APIRule" chapter becomes
-  "Remote access" (IAS setup, values, allowlist breadth, URL behaviour, what
-  stays port-forward-only).
-- `docs/getting-started.md` Appendix B rewritten for `gatewayIngress`.
-- `docs/kyma-vs-openshift.md` "External access", `docs/openshell-api-programmatic-usage.md`
-  endpoint table, `docs/internal/runbook-upstream-sync.md` (new render case).
-- `CHANGELOG.md` 0.10.0: breaking removal of `gatewayApirule`, migration table
-  (`gatewayApirule.host` → `gatewayIngress.host`, rules → policies), new values.
-- Chart/Cargo version 0.10.0.
+### 10.3 Fixture
 
-## 11. Follow-ups (not in this design)
+`e2e/keycloak` stays as it is (its own policy is host-scoped and follows
+`OSH_POLICY_ACTION`); its `values.yaml` keeps the egress rule for an issuer behind
+the cluster's own ingress. The acceptance script sets `gateway.tls.enabled`.
 
-- TLS origination ingress → gateway: `gateway.tls.enabled` with a
-  `DestinationRule` (SIMPLE, CA in an `istio-system` Secret), gateway bound on
-  443 so URLs print as `https://…/` natively.
-- Browser SSO for service hosts via an ext-authz provider, once the cluster's
-  Istio CR configures one.
-- RBAC roles from IAS groups (`rolesClaim: groups`).
+## 11. Decisions for the reviewer
 
-## 12. Risks and verification items carried into the plan
+Decided on 2026-10-01: the recommended option of each.
+
+1. **Certificate verification at the ingress (D4).** Recommended: verify against
+   the chart CA, at the price of one Secret (a public certificate) in the ingress
+   namespace and a small hook with rights to that Secret alone. Alternative:
+   `insecureSkipVerify: true`, encrypted but unverified, with nothing in the
+   ingress namespace besides the policies and one moving part fewer.
+2. **Gateway port in the pod (D3).** Recommended: 8080, as upstream; the CLI
+   prints the right URL, raw API and SDK clients get `:8080` and must drop it.
+   Alternative: bind 443 with the unprivileged-port sysctl (proven on this
+   cluster in revision 1); every client then gets `https://<host>/`, at the cost
+   of a pod sysctl upstream does not use.
+3. **One shape or two.** Recommended: remote access always means TLS in the pod.
+   The plaintext shape (upstream's second row in §3) would also work without the
+   edge token check, but it prints the wrong URL and doubles the test matrix.
+4. **Release.** Recommended: rework PR #81 in place and release this as 0.10.0;
+   nothing of revision 1 ships.
+
+## 12. Follow-ups (not in this design)
+
+- Gateway API (`grpcRoute`, `backendTLSPolicy`): adopt upstream's templates when
+  Kyma offers Gateway API; the objects of §6.2 map onto them one to one.
+- TLS passthrough with a dedicated host and certificate, for client certificates
+  end to end.
+- Verifying IAS against a tenant (§8).
+- Browser SSO for service hosts, once the cluster offers an external authorizer.
+
+## 13. Risks carried into the plan
+
+All are read from source or documentation and unproven live in this shape.
 
 | Risk | Check | Fallback |
 |------|-------|----------|
-| IAS rejects `http://127.0.0.1:*/callback` | IAS app registration | device grant (`OPENSHELL_NO_BROWSER=1`) |
-| The hook Job's client-credentials login or its token is refused (upstream's CLI takes `--oidc-issuer` for any URL scheme, per its source; unproven against IAS) | live hook run | register the provider from an authenticated CLI session (docs step 3b) |
-| The cluster rejects the pod sysctl `net.ipv4.ip_unprivileged_port_start` | live install | `serviceHosts.enabled=false` (CLI access is unaffected) |
-| RequestAuthentication strips the token despite `forwardOriginalToken` | live: gateway accepts the request | none needed if it forwards |
-| Envoy stream idle timeout cuts idle `connect` sessions | live 6-minute idle test | opt-in EnvoyFilter |
-| Wildcard VirtualService conflicts with Kyma-managed VirtualServices | `istioctl analyze`-style check in the live script, Kyma Istio module status | per-sandbox exact-host VirtualServices for unnamed services only |
-| Audience mismatch between PKCE and client-credentials tokens | live hook run | a second audience value is not supported by the gateway; keep one IAS application |
+| Istio does not accept a CA-only Secret with key `ca.crt` under `credentialName` (its 1.30.4 source reads `cacert`, then `ca.crt`) | live, first | key `cacert`; or decision 1's alternative |
+| Istio's HTTP/1.1 upstream over TLS on the `http-services` port fails against the gateway's listener (upstream's source offers `h2` and `http/1.1` by ALPN) | live service URL | route service hosts to the `grpc` port |
+| The CA Secret is empty until the Job has run on a first install | live first install | the ingress answers 503 for those seconds; documented |
+| A sandbox with an Istio sidecar (`driver.istioInjectSandboxes`) cannot reach a gateway that serves TLS: the sidecar may treat the Service's `grpc` port as plaintext HTTP/2 | not covered by the live run (the test cluster does not inject) | documented as unverified under Known limitations |
+| Upstream's CLI does not use the CA at the gateway's `mtls/ca.crt` for an OIDC gateway | live hook run | `--gateway-insecure` in the Job, in-cluster only |
+| Supervisors fail to verify the regenerated certificate | live sandbox create | the supervisor log; the SAN list is the first suspect |
+| The PKI regeneration on an existing install is forgotten | the gateway serves the old certificate; in-cluster clients fail to verify it | §7; the chart cannot detect it at render time |
+| A neighbouring application is affected again | neighbour probes with automatic rollback (§10.2) | none: the run stops |
