@@ -1,0 +1,152 @@
+{{- if .Values.gatewayIngress.enabled -}}
+{{- $in := .Values.gatewayIngress -}}
+{{- $caSecret := include "openshell-driver-kyma.gatewayIngressCaSecretName" . -}}
+{{- $hookName := printf "%s-gateway-ca-hook" (include "openshell-driver-kyma.fullname" .) -}}
+{{- $ingressHookName := printf "%s-gateway-ca-hook" (include "openshell-driver-kyma.gatewayIngressPolicyPrefix" .) -}}
+# The chart CA's public certificate, in the ingress gateway's namespace, where Istio
+# reads a DestinationRule's credentialName from (gateway-destinationrule.yaml).
+#
+# The chart renders the Secret without data and the Job below writes ca.crt into it
+# after every install and upgrade: the CA is created by the PKI hook
+# (gateway-jwt-pki-hook.yaml) and does not exist when the chart is rendered. Helm
+# owns the Secret, so `helm uninstall` removes it, and leaves the Job's data alone
+# on upgrades because the manifest names none. Until the Job has run on a first
+# install the ingress gateway cannot verify the gateway and answers 503.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $caSecret }}
+  namespace: {{ $in.ingressNamespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+type: Opaque
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $hookName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "-7"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+---
+# All the Job may do in the ingress gateway's namespace: read and patch that one Secret.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $ingressHookName }}
+  namespace: {{ $in.ingressNamespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "-7"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ $caSecret | quote }}]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $ingressHookName }}
+  namespace: {{ $in.ingressNamespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "-7"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $ingressHookName }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $hookName }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $hookName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "-6"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 120
+  ttlSecondsAfterFinished: 300
+  template:
+    metadata:
+      labels:
+        # Not the chart's selectorLabels: the driver pod's NetworkPolicy would select
+        # this pod too.
+        app.kubernetes.io/name: openshell-driver-kyma-gateway-ca-hook
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        sidecar.istio.io/inject: "false"
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: {{ $hookName }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: gateway-ca
+          image: {{ $in.caHook.image | quote }}
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          env:
+            - name: HOME
+              value: /tmp
+            - name: INGRESS_NAMESPACE
+              value: {{ $in.ingressNamespace | quote }}
+            - name: CA_SECRET
+              value: {{ $caSecret | quote }}
+          volumeMounts:
+            - name: ca
+              mountPath: /pki
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          command:
+            - /bin/sh
+            - -eu
+            - -c
+            - |
+              ca=$(base64 -w0 /pki/ca.crt)
+              if [ -z "${ca}" ]; then
+                echo "[gateway-ca] the server TLS Secret has no ca.crt" >&2
+                exit 1
+              fi
+              kubectl -n "${INGRESS_NAMESPACE}" patch secret "${CA_SECRET}" --type merge \
+                -p "{\"data\":{\"ca.crt\":\"${ca}\"}}"
+              echo "[gateway-ca] ${INGRESS_NAMESPACE}/${CA_SECRET} holds the chart CA"
+      volumes:
+        # Only the CA certificate of the server TLS Secret is mounted: the Job never
+        # sees the gateway's private key and needs no access to Secrets here.
+        - name: ca
+          secret:
+            secretName: {{ include "openshell-driver-kyma.serverTlsSecretName" . }}
+            items:
+              - key: ca.crt
+                path: ca.crt
+        - name: tmp
+          emptyDir: {}
+{{- end }}

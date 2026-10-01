@@ -495,12 +495,15 @@ gatewayService:
 #
 # The gateway is the only authenticator, as upstream intends: it validates the
 # caller's OIDC token itself. The ingress gateway routes and, with allowedCidrs,
-# fences by source address; it checks no token.
+# fences by source address; it checks no token. Requires gateway.tls.enabled: the
+# ingress gateway terminates the client's TLS and re-encrypts to the gateway pod,
+# verifying its certificate against the chart CA.
 #
-# Renders, in the release namespace, a VirtualService for `host`, and in
-# `ingressNamespace` AuthorizationPolicies that name only this release's hosts.
-# Nothing it renders applies to the ingress gateway as a whole. Installing with
-# this block enabled needs rights in `ingressNamespace`.
+# Renders, in the release namespace, a VirtualService for `host` and a
+# DestinationRule (TLS to the gateway pod), and in `ingressNamespace` a Secret with
+# the chart CA's public certificate and AuthorizationPolicies that name only this
+# release's hosts. Nothing it renders applies to the ingress gateway as a whole.
+# Installing with this block enabled needs rights in `ingressNamespace`.
 gatewayIngress:
   enabled: false
   # The cluster's wildcard domain, without "*." (the Kyma gateway serves
@@ -540,6 +543,11 @@ gatewayIngress:
   serviceHosts:
     enabled: false
     workspaces: [default]
+  # The post-install Job that copies the chart CA's public certificate into
+  # `ingressNamespace`, where the ingress gateway reads it. The image needs a
+  # shell, base64 and kubectl; the Job may read and patch that one Secret only.
+  caHook:
+    image: docker.io/alpine/kubectl:1.35.3@sha256:c4a11ae9a1cbac1f203bfe7efa481ae9c33b1bfdf1f73bc84f62cb973f039e4b
 
 # Optional: declaratively configure an inference provider through upstream's
 # provider-profile model. The chart renders a provider profile (a ConfigMap:

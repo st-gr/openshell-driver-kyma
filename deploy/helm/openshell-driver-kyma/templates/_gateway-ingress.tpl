@@ -23,6 +23,15 @@ carries the release namespace, so two releases never collide there.
 {{- end -}}
 
 {{/*
+The Secret in gatewayIngress.ingressNamespace that holds the chart CA's public
+certificate. The ingress gateway verifies the gateway pod's certificate against it
+(gateway-destinationrule.yaml); gateway-ingress-ca.yaml keeps it current.
+*/}}
+{{- define "openshell-driver-kyma.gatewayIngressCaSecretName" -}}
+{{- printf "%s-gateway-ca" (include "openshell-driver-kyma.gatewayIngressPolicyPrefix" .) -}}
+{{- end -}}
+
+{{/*
 OIDC role settings upstream would refuse or that contradict each other. Upstream
 defaults --oidc-admin-role and --oidc-user-role to openshell-admin and
 openshell-user and rejects a gateway with exactly one of them empty
@@ -88,6 +97,9 @@ certificate, because the proxy has none to present. */ -}}
 {{- end -}}
 {{- if .Values.gateway.tls.clientCa.enabled -}}
 {{- fail "gatewayIngress.enabled=true cannot be combined with gateway.tls.clientCa.enabled=true: the ingress gateway presents no client certificate to the gateway. Callers authenticate with OIDC." -}}
+{{- end -}}
+{{- if not $in.caHook.image -}}
+{{- fail "gatewayIngress.enabled=true requires gatewayIngress.caHook.image: the image (a shell, base64 and kubectl) of the Job that copies the chart CA's public certificate into gatewayIngress.ingressNamespace." -}}
 {{- end -}}
 {{- if not $in.domain -}}
 {{- fail "gatewayIngress.enabled=true requires gatewayIngress.domain: the cluster's wildcard domain (the Kyma gateway's *.<domain>), without the leading \"*.\"." -}}
