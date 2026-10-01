@@ -400,7 +400,10 @@ Decided on 2026-10-01: the recommended option of each.
 
 ## 13. Risks carried into the plan
 
-All are read from source or documentation and unproven live in this shape.
+All were read from source or documentation when the plan was written. The live run of
+2026-10-01 (Keycloak as issuer, `policyAction: ALLOW`, three neighbouring applications
+watched) passed every check; the row about sandboxes with an Istio sidecar is the one it
+did not cover.
 
 | Risk | Check | Fallback |
 |------|-------|----------|
