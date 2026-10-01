@@ -344,21 +344,41 @@ gateway:
   healthPort: 9092
   extraArgs: []      # extra flags passed to `openshell-gateway run`
   # OIDC for client auth (the openshell CLI authenticates via OIDC).
-  # Independent of TLS: configure both, neither, or either alone. An issuer
-  # cannot be combined with inferenceProvider.enabled: the provider hook calls
-  # the gateway without a token, so the chart refuses the pair (register the
-  # provider from an authenticated CLI instead; docs/production-deployment.md).
+  # Independent of TLS: configure both, neither, or either alone. With an
+  # issuer every caller needs a bearer token, the chart's provider hook
+  # included: inferenceProvider.enabled then requires clientId and
+  # clientCredentialsSecret (docs/production-deployment.md).
   oidc:
     issuer: ""
-    audience: ""
+    audience: ""              # the token's `aud`; for SAP IAS the client id
+    # The OIDC client the CLI logs in with (`openshell gateway add --oidc-client-id`),
+    # also used by the provider hook's client-credentials grant.
+    clientId: ""
+    # JWKS URL for the ingress gateway's RequestAuthentication (gatewayIngress).
+    # Empty lets Istio discover it from the issuer; the gateway always does.
+    jwksUri: ""
+    # Authorization. Upstream defaults the roles to `openshell-admin` and
+    # `openshell-user`, read from the `realm_access.roles` claim, so with the
+    # three values below empty a token needs those roles. Either
+    #   - set authOnly: true to accept every identity the issuer authenticates
+    #     (upstream's authentication-only mode; both roles are passed empty), or
+    #   - set rolesClaim (for example `groups`), adminRole and userRole.
+    # adminRole and userRole must be set together.
+    authOnly: false
+    rolesClaim: ""
     adminRole: ""
     userRole: ""
+    # A Secret you manage in .Release.Namespace holding the OIDC client secret,
+    # for the provider hook's client-credentials grant. The chart never reads it.
+    clientCredentialsSecret:
+      name: ""
+      key: client-secret
   # Inbound TLS at the gateway pod.
   #
   # When `enabled: false` (default), the chart passes `--disable-tls` to
   # the gateway and it serves plaintext HTTP — suitable only for
   # in-cluster deployments behind a TLS-terminating reverse proxy
-  # (e.g. Kyma APIRule + kyma-gateway), or for fully-trusted local dev.
+  # (gatewayIngress and the Kyma gateway), or for fully-trusted local dev.
   # NOT safe for direct public exposure.
   #
   # When `enabled: true`, the chart mounts the self-signed server-tls
@@ -441,25 +461,41 @@ gateway:
 gatewayService:
   enabled: false
 
-# Kyma APIRule for external access. Requires .Values.gatewayService.enabled.
-# Set host to a hostname your cluster's gateway routes (e.g.
-# openshell.<cluster-id>.kyma.ondemand.com). Cluster ID never goes in the
-# chart — set it at deploy time.
-gatewayApirule:
+# Remote access: publish the gateway through the cluster's Istio ingress gateway
+# (the Kyma gateway), so the openshell CLI and sandbox service URLs work without a
+# port-forward. Requires gateway.enabled, gatewayService.enabled and
+# gateway.oidc.{issuer,audience,clientId}: the chart refuses to publish an
+# unauthenticated gateway. Sandbox pods are never published; upstream's sandbox
+# runtime accepts inbound connections only through the gateway's relay.
+#
+# Renders, in the release namespace, a VirtualService for `host`, and in
+# `ingressNamespace` a RequestAuthentication (the issuer's tokens) and an ALLOW
+# AuthorizationPolicy for `host` that requires such a token. Installing with this
+# block enabled therefore needs rights in `ingressNamespace`.
+gatewayIngress:
   enabled: false
+  # The cluster's wildcard domain, without "*." (the Kyma gateway serves
+  # *.<domain>), e.g. c-0000000.kyma.ondemand.com. Never commit a real one.
+  domain: ""
+  # Host of the gateway API. Empty = openshell.<domain>. One label under `domain`.
   host: ""
-  gateway: kyma-system/kyma-gateway
-  rules:
-    - path: /*
-      methods: [POST]
-      jwt:
-        # Filled in at deploy time. The CLI authenticates via OIDC; the
-        # APIRule validates the JWT before forwarding to the gateway.
-        # Example value (not committed; pass via `helm install --set-json`):
-        #   authentications:
-        #     - issuer: https://my-tenant.accounts.ondemand.com
-        #       jwksUri: https://my-tenant.accounts.ondemand.com/oauth2/certs
-        authentications: []
+  istioGateway: kyma-system/kyma-gateway
+  # Namespace and labels of the Istio ingress gateway the policies select.
+  ingressNamespace: istio-system
+  ingressSelector:
+    istio: ingressgateway
+  # Source addresses or CIDR blocks (Istio remoteIpBlocks). Optional extra fence
+  # for `host`; required for serviceHosts.
+  allowedCidrs: []
+  # Publish the URLs `openshell service expose` prints, as
+  # http://<workspace>--<sandbox>[--<service>].<domain>/ (redirected to https).
+  # A browser sends no token, so these hosts are fenced by allowedCidrs only, and
+  # Istio's host matching takes only a prefix wildcard: the policy admits
+  # allowedCidrs to EVERY host under `domain`, not only to sandbox service hosts.
+  # With this on, the gateway binds port 80 in the pod (the pod gets the safe
+  # sysctl net.ipv4.ip_unprivileged_port_start=0) so the URLs carry no port.
+  serviceHosts:
+    enabled: false
 
 # Optional: declaratively configure an inference provider through upstream's
 # provider-profile model. The chart renders a provider profile (a ConfigMap:

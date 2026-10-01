@@ -46,6 +46,22 @@ jobs:
             --set driver.istioInjectSandboxes=true \
             > /dev/null
 
+      - name: helm template (remote access on)
+        run: |
+          helm template openshell-driver-kyma deploy/helm/openshell-driver-kyma \
+            --set gateway.enabled=true \
+            --set gateway.sandboxJwt.enabled=true \
+            --set gatewayService.enabled=true \
+            --set gatewayIngress.enabled=true \
+            --set gatewayIngress.domain=example.org \
+            --set gatewayIngress.serviceHosts.enabled=true \
+            --set-json 'gatewayIngress.allowedCidrs=["203.0.113.0/24"]' \
+            --set gateway.oidc.issuer=https://issuer.example \
+            --set gateway.oidc.audience=osh-client \
+            --set gateway.oidc.clientId=osh-client \
+            --set gateway.oidc.authOnly=true \
+            > /dev/null
+
       - name: Assert the driver's configuration surface
         shell: bash
         run: ./scripts/check-chart-render.sh

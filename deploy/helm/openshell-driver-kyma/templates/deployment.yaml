@@ -2,6 +2,8 @@
 {{- include "openshell-driver-kyma.inferenceProviderGuards" . -}}
 {{- include "openshell-driver-kyma.gatewayTlsGuards" . -}}
 {{- include "openshell-driver-kyma.gatewayGuards" . -}}
+{{- include "openshell-driver-kyma.gatewayOidcGuards" . -}}
+{{- include "openshell-driver-kyma.gatewayIngressGuards" . -}}
 {{- include "openshell-driver-kyma.workspaceGuards" . -}}
 {{- include "openshell-driver-kyma.sandboxEnvGuards" . -}}
 {{- include "openshell-driver-kyma.driverValueGuards" . -}}

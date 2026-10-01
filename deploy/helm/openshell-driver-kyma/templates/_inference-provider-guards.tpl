@@ -1,6 +1,6 @@
 {{/* Pre-flight guards for inferenceProvider.
 
-Mirrors the gateway-apirule.yaml `{{- fail -}}` style: when an opt-in
+Uses the chart's `{{- fail -}}` style: when an opt-in
 block is enabled but missing a required field, refuse to render with an
 actionable message instead of silently producing broken manifests.
 

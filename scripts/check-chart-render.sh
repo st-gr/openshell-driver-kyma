@@ -44,6 +44,12 @@
 #      model or binaries list the driver or upstream would refuse (a comma, a URL
 #      that is not plain http(s) to a host name, credentials in the URL, nothing
 #      listed) fails the render, naming the value and never echoing credentials.
+#   8. remote access (gatewayIngress): values that cannot work (no OIDC, no domain, a
+#      host outside it, gateway TLS, service hosts without an allowlist, a malformed
+#      CIDR, one OIDC role without the other) fail the render; the gateway's listener,
+#      Service and NetworkPolicy follow the bind port; the Istio routes and policies
+#      are exactly the documented ones, in the ingress gateway's namespace; and the
+#      provider hook authenticates with the client-credentials grant under OIDC.
 # Needs helm, python3 with PyYAML, and network access (for check 1).
 set -euo pipefail
 
@@ -255,6 +261,51 @@ try good-7-http '' t "${inference_common[@]}" --set inferenceProvider.baseUrl=ht
 try good-7-binaries '' t "${inference_common[@]}" --set "inferenceProvider.baseUrl=$inference_url" \
 	--set "inferenceProvider.modelId=$inference_model" \
 	--set-json 'inferenceProvider.binaries=["/opt/agent/bin/python3","/usr/bin/node"]'
+
+# 8. Remote access (gatewayIngress): the gateway published through the cluster's Istio
+# ingress gateway. The names start with good-8/bad-8, so checks 4 and 5 (r*.yaml) skip them.
+ingress_common=(--set gatewayIngress.enabled=true --set gatewayIngress.domain=example.org
+	--set gateway.oidc.issuer=https://issuer.example --set gateway.oidc.audience=osh-client
+	--set gateway.oidc.clientId=osh-client --set gateway.oidc.authOnly=true)
+ingress_services=(--set gatewayIngress.serviceHosts.enabled=true
+	--set-json 'gatewayIngress.allowedCidrs=["203.0.113.0/24","2001:db8::/32"]')
+try good-8-ingress '' t "${ingress_common[@]}"
+try good-8-services '' t "${ingress_common[@]}" "${ingress_services[@]}"
+try good-8-host '' t "${ingress_common[@]}" --set gatewayIngress.host=osh.example.org \
+	--set gateway.oidc.jwksUri=https://issuer.example/oauth2/certs
+# The issuer reaches the policies verbatim, a trailing slash included.
+try good-8-issuer-slash '' t "${ingress_common[@]}" --set gateway.oidc.issuer=https://issuer.example/
+# Another release name and namespace, and pod sysctls the operator already sets.
+try good-8-long-names '' prod-sandboxes "${ingress_common[@]}" "${ingress_services[@]}" \
+	--namespace a-rather-long-release-namespace-name \
+	--set-json 'podSecurityContext.sysctls=[{"name":"net.ipv4.ping_group_range","value":"0 0"}]'
+# RBAC roles instead of authentication-only, and an issuer with neither (upstream's defaults).
+try good-8-rbac-roles '' t "${ingress_common[@]}" --set gateway.oidc.authOnly=false \
+	--set gateway.oidc.rolesClaim=groups --set gateway.oidc.adminRole=osh-admin --set gateway.oidc.userRole=osh-user
+try good-8-oidc-default-roles '' t --set gateway.oidc.issuer=https://issuer.example --set gateway.oidc.audience=osh-client
+try bad-8-no-oidc 'REFUSING to publish an unauthenticated gateway' t --set gatewayIngress.enabled=true \
+	--set gatewayIngress.domain=example.org
+try bad-8-no-client-id 'gateway.oidc.clientId' t "${ingress_common[@]}" --set gateway.oidc.clientId=
+try bad-8-no-service 'gatewayService.enabled' t "${ingress_common[@]}" --set gatewayService.enabled=false \
+	--set driver.gatewayEndpoint=http://gateway.example:8080
+try bad-8-no-domain 'gatewayIngress.domain' t "${ingress_common[@]}" --set gatewayIngress.domain=
+try bad-8-wildcard-domain '*.example.org' t "${ingress_common[@]}" --set 'gatewayIngress.domain=*.example.org'
+try bad-8-upper-domain 'Example.org' t "${ingress_common[@]}" --set gatewayIngress.domain=Example.org
+try bad-8-dot-domain 'example.org.' t "${ingress_common[@]}" --set gatewayIngress.domain=example.org.
+try bad-8-host-elsewhere 'openshell.other.org' t "${ingress_common[@]}" --set gatewayIngress.host=openshell.other.org
+try bad-8-host-two-labels 'a.b.example.org' t "${ingress_common[@]}" --set gatewayIngress.host=a.b.example.org
+try bad-8-host-service-shape 'a--b.example.org' t "${ingress_common[@]}" --set gatewayIngress.host=a--b.example.org
+try bad-8-tls 'gateway.tls.enabled' t "${ingress_common[@]}" --set gateway.tls.enabled=true
+try bad-8-services-no-cidrs 'gatewayIngress.allowedCidrs' t "${ingress_common[@]}" \
+	--set gatewayIngress.serviceHosts.enabled=true
+try bad-8-cidr 'office' t "${ingress_common[@]}" --set-json 'gatewayIngress.allowedCidrs=["office"]'
+try bad-8-services-port-80 'gateway.grpcPort=80' t "${ingress_common[@]}" "${ingress_services[@]}" \
+	--set gateway.grpcPort=80
+try bad-8-one-role 'must be set together' t --set gateway.oidc.issuer=https://issuer.example \
+	--set gateway.oidc.audience=osh-client --set gateway.oidc.adminRole=osh-admin
+try bad-8-auth-only-with-roles 'gateway.oidc.authOnly' t --set gateway.oidc.issuer=https://issuer.example \
+	--set gateway.oidc.audience=osh-client --set gateway.oidc.authOnly=true \
+	--set gateway.oidc.adminRole=osh-admin --set gateway.oidc.userRole=osh-user
 
 # 4 and 5. Renders for the NetworkPolicy and RBAC checks. Named rbac-*, so check 2's
 # render-*.yaml glob skips them, and check 4's r*.yaml glob takes them.
@@ -934,6 +985,23 @@ if rendered("good-7-binaries") is not None:
 userinfo_err = work / "bad-7b-url-userinfo.err"
 if userinfo_err.exists() and "secretpw" in userinfo_err.read_text():
     failures.append("bad-7b-url-userinfo: the render error echoes the credentials in inferenceProvider.baseUrl")
+
+# 8. Remote access. The refused values are the bad-8-* cases (checked with the other
+# bad-* cases above); these renders must succeed, and the removed APIRule is gone.
+INGRESS_RENDERS = ("good-8-ingress", "good-8-services", "good-8-host", "good-8-issuer-slash",
+                   "good-8-long-names", "good-8-rbac-roles", "good-8-oidc-default-roles")
+for name in INGRESS_RENDERS:
+    rendered(name)
+
+def succeeded(name):
+    return (work / f"{name}.rc").read_text() == "0"
+
+if "gatewayApirule" in (yaml.safe_load(values) or {}):
+    failures.append("values.yaml still has the removed gatewayApirule block")
+if (chart / "templates" / "gateway-apirule.yaml").exists():
+    failures.append("templates/gateway-apirule.yaml still exists; gatewayIngress replaces it")
+if "gatewayIngress" not in (yaml.safe_load(values) or {}):
+    failures.append("values.yaml has no gatewayIngress block")
 
 if failures:
     print("CHART_RENDER_FAIL:")
