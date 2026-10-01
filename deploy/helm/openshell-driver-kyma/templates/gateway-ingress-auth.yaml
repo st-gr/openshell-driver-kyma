@@ -1,46 +1,28 @@
 {{- if .Values.gatewayIngress.enabled -}}
 {{- $prefix := include "openshell-driver-kyma.gatewayIngressPolicyPrefix" . -}}
 {{- $in := .Values.gatewayIngress -}}
-# Policies on the cluster's Istio ingress gateway, in its namespace.
+{{- $allow := eq $in.policyAction "ALLOW" -}}
+{{- $host := include "openshell-driver-kyma.gatewayIngressHost" . -}}
+# Source-address fences on the cluster's Istio ingress gateway, in its namespace.
 #
-# gatewayIngress.policyAction follows that gateway. Without any ALLOW policy Istio
-# lets every request through, and the first ALLOW policy would make the gateway deny
-# every other application's hosts: there the chart writes DENY policies (the default),
-# which name only its own hosts. A gateway that already has ALLOW policies denies
-# whatever no policy allows: there the chart writes ALLOW policies for its hosts.
-# Either way a request reaches the CLI host only with a token of the issuer (and from
-# allowedCidrs when set), and a sandbox service host only from allowedCidrs.
+# The ingress gateway is shared with every other application of the cluster, so
+# nothing here may apply to it as a whole: every rule names this release's hosts.
+# There is no RequestAuthentication. It has no host scope, and one on the ingress
+# gateway makes Envoy answer 401 to every Bearer token it cannot validate, on every
+# host: other applications' logins and API keys break. The OpenShell gateway
+# validates the caller's token itself, as upstream intends.
 #
-# The RequestAuthentication selects the whole ingress gateway: a request to any
-# host that carries an invalid token of this issuer is answered 401 there.
-# Requests without a token, or with another issuer's, are not affected.
-apiVersion: security.istio.io/v1
-kind: RequestAuthentication
-metadata:
-  name: {{ $prefix }}-openshell-jwt
-  namespace: {{ $in.ingressNamespace }}
-  labels:
-    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
-spec:
-  selector:
-    matchLabels:
-      {{- toYaml $in.ingressSelector | nindent 6 }}
-  jwtRules:
-    - issuer: {{ .Values.gateway.oidc.issuer | quote }}
-      {{- with .Values.gateway.oidc.jwksUri }}
-      jwksUri: {{ . | quote }}
-      {{- end }}
-      audiences:
-        - {{ .Values.gateway.oidc.audience | quote }}
-      # The gateway validates the same token again.
-      forwardOriginalToken: true
-{{- $allow := eq $in.policyAction "ALLOW" }}
-{{- $host := include "openshell-driver-kyma.gatewayIngressHost" . }}
-{{- $principal := printf "%s/*" .Values.gateway.oidc.issuer }}
+# gatewayIngress.policyAction follows the ingress gateway. Without any ALLOW policy
+# Istio lets every request through, and the first ALLOW policy would make the gateway
+# deny every other application's hosts: there the chart writes DENY policies (the
+# default), which name only its own hosts. A gateway that already has ALLOW policies
+# denies whatever no policy allows: there the chart writes ALLOW policies for its hosts.
+{{- if or $allow $in.allowedCidrs }}
 ---
-# The CLI host: a valid token of the issuer and, when allowedCidrs is set, a
-# source address in it. Hosts are listed with and without a port: Istio matches
-# them against the authority as the client sent it.
+# The CLI host. With allowedCidrs, only those source addresses reach it; under ALLOW
+# without them, every source does (the gateway authenticates). Under DENY without
+# them there is nothing to deny and no policy. Hosts are listed with and without a
+# port: Istio matches them against the authority as the client sent it.
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
 metadata:
@@ -54,48 +36,25 @@ spec:
       {{- toYaml $in.ingressSelector | nindent 6 }}
   action: {{ $in.policyAction }}
   rules:
-    {{- if $allow }}
-    - from:
+    - to:
+        - operation:
+            hosts:
+              - {{ $host | quote }}
+              - {{ printf "%s:*" $host | quote }}
+      {{- with $in.allowedCidrs }}
+      from:
         - source:
-            requestPrincipals:
-              - {{ $principal | quote }}
-            {{- with $in.allowedCidrs }}
-            remoteIpBlocks:
+            {{ ternary "remoteIpBlocks" "notRemoteIpBlocks" $allow }}:
               {{- toYaml . | nindent 14 }}
-            {{- end }}
-      to:
-        - operation:
-            hosts:
-              - {{ $host | quote }}
-              - {{ printf "%s:*" $host | quote }}
-    {{- else }}
-    - from:
-        - source:
-            notRequestPrincipals:
-              - {{ $principal | quote }}
-      to:
-        - operation:
-            hosts:
-              - {{ $host | quote }}
-              - {{ printf "%s:*" $host | quote }}
-    {{- with $in.allowedCidrs }}
-    - from:
-        - source:
-            notRemoteIpBlocks:
-              {{- toYaml . | nindent 14 }}
-      to:
-        - operation:
-            hosts:
-              - {{ $host | quote }}
-              - {{ printf "%s:*" $host | quote }}
-    {{- end }}
-    {{- end }}
+      {{- end }}
+{{- end }}
 {{- if $in.serviceHosts.enabled }}
 ---
-# Sandbox service hosts: browsers carry no token, so the source address is the
-# fence. They are matched per workspace, as <workspace>--*: Istio's hosts take only
-# a prefix or a suffix wildcard, and the domain's wildcard would also cover the CLI
-# host and every other application under the domain.
+# Sandbox service hosts: the gateway does not authenticate a browser's request to a
+# service URL, so the source address is the only fence. They are matched per
+# workspace, as <workspace>--*: Istio's hosts take only a prefix or a suffix wildcard,
+# and the domain's wildcard would also cover the CLI host and every other application
+# under the domain.
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
 metadata:

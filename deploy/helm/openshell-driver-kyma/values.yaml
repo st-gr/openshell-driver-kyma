@@ -371,9 +371,6 @@ gateway:
     # The OIDC client the CLI logs in with (`openshell gateway add --oidc-client-id`),
     # also used by the provider hook's client-credentials grant.
     clientId: ""
-    # JWKS URL for the ingress gateway's RequestAuthentication (gatewayIngress).
-    # Empty lets Istio discover it from the issuer; the gateway always does.
-    jwksUri: ""
     # Authorization. Upstream defaults the roles to `openshell-admin` and
     # `openshell-user`, read from the `realm_access.roles` claim, so with
     # rolesClaim, adminRole and userRole empty a token needs those roles. Either
@@ -490,10 +487,14 @@ gatewayService:
 # unauthenticated gateway. Sandbox pods are never published; upstream's sandbox
 # runtime accepts inbound connections only through the gateway's relay.
 #
+# The gateway is the only authenticator, as upstream intends: it validates the
+# caller's OIDC token itself. The ingress gateway routes and, with allowedCidrs,
+# fences by source address; it checks no token.
+#
 # Renders, in the release namespace, a VirtualService for `host`, and in
-# `ingressNamespace` a RequestAuthentication (the issuer's tokens) and an ALLOW
-# AuthorizationPolicy for `host` that requires such a token. Installing with this
-# block enabled therefore needs rights in `ingressNamespace`.
+# `ingressNamespace` AuthorizationPolicies that name only this release's hosts.
+# Nothing it renders applies to the ingress gateway as a whole. Installing with
+# this block enabled needs rights in `ingressNamespace`.
 gatewayIngress:
   enabled: false
   # The cluster's wildcard domain, without "*." (the Kyma gateway serves
@@ -517,8 +518,9 @@ gatewayIngress:
   # this chart's hosts answer `403 RBAC: access denied` until you set ALLOW. Check with
   #   kubectl -n istio-system get authorizationpolicies
   policyAction: DENY
-  # Source addresses or CIDR blocks (Istio remoteIpBlocks). Optional extra fence
-  # for `host`; required for serviceHosts.
+  # Source addresses or CIDR blocks (Istio remoteIpBlocks). Optional fence for
+  # `host` (the gateway authenticates every call either way); required for
+  # serviceHosts.
   allowedCidrs: []
   # Publish sandbox services (`openshell service expose`) at
   # https://<workspace>--<sandbox>[--<service>].<domain>/. Through the remote

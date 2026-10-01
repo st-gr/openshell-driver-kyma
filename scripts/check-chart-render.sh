@@ -50,6 +50,9 @@
 #      Service and NetworkPolicy follow the bind port; the Istio routes and policies
 #      are exactly the documented ones, in the ingress gateway's namespace; and the
 #      provider hook authenticates with the client-credentials grant under OIDC.
+#      8b: in every render, nothing applies to the shared ingress gateway as a whole:
+#      no RequestAuthentication, and no AuthorizationPolicy rule without this
+#      release's hosts.
 # Needs helm, python3 with PyYAML, and network access (for check 1).
 set -euo pipefail
 
@@ -291,10 +294,7 @@ ingress_services=(--set gatewayIngress.serviceHosts.enabled=true
 	--set-json 'gatewayIngress.allowedCidrs=["203.0.113.0/24","2001:db8::/32"]')
 try good-8-ingress '' t "${ingress_common[@]}"
 try good-8-services '' t "${ingress_common[@]}" "${ingress_services[@]}"
-try good-8-host '' t "${ingress_common[@]}" --set gatewayIngress.host=osh.example.org \
-	--set gateway.oidc.jwksUri=https://issuer.example/oauth2/certs
-# The issuer reaches the policies verbatim, a trailing slash included.
-try good-8-issuer-slash '' t "${ingress_common[@]}" --set gateway.oidc.issuer=https://issuer.example/
+try good-8-host '' t "${ingress_common[@]}" --set gatewayIngress.host=osh.example.org
 # Another release name and namespace, and pod sysctls the operator already sets.
 try good-8-long-names '' prod-sandboxes "${ingress_common[@]}" "${ingress_services[@]}" \
 	--namespace a-rather-long-release-namespace-name \
@@ -1055,7 +1055,7 @@ if userinfo_err.exists() and "secretpw" in userinfo_err.read_text():
 
 # 8. Remote access. The refused values are the bad-8-* cases (checked with the other
 # bad-* cases above); these renders must succeed, and the removed APIRule is gone.
-INGRESS_RENDERS = ("good-8-ingress", "good-8-services", "good-8-host", "good-8-issuer-slash",
+INGRESS_RENDERS = ("good-8-ingress", "good-8-services", "good-8-host",
                    "good-8-long-names", "good-8-rbac-roles", "good-8-oidc-default-roles",
                    "good-8-allow", "good-8-allow-services", "good-8-sysctl-present", "good-8-null-pod-security")
 for name in INGRESS_RENDERS:
@@ -1140,12 +1140,14 @@ for name, want in OIDC_FLAGS.items():
 
 # The Istio objects. Routes live in the release namespace, policies on the ingress
 # gateway in its own namespace, named for the release namespace so releases never collide.
-# The policy action follows the gateway: DENY (default) for a gateway that lets everything
-# through, where an ALLOW policy would make it deny every other application's hosts; ALLOW
-# for a gateway that already allowlists. Either way a request reaches the CLI host only with
-# a token of the issuer (and from allowedCidrs when set), and a sandbox service host only
-# from allowedCidrs. Service hosts are matched per workspace ("<workspace>--*"), never by
-# the domain's wildcard, which would cover the CLI host and other applications.
+# The ingress gateway checks no token: the OpenShell gateway is the only authenticator, as
+# upstream intends (8b says why). The policies are source-address fences. Their action
+# follows the gateway: DENY (default) for a gateway that lets everything through, where an
+# ALLOW policy would make it deny every other application's hosts; ALLOW for a gateway that
+# already allowlists. The CLI host gets a policy only where there is something to state:
+# allowedCidrs, or ALLOW, which must admit the host. Service hosts are matched per workspace
+# ("<workspace>--*"), never by the domain's wildcard, which would cover the CLI host and
+# other applications.
 INGRESS_KINDS = ("VirtualService", "RequestAuthentication", "AuthorizationPolicy")
 SELECTOR = {"matchLabels": {"istio": "ingressgateway"}}
 CIDRS = ["203.0.113.0/24", "2001:db8::/32"]
@@ -1164,37 +1166,25 @@ def route(service, port, match=None):
     rule = {"route": [{"destination": {"host": service, "port": {"number": port}}}]}
     return [dict(match=[{"authority": {"regex": match}}], **rule) if match else rule]
 
-def expected_ingress(release_ns, fullname, host, issuer, cidrs, services, jwks=None, action="DENY",
-                     workspaces=("default",)):
+def expected_ingress(release_ns, fullname, host, cidrs, services, action="DENY", workspaces=("default",)):
     service = f"{fullname}.{release_ns}.svc.cluster.local"
     prefix = f"{release_ns}-{fullname}"
-    rule = {"issuer": issuer, "audiences": ["osh-client"], "forwardOriginalToken": True}
-    if jwks:
-        rule["jwksUri"] = jwks
-    # With and without a port: Istio matches hosts against the authority as sent.
-    to = [{"operation": {"hosts": [host, host + ":*"]}}]
-    if action == "ALLOW":
-        source = {"requestPrincipals": [issuer + "/*"]}
-        if cidrs:
-            source["remoteIpBlocks"] = cidrs
-        cli = [{"from": [{"source": source}], "to": to}]
-    else:
-        cli = [{"from": [{"source": {"notRequestPrincipals": [issuer + "/*"]}}], "to": to}]
-        if cidrs:
-            cli.append({"from": [{"source": {"notRemoteIpBlocks": cidrs}}], "to": to})
+    blocks = "remoteIpBlocks" if action == "ALLOW" else "notRemoteIpBlocks"
     want = {
         ("VirtualService", release_ns, f"{fullname}-gateway"): {
             "hosts": [host], "gateways": ["kyma-system/kyma-gateway"], "http": route(service, 8080)},
-        ("RequestAuthentication", "istio-system", f"{prefix}-openshell-jwt"): {
-            "selector": SELECTOR, "jwtRules": [rule]},
-        ("AuthorizationPolicy", "istio-system", f"{prefix}-openshell-cli"): {
-            "selector": SELECTOR, "action": action, "rules": cli},
     }
+    if cidrs or action == "ALLOW":
+        # With and without a port: Istio matches hosts against the authority as sent.
+        rule = {"to": [{"operation": {"hosts": [host, host + ":*"]}}]}
+        if cidrs:
+            rule["from"] = [{"source": {blocks: cidrs}}]
+        want[("AuthorizationPolicy", "istio-system", f"{prefix}-openshell-cli")] = {
+            "selector": SELECTOR, "action": action, "rules": [rule]}
     if services:
         want[("VirtualService", release_ns, f"{fullname}-sandbox-services")] = {
             "hosts": ["*.example.org"], "gateways": ["kyma-system/kyma-gateway"],
             "http": route(service, 80, service_host(workspaces))}
-        blocks = "remoteIpBlocks" if action == "ALLOW" else "notRemoteIpBlocks"
         want[("AuthorizationPolicy", "istio-system", f"{prefix}-openshell-services")] = {
             "selector": SELECTOR, "action": action,
             "rules": [{"from": [{"source": {blocks: cidrs}}],
@@ -1202,18 +1192,16 @@ def expected_ingress(release_ns, fullname, host, issuer, cidrs, services, jwks=N
     return want
 
 T = ("default", "t-openshell-driver-kyma")   # helm template's namespace and the fullname of release t
-ISSUER = "https://issuer.example"
 INGRESS_OBJECTS = {
-    "good-8-ingress": expected_ingress(*T, "openshell.example.org", ISSUER, None, False),
-    "good-8-services": expected_ingress(*T, "openshell.example.org", ISSUER, CIDRS, True),
-    "good-8-host": expected_ingress(*T, "osh.example.org", ISSUER, None, False,
-                                    jwks="https://issuer.example/oauth2/certs"),
-    # The principal is the issuer verbatim plus "/*": Istio builds it as <iss>/<sub>.
-    "good-8-issuer-slash": expected_ingress(*T, "openshell.example.org", ISSUER + "/", None, False),
+    # DENY without allowedCidrs: nothing to deny, so no policy for the CLI host.
+    "good-8-ingress": expected_ingress(*T, "openshell.example.org", None, False),
+    "good-8-services": expected_ingress(*T, "openshell.example.org", CIDRS, True),
+    "good-8-host": expected_ingress(*T, "osh.example.org", None, False),
     "good-8-long-names": expected_ingress("a-rather-long-release-namespace-name", "prod-sandboxes-openshell-driver-kyma",
-                                          "openshell.example.org", ISSUER, CIDRS, True),
-    "good-8-allow": expected_ingress(*T, "openshell.example.org", ISSUER, None, False, action="ALLOW"),
-    "good-8-allow-services": expected_ingress(*T, "openshell.example.org", ISSUER, CIDRS, True, action="ALLOW",
+                                          "openshell.example.org", CIDRS, True),
+    # ALLOW without allowedCidrs: the rule has no source, it only admits the host.
+    "good-8-allow": expected_ingress(*T, "openshell.example.org", None, False, action="ALLOW"),
+    "good-8-allow-services": expected_ingress(*T, "openshell.example.org", CIDRS, True, action="ALLOW",
                                               workspaces=("default", "team-a")),
 }
 for name, want in INGRESS_OBJECTS.items():
@@ -1243,16 +1231,35 @@ for workspaces, cases in (
         if bool(pattern.fullmatch(host)) != want:
             failures.append(f"with workspaces {workspaces} the service host pattern "
                             f"{'rejects' if want else 'accepts'} {host!r}")
-for name in INGRESS_OBJECTS:
-    if not succeeded(name):
+
+# 8b. The cluster's ingress gateway is shared with every other application behind it, so
+# nothing the chart renders may apply to it as a whole, in any render of this script.
+# - No RequestAuthentication. It has no host scope: on the ingress gateway it makes Envoy
+#   answer 401 to every Bearer token it cannot validate, on every host. In a live run that
+#   broke another application's login and its API keys.
+# - Every AuthorizationPolicy selects a workload, and every rule names hosts, none of them
+#   by the domain's wildcard.
+if re.search(r"^kind:\s*RequestAuthentication", templates, re.M):
+    failures.append("a template renders a RequestAuthentication; the gateway validates tokens itself")
+if "jwksUri" in ((yaml.safe_load(values) or {}).get("gateway") or {}).get("oidc", {}):
+    failures.append("values.yaml still has gateway.oidc.jwksUri, which only fed the removed RequestAuthentication")
+for path in sorted(work.glob("*.yaml")):
+    rc = work / f"{path.stem}.rc"
+    if rc.exists() and rc.read_text() != "0":
         continue
-    for key, spec in ingress_objects(name).items():
-        if key[0] != "AuthorizationPolicy":
+    for d in docs(path):
+        where = f"{path.stem}: {d.get('kind')} {d['metadata'].get('name')}"
+        if d.get("kind") == "RequestAuthentication":
+            failures.append(f"{where}: a RequestAuthentication applies to every host of the workload it selects")
+        if d.get("kind") != "AuthorizationPolicy":
             continue
-        hosts = [h for r in spec["rules"] for t in r["to"] for h in t["operation"]["hosts"]]
-        if any(h.startswith("*") for h in hosts):
-            failures.append(f"{name}: {key[2]} matches hosts {hosts}; a suffix wildcard covers the CLI host "
-                            "and other applications")
+        if not (d["spec"].get("selector") or {}).get("matchLabels"):
+            failures.append(f"{where}: no workload selector")
+        for rule in d["spec"].get("rules") or [{}]:
+            hosts = [h for t in rule.get("to") or [] for h in (t.get("operation") or {}).get("hosts") or []]
+            if not hosts or any(h.startswith("*") for h in hosts):
+                failures.append(f"{where}: a rule matches hosts {hosts}; every rule must name this release's "
+                                "hosts, and a suffix wildcard covers other applications")
 
 # The provider hook under OIDC: it registers the gateway once with the client-credentials
 # grant and then addresses it by name. --gateway-endpoint bypasses the registered gateway
