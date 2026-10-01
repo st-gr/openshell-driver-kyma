@@ -47,10 +47,12 @@ gateway TLS off need nothing.
   optional source-address fence for the gateway host.
 - **`gatewayIngress.policyAction`** chooses how the policies are written:
   `DENY` (default) for an ingress gateway without ALLOW policies, naming only
-  the chart's own hosts and leaving every other host alone; `ALLOW` for a
+  the chart's own hosts and leaving every other HTTP host alone; `ALLOW` for a
   gateway that already allowlists per host. An ALLOW policy on a gateway
   without any would make it deny every other application's hosts; see
-  production-deployment before choosing.
+  production-deployment before choosing. Istio applies a DENY rule to TCP and
+  TLS-passthrough servers without its host, so the chart refuses DENY with
+  `allowedCidrs` when the ingress gateway has such a server.
 - **Published service URLs (`gatewayIngress.serviceHosts`)**:
   services exposed with `openshell service expose` are reachable at
   `https://<workspace>--<sandbox>.<domain>/`, the URL the CLI prints, routed to
@@ -81,8 +83,10 @@ gateway TLS off need nothing.
   upgrades a release it watches other applications behind the same ingress
   gateway, and rolls the release back if one of them starts answering
   differently; `scripts/remote-access-check-test.sh` tests that without a
-  cluster. And a flag check in `scripts/check-gateway-config.sh` (the pinned
-  gateway image must know every flag the chart renders).
+  cluster. `scripts/ingress-non-http-servers.sh` lists an ingress gateway's TCP
+  and TLS-passthrough servers. And a flag check in
+  `scripts/check-gateway-config.sh` (the pinned gateway image must know every
+  flag the chart renders).
 
 ### Fixed
 

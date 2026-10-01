@@ -519,7 +519,11 @@ gatewayIngress:
   # How the ingress policies are written. It follows the ingress gateway, not taste:
   #   DENY  for a gateway with NO ALLOW AuthorizationPolicy (Istio then lets every
   #         request through). The chart denies what must not reach its own hosts and
-  #         leaves every other host alone.
+  #         leaves every other HTTP host alone. Not for a gateway that also has TCP
+  #         or TLS-passthrough servers: Istio applies a DENY rule to those without
+  #         its host, so with allowedCidrs every connection to them from another
+  #         address would be refused. The chart checks the cluster's Gateways at
+  #         install time and refuses that combination.
   #   ALLOW for a gateway that already has ALLOW policies (Istio then denies whatever
   #         no policy allows). The chart adds ALLOW rules for its own hosts.
   # NEVER set ALLOW on a gateway without such policies: its first ALLOW policy makes
@@ -529,7 +533,9 @@ gatewayIngress:
   policyAction: DENY
   # Source addresses or CIDR blocks (Istio remoteIpBlocks). Optional fence for
   # `host` (the gateway authenticates every call either way); required for
-  # serviceHosts.
+  # serviceHosts. The fence compares the client address the ingress gateway
+  # sees: if your mesh takes it from an X-Forwarded-For header (numTrustedProxies)
+  # that a client can set, the fence can be bypassed.
   allowedCidrs: []
   # Publish sandbox services (`openshell service expose`) at
   # https://<workspace>--<sandbox>[--<service>].<domain>/, the URL the CLI prints.
@@ -538,8 +544,8 @@ gatewayIngress:
   # The gateway does not authenticate requests to these hosts, so they are fenced
   # by allowedCidrs only. They are published per workspace: routes and policies
   # match <workspace>--* for the workspaces listed here, never the whole domain,
-  # so nothing else under the domain is affected and a workspace that is not
-  # listed is not reachable.
+  # so no other host under the domain is affected (unless its own name begins
+  # with "<workspace>--") and a workspace that is not listed is not reachable.
   serviceHosts:
     enabled: false
     workspaces: [default]

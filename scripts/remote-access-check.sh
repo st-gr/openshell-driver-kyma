@@ -13,18 +13,30 @@
 #   OSH_OIDC_CLIENT_ID  the OIDC client id the CLI logs in with
 #   OSH_ALLOWED_CIDRS   comma-separated source CIDR blocks for the ingress policies
 #   OSH_VALUES          the release's values file
+#   OSH_POLICY_ACTION   DENY when the ingress gateway has no ALLOW AuthorizationPolicy,
+#                       ALLOW when it already allowlists per host
+#                       (kubectl -n istio-system get authorizationpolicies)
 #   OSH_NEIGHBOUR_URLS  comma-separated URLs of OTHER applications behind the same
 #                       ingress gateway, one per application
 #
 # The neighbour probes are the safety net. The ingress gateway is shared: a change that
 # applies to it as a whole breaks other applications' logins and API keys while this
 # release's own hosts look fine (a RequestAuthentication did exactly that in a live run).
-# Before the upgrade the script records each neighbour URL's HTTP status without a token,
-# with a JWT of an issuer nobody here knows, and with a Bearer value that is no JWT. It
-# repeats the probes while the upgrade runs and once more after it. If an answer changes
-# and stays changed, it rolls the release back to the revision it found and stops.
+# Before the upgrade the script records, for each neighbour URL, the HTTP status and
+# whether the answer is the ingress gateway's own refusal: without a token, with a JWT of
+# an issuer nobody here knows, and with a Bearer value that is no JWT. It repeats the
+# probes while the upgrade runs and once more after it has ended. If an answer changes
+# and stays changed, it stops the upgrade, rolls the release back to the deployed
+# revision it found, and stops.
+# Choose URLs that answer the same way to all three probes, a login page for example. A
+# URL that cannot be reached is refused: probes that see nothing prove nothing.
 # OSH_PROBE_ONLY=1 prints the probes and exits; with OSH_PROBE_BASELINE=<file> it exits 1
 # when they differ from that file. It needs OSH_NEIGHBOUR_URLS only.
+#
+# The script changes nothing unless it can undo and watch it: the release's latest
+# revision must be a deployed one, every neighbour must answer, and under DENY the
+# ingress gateway must have no TCP or TLS-passthrough server (ingress-non-http-servers.sh
+# says why).
 #
 # Optional: OSH_RELEASE (ods), OSH_NAMESPACE (openshell-system), OSH_CLIENT_SECRET
 # (openshell-oidc-client: a Secret in OSH_NAMESPACE whose key client-secret holds the
@@ -33,8 +45,6 @@
 # OSH_OIDC_CLIENT_ID), OSH_OIDC_AUDIENCE (the tokens' audience; default the client id),
 # OSH_EXTRA_VALUES (a second values file, applied after OSH_VALUES),
 # OSH_AUTH_ONLY=1 (accept every authenticated identity instead of upstream's roles),
-# OSH_POLICY_ACTION (ALLOW when the ingress gateway already has ALLOW policies; the
-# chart's default, DENY, is for a gateway without any),
 # OSH_REGENERATE_PKI=1 (delete the release's three PKI Secrets before the upgrade when
 # the gateway's certificate does not name the release's Service, as on every install from
 # before 0.10.0; existing sandboxes must be recreated afterwards),
@@ -51,6 +61,18 @@
 # Requires: kubectl (with KUBECONFIG set), helm, curl, openssl, python3, openshell.
 set -euo pipefail
 
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+
+# need VARIABLE MESSAGE: stop unless the variable is set. (Not ${VARIABLE:?}: with an EXIT
+# trap, bash 3.2 leaves such a failure with the trap's status, which is success.)
+need() {
+	if [[ -z ${!1:-} ]]; then
+		echo "$1: $2" >&2
+		exit 1
+	fi
+}
+
 http_code() { curl -s -o /dev/null -m 20 -w '%{http_code}' "$@" || true; }
 
 # A token no issuer of this cluster signed: three base64url parts, like any JWT.
@@ -61,15 +83,33 @@ print(".".join((part({"alg": "RS256", "typ": "JWT", "kid": "neighbour-probe"}),
                 part({"iss": "https://neighbour-probe.invalid", "sub": "probe", "aud": "probe", "exp": 4102444800}),
                 "c2lnbmF0dXJl")))')
 
-# probe_neighbours: one line "<probe> <HTTP status> <url>" per probe and neighbour URL.
+# probe URL [curl args...]: "<HTTP status> <origin>" of one request. The origin tells an
+# application's own answer ("-") from the ingress gateway's refusal: "edge-jwt" is Istio's
+# JWT filter, "edge-rbac" its authorization filter. An application that answers 401 to a
+# bad key keeps its status when the ingress gateway starts answering 401 in its place.
+probe() {
+	local url=$1 code origin=-
+	shift
+	rm -f "$WORK/body"
+	code=$(curl -s -o "$WORK/body" -m 20 -w '%{http_code}' "$@" "$url" || true)
+	if grep -q -E '^(Jwt|Jwks) ' "$WORK/body" 2>/dev/null; then
+		origin=edge-jwt
+	elif grep -q '^RBAC: access denied' "$WORK/body" 2>/dev/null; then
+		origin=edge-rbac
+	fi
+	printf '%s %s' "${code:-000}" "$origin"
+}
+# probe_neighbours: one line "<probe> <HTTP status> <origin> <url>" per probe and URL.
 probe_neighbours() {
 	local url
 	for url in ${OSH_NEIGHBOUR_URLS//,/ }; do
-		printf 'no-token %s %s\n' "$(http_code "$url")" "$url"
-		printf 'foreign-jwt %s %s\n' "$(http_code -H "authorization: Bearer $FOREIGN_JWT" "$url")" "$url"
-		printf 'bearer-key %s %s\n' "$(http_code -H 'authorization: Bearer sk-neighbour-probe' "$url")" "$url"
+		printf 'no-token %s %s\n' "$(probe "$url")" "$url"
+		printf 'foreign-jwt %s %s\n' "$(probe "$url" -H "authorization: Bearer $FOREIGN_JWT")" "$url"
+		printf 'bearer-key %s %s\n' "$(probe "$url" -H 'authorization: Bearer sk-neighbour-probe')" "$url"
 	done
 }
+# unreachable PROBES: the probe lines without an HTTP answer.
+unreachable() { awk '$2 == "000"' <<<"$1"; }
 # neighbours_differ BASELINE: true when two probe rounds in a row differ from BASELINE
 # (one round alone may be a neighbour's own hiccup). The last round is left in $probes.
 probes=""
@@ -82,11 +122,26 @@ neighbours_differ() {
 }
 # probe_changes BASELINE CURRENT: the probe lines that differ ("<" before, ">" now).
 probe_changes() { diff <(printf '%s\n' "$1") <(printf '%s\n' "$2") | grep '^[<>]' || true; }
+# require_neighbours: OSH_NEIGHBOUR_URLS must name at least one URL.
+require_neighbours() {
+	local urls
+	read -r -a urls <<<"${OSH_NEIGHBOUR_URLS//,/ }"
+	if ((${#urls[@]} == 0)); then
+		echo "OSH_NEIGHBOUR_URLS names no URL: give one URL per other application behind the ingress gateway" >&2
+		exit 1
+	fi
+}
 
 if [[ ${OSH_PROBE_ONLY:-} == 1 ]]; then
-	: "${OSH_NEIGHBOUR_URLS:?set OSH_NEIGHBOUR_URLS (comma-separated URLs of other applications behind the ingress gateway)}"
+	need OSH_NEIGHBOUR_URLS "set OSH_NEIGHBOUR_URLS (comma-separated URLs of other applications behind the ingress gateway)"
+	require_neighbours
 	probes=$(probe_neighbours)
 	printf '%s\n' "$probes"
+	if [[ -n $(unreachable "$probes") ]]; then
+		printf '\nNEIGHBOUR_UNREACHABLE\n' >&2
+		unreachable "$probes" >&2
+		exit 1
+	fi
 	if [[ -n ${OSH_PROBE_BASELINE:-} ]] && [[ $probes != "$(cat "$OSH_PROBE_BASELINE")" ]]; then
 		printf '\nNEIGHBOUR_CHANGED\n'
 		probe_changes "$(cat "$OSH_PROBE_BASELINE")" "$probes"
@@ -95,13 +150,15 @@ if [[ ${OSH_PROBE_ONLY:-} == 1 ]]; then
 	exit 0
 fi
 
-: "${OSH_DOMAIN:?set OSH_DOMAIN to the cluster wildcard domain}"
-: "${OSH_OIDC_ISSUER:?set OSH_OIDC_ISSUER}"
-: "${OSH_OIDC_CLIENT_ID:?set OSH_OIDC_CLIENT_ID}"
-: "${OSH_ALLOWED_CIDRS:?set OSH_ALLOWED_CIDRS (comma-separated)}"
-: "${OSH_VALUES:?set OSH_VALUES to the release values file}"
+need OSH_DOMAIN "set OSH_DOMAIN to the cluster wildcard domain"
+need OSH_OIDC_ISSUER "set OSH_OIDC_ISSUER"
+need OSH_OIDC_CLIENT_ID "set OSH_OIDC_CLIENT_ID"
+need OSH_ALLOWED_CIDRS "set OSH_ALLOWED_CIDRS (comma-separated)"
+need OSH_VALUES "set OSH_VALUES to the release values file"
+need OSH_POLICY_ACTION "set OSH_POLICY_ACTION to DENY (the ingress gateway has no ALLOW AuthorizationPolicy) or ALLOW (it already allowlists per host); see kubectl -n istio-system get authorizationpolicies"
 if [[ ${OSH_DRY_RUN:-} != 1 && ${OSH_SKIP_INSTALL:-} != 1 ]]; then
-	: "${OSH_NEIGHBOUR_URLS:?set OSH_NEIGHBOUR_URLS (comma-separated URLs of other applications behind the ingress gateway): this script does not change a shared ingress gateway without watching its other applications}"
+	need OSH_NEIGHBOUR_URLS "set OSH_NEIGHBOUR_URLS (comma-separated URLs of other applications behind the ingress gateway): this script does not change a shared ingress gateway without watching its other applications"
+	require_neighbours
 fi
 RELEASE=${OSH_RELEASE:-ods}
 NS=${OSH_NAMESPACE:-openshell-system}
@@ -111,8 +168,6 @@ HOST="openshell.${OSH_DOMAIN}"
 SANDBOX=rac-web
 ROOT=$(git rev-parse --show-toplevel)
 CHART="$ROOT/deploy/helm/openshell-driver-kyma"
-WORK=$(mktemp -d)
-trap 'rm -rf "$WORK"' EXIT
 
 results=()
 failed=0
@@ -133,6 +188,7 @@ cidrs_json=$(python3 -c 'import json,sys; print(json.dumps([c.strip() for c in s
 AUDIENCE=${OSH_OIDC_AUDIENCE:-$OSH_OIDC_CLIENT_ID}
 helm_args=(--set gatewayIngress.enabled=true
 	--set "gatewayIngress.domain=$OSH_DOMAIN"
+	--set "gatewayIngress.policyAction=$OSH_POLICY_ACTION"
 	--set gatewayIngress.serviceHosts.enabled=true
 	--set-json "gatewayIngress.allowedCidrs=$cidrs_json"
 	--set gateway.tls.enabled=true
@@ -145,9 +201,6 @@ if [[ -n ${OSH_HOOK_CLIENT_ID:-} ]]; then
 fi
 if [[ ${OSH_AUTH_ONLY:-} == 1 ]]; then
 	helm_args+=(--set gateway.oidc.authOnly=true)
-fi
-if [[ -n ${OSH_POLICY_ACTION:-} ]]; then
-	helm_args+=(--set "gatewayIngress.policyAction=$OSH_POLICY_ACTION")
 fi
 values_args=(-f "$OSH_VALUES")
 extra_values=()
@@ -196,32 +249,70 @@ secret_of() { sed -n "s/^ *- --$1-secret-name=//p" <<<"$pki_hook" | head -1; }
 server_secret=$(secret_of server)
 client_secret=$(secret_of client)
 jwt_secret=$(secret_of jwt)
-# The subject alternative names of the gateway's server certificate, or nothing.
-server_sans() {
+# The gateway's server certificate as text, or nothing when it cannot be read.
+server_certificate() {
 	kubectl -n "$NS" get secret "$server_secret" -o jsonpath='{.data.tls\.crt}' 2>/dev/null \
-		| base64 --decode 2>/dev/null | openssl x509 -noout -ext subjectAltName 2>/dev/null || true
+		| base64 --decode 2>/dev/null | openssl x509 -noout -text 2>/dev/null || true
 }
 
 if [[ ${OSH_SKIP_INSTALL:-} != 1 ]]; then
-	log "PKI"
-	if kubectl -n "$NS" get secret "$server_secret" -o name >/dev/null 2>&1 \
-		&& ! grep -q "DNS:$service" <<<"$(server_sans)"; then
-		if [[ ${OSH_REGENERATE_PKI:-} == 1 ]]; then
-			check "PKI Secrets deleted; the upgrade creates them again, for the release's Service names" \
-				kubectl -n "$NS" delete secret --ignore-not-found "$server_secret" "$client_secret" "$jwt_secret"
-		else
-			fail "the gateway's certificate is from before 0.10.0 and does not name $service, so no client could verify it. Re-run with OSH_REGENERATE_PKI=1: it deletes $server_secret, $client_secret and $jwt_secret, and existing sandboxes must be recreated"
-			finish
-		fi
-	else
-		pass "the gateway's certificate names the release's Service, or the upgrade creates it"
+	# Everything that can refuse the run comes before anything that changes the cluster.
+	log "the way back"
+	latest=$(helm -n "$NS" history "$RELEASE" -o json 2>/dev/null \
+		| python3 -c 'import json, sys; last = json.load(sys.stdin)[-1]; print(last["revision"], last["status"])' 2>/dev/null || true)
+	revision=${latest%% *}
+	if [[ -z $latest ]]; then
+		fail "cannot read the history of release $RELEASE (helm -n $NS history $RELEASE): without it there is no revision to roll back to"
+		finish
 	fi
+	if [[ ${latest#* } != deployed ]]; then
+		fail "the latest revision of $RELEASE ($revision) is ${latest#* }, not deployed: a rollback would return to it. Bring the release to a deployed revision first (helm -n $NS rollback $RELEASE <revision>)"
+		finish
+	fi
+	pass "revision $revision is deployed: the way back"
 
-	revision=$(helm -n "$NS" history "$RELEASE" --max 1 -o json \
-		| python3 -c 'import json, sys; print(json.load(sys.stdin)[-1]["revision"])')
 	log "neighbours before the upgrade"
 	baseline=$(probe_neighbours)
 	printf '%s\n' "$baseline" | mask
+	if [[ -n $(unreachable "$baseline") ]]; then
+		fail "a neighbour cannot be reached, so it cannot be watched: $(unreachable "$baseline" | tr '\n' ' ')"
+		finish
+	fi
+	if awk '$1 != "no-token" && ($2 == 401 || $2 == 403)' <<<"$baseline" | grep -q .; then
+		echo "note: a neighbour already refuses a Bearer probe. A change there shows only if the ingress gateway's own refusal replaces the application's; a URL that answers all three probes alike is a better watch."
+	fi
+
+	if [[ $OSH_POLICY_ACTION == DENY ]]; then
+		log "DENY policies and the ingress gateway's other servers"
+		rc=0
+		servers=$("$ROOT/scripts/ingress-non-http-servers.sh" 2>&1) || rc=$?
+		if [[ $rc != 0 ]]; then
+			fail "OSH_POLICY_ACTION=DENY cannot be used on this ingress gateway: Istio applies a DENY policy to servers that are not HTTP without its host condition, so every connection to them from outside OSH_ALLOWED_CIDRS would be refused: $(tr '\n' ';' <<<"$servers")"
+			finish
+		fi
+		pass "the ingress gateway has only HTTP servers, which a DENY policy matches by host"
+	fi
+
+	log "PKI"
+	if kubectl -n "$NS" get secret "$server_secret" -o name >/dev/null 2>&1; then
+		certificate=$(server_certificate)
+		if [[ -z $certificate ]]; then
+			fail "cannot read the gateway's certificate in $server_secret (kubectl, base64 or openssl failed): not touching the PKI"
+			finish
+		elif grep -q "DNS:$service" <<<"$certificate"; then
+			pass "the gateway's certificate names the release's Service"
+		elif [[ ${OSH_REGENERATE_PKI:-} != 1 ]]; then
+			fail "the gateway's certificate is from before 0.10.0 and does not name $service, so no client could verify it. Re-run with OSH_REGENERATE_PKI=1: it deletes $server_secret, $client_secret and $jwt_secret, and existing sandboxes must be recreated"
+			finish
+		elif kubectl -n "$NS" delete secret --ignore-not-found "$server_secret" "$client_secret" "$jwt_secret"; then
+			pass "PKI Secrets deleted; the upgrade creates them again, for the release's Service names"
+		else
+			fail "could not delete the PKI Secrets $server_secret, $client_secret and $jwt_secret: the release is unchanged"
+			finish
+		fi
+	else
+		pass "the release has no PKI yet: the upgrade creates it"
+	fi
 
 	log "upgrading $RELEASE with gatewayIngress (revision $revision is the way back)"
 	helm upgrade "$RELEASE" "$CHART" -n "$NS" "${values_args[@]}" ${extra_values[@]+"${extra_values[@]}"} \
@@ -229,17 +320,18 @@ if [[ ${OSH_SKIP_INSTALL:-} != 1 ]]; then
 	helm_pid=$!
 	helm_rc=0
 	broken=0
-	while kill -0 "$helm_pid" 2>/dev/null; do
-		sleep "${OSH_PROBE_INTERVAL_SECONDS:-10}"
+	ended=0
+	# A probe round at once, one every interval while the upgrade runs, and one more after
+	# it has ended: what the upgrade applied last is watched too.
+	while :; do
+		kill -0 "$helm_pid" 2>/dev/null || ended=1
 		if neighbours_differ "$baseline"; then
 			broken=1
 			break
 		fi
+		[[ $ended == 0 ]] || break
+		sleep "${OSH_PROBE_INTERVAL_SECONDS:-10}"
 	done
-	if [[ $broken == 0 ]]; then
-		wait "$helm_pid" || helm_rc=$?
-		if neighbours_differ "$baseline"; then broken=1; fi
-	fi
 	if [[ $broken == 1 ]]; then
 		kill "$helm_pid" 2>/dev/null || true
 		wait "$helm_pid" 2>/dev/null || true
@@ -253,6 +345,7 @@ if [[ ${OSH_SKIP_INSTALL:-} != 1 ]]; then
 		fi
 		finish
 	fi
+	wait "$helm_pid" || helm_rc=$?
 	pass "$(wc -l <<<"$baseline" | tr -d ' ') neighbour probes unchanged by the upgrade"
 	if [[ $helm_rc == 0 ]]; then
 		pass "helm upgrade with gatewayIngress${provider:+ (the provider hook ran)}"
@@ -276,7 +369,7 @@ check "no RequestAuthentication of this release on the ingress gateway (found $l
 args=$(kubectl -n "$NS" get deploy "$fullname" -o jsonpath='{.spec.template.spec.containers[?(@.name=="gateway")].args}')
 check "the gateway serves TLS (--tls-cert, no --disable-tls)" \
 	test "$(grep -c -- '--tls-cert' <<<"$args")$(grep -c -- '--disable-tls' <<<"$args")" = 10
-check "the gateway's certificate names $service" grep -q "DNS:$service" <<<"$(server_sans)"
+check "the gateway's certificate names $service" grep -q "DNS:$service" <<<"$(server_certificate)"
 chart_ca=$(kubectl -n "$NS" get secret "$server_secret" -o jsonpath='{.data.ca\.crt}' 2>/dev/null || true)
 ingress_ca=$(kubectl -n istio-system get secret "$ca_secret" -o jsonpath='{.data.ca\.crt}' 2>/dev/null || true)
 check "istio-system/$ca_secret holds the chart CA" test -n "$chart_ca" -a "$chart_ca" = "$ingress_ca"
@@ -318,6 +411,13 @@ check "service expose prints https://default--$SANDBOX.<domain>/ (printed: $url)
 body=$(curl -s -m 20 "https://default--$SANDBOX.$OSH_DOMAIN/" || true)
 check "https://default--$SANDBOX.<domain>/ serves the sandbox's directory listing" \
 	grep -q "Directory listing for /" <<<"$body"
+# The source-address fence is the only protection of a service URL, and it compares the
+# client address the ingress gateway believes. If the gateway believed a client's own
+# X-Forwarded-For header, this request would be refused as coming from 198.51.100.1, and
+# any client could claim an allowed address the same way.
+code=$(http_code -H 'x-forwarded-for: 198.51.100.1' "https://default--$SANDBOX.$OSH_DOMAIN/")
+check "the ingress gateway does not take the client address from a client's X-Forwarded-For header (HTTP $code, want 200)" \
+	test "$code" = 200
 code=$(http_code "https://default--no-such-sandbox.$OSH_DOMAIN/")
 check "an unknown sandbox host is answered by the gateway, not by a sandbox (HTTP $code, want 404 or 503)" \
 	test "$code" = 404 -o "$code" = 503

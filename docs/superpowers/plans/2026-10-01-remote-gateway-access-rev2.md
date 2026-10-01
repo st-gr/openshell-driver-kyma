@@ -3100,10 +3100,11 @@ helm -n openshell-system list                                   # the release an
 kubectl -n keycloak get deploy,pods                             # the test identity provider is up
 kubectl -n istio-system get requestauthentication               # none of this release
 openshell --gateway <port-forward gateway> sandbox list         # sandboxes that will have to be recreated
+scripts/ingress-non-http-servers.sh                             # TCP / TLS-passthrough servers on the ingress gateway: none expected
 OSH_PROBE_ONLY=1 OSH_NEIGHBOUR_URLS=<url>,<url>,<url> scripts/remote-access-check.sh | tee "$HOME/.cache/neighbours.before"
 ```
 
-Expected: one probe line per neighbour and kind, each with the status the application gives today. Show them to the user. The neighbour list has one URL per other application behind the ingress gateway; an endpoint that takes an API key or a session is the useful one.
+Expected: one probe line per neighbour and kind, each with the status the application gives today and `-` as origin. Show them to the user. The neighbour list has one URL per other application behind the ingress gateway. Choose URLs that answer all three probes the same way with a 2xx or 3xx (a login page, a public config endpoint): on a URL that already answers 401 or 403 to a Bearer probe a change shows only through the origin column, and a URL that cannot be reached is refused. (Corrected after the whole-branch review, which also added: `scripts/ingress-non-http-servers.sh` must print nothing here, and Step 4 passes `OSH_POLICY_ACTION` explicitly.)
 
 - [ ] **Step 4 [approval]: Run the live check**
 
@@ -3128,6 +3129,7 @@ PASS  no RequestAuthentication of this release on the ingress gateway (found 0)
 PASS  istio-system/<…>-gateway-ca holds the chart CA
 PASS  a gRPC call without a bearer is refused by the gateway (grpc-status 16, want 16)
 PASS  service expose prints https://default--rac-web.<domain>/ (printed: …)
+PASS  the ingress gateway does not take the client address from a client's X-Forwarded-For header (HTTP 200, want 200)
 PASS  provider <name> is registered: the hook's login worked and it trusted the chart CA
 PASS  an exec stream idle for 400 s survives
 PASS  the neighbours answer as before the run

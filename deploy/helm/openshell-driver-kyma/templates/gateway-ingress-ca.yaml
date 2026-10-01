@@ -7,7 +7,8 @@
 # reads a DestinationRule's credentialName from (gateway-destinationrule.yaml).
 #
 # The chart renders the Secret without data and the Job below writes ca.crt into it
-# after every install and upgrade: the CA is created by the PKI hook
+# after every install, upgrade and rollback (a rollback to a revision with remote
+# access from one without recreates the Secret empty): the CA is created by the PKI hook
 # (gateway-jwt-pki-hook.yaml) and does not exist when the chart is rendered. Helm
 # owns the Secret, so `helm uninstall` removes it, and leaves the Job's data alone
 # on upgrades because the manifest names none. Until the Job has run on a first
@@ -29,7 +30,7 @@ metadata:
   labels:
     {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
   annotations:
-    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook: post-install,post-upgrade,post-rollback
     helm.sh/hook-weight: "-7"
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
 ---
@@ -42,7 +43,7 @@ metadata:
   labels:
     {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
   annotations:
-    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook: post-install,post-upgrade,post-rollback
     helm.sh/hook-weight: "-7"
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
 rules:
@@ -59,7 +60,7 @@ metadata:
   labels:
     {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
   annotations:
-    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook: post-install,post-upgrade,post-rollback
     helm.sh/hook-weight: "-7"
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
 roleRef:
@@ -79,7 +80,7 @@ metadata:
   labels:
     {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
   annotations:
-    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook: post-install,post-upgrade,post-rollback
     helm.sh/hook-weight: "-6"
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
 spec:

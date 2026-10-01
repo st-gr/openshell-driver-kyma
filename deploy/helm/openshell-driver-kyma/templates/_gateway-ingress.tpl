@@ -32,6 +32,38 @@ certificate. The ingress gateway verifies the gateway pod's certificate against 
 {{- end -}}
 
 {{/*
+The servers of Istio Gateways on the ingress gateway that are not HTTP: TCP, TLS,
+and HTTPS in passthrough mode. Takes a dict with `gateways` (Gateway objects) and
+`selector` (gatewayIngress.ingressSelector); a Gateway whose selector names another
+value for one of the selector's labels belongs to another gateway deployment and is
+skipped. Returns one line per server; scripts/ingress-non-http-servers.sh prints
+the same lines from kubectl.
+*/}}
+{{- define "openshell-driver-kyma.nonHttpIngressServers" -}}
+{{- $selector := .selector -}}
+{{- $found := list -}}
+{{- range $gateway := .gateways -}}
+{{- $ours := true -}}
+{{- range $key, $value := (default (dict) $gateway.spec.selector) -}}
+{{- if and (hasKey $selector $key) (ne (toString (get $selector $key)) (toString $value)) -}}
+{{- $ours = false -}}
+{{- end -}}
+{{- end -}}
+{{- if $ours -}}
+{{- range $server := (default (list) $gateway.spec.servers) -}}
+{{- $port := default (dict) $server.port -}}
+{{- $protocol := upper (toString (default "" $port.protocol)) -}}
+{{- $mode := upper (toString (default "" (default (dict) $server.tls).mode)) -}}
+{{- if or (not (has $protocol (list "HTTP" "HTTPS" "HTTP2" "GRPC" "GRPC-WEB"))) (has $mode (list "PASSTHROUGH" "AUTO_PASSTHROUGH")) -}}
+{{- $found = append $found (printf "%s/%s port %v (%s%s)" $gateway.metadata.namespace $gateway.metadata.name $port.number $protocol (ternary (printf ", %s" $mode) "" (ne $mode ""))) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- join "\n" $found -}}
+{{- end -}}
+
+{{/*
 OIDC role settings upstream would refuse or that contradict each other. Upstream
 defaults --oidc-admin-role and --oidc-user-role to openshell-admin and
 openshell-user and rejects a gateway with exactly one of them empty
@@ -115,6 +147,19 @@ certificate, because the proxy has none to present. */ -}}
 {{- range $in.allowedCidrs -}}
 {{- if not (regexMatch "^(([0-9]{1,3}\\.){3}[0-9]{1,3}(/[0-9]{1,2})?|[0-9a-fA-F:]*:[0-9a-fA-F:]*(/[0-9]{1,3})?)$" (toString .)) -}}
 {{- fail (printf "gatewayIngress.allowedCidrs entry %q is not an IP address or CIDR block (for example 203.0.113.0/24)." (toString .)) -}}
+{{- end -}}
+{{- end -}}
+{{- /* A DENY rule is matched by host only on HTTP servers. For a TCP or TLS-passthrough
+server Istio builds the rule without its hosts (an HTTP-only field) and keeps the source
+addresses, so the fence would refuse every connection to that server from outside
+allowedCidrs, whatever application it belongs to. ALLOW rules with HTTP-only fields are
+skipped there. lookup returns nothing without a cluster (helm template); there the
+operator has to check, with scripts/ingress-non-http-servers.sh. */ -}}
+{{- if and (eq $in.policyAction "DENY") $in.allowedCidrs -}}
+{{- $gateways := (lookup "networking.istio.io/v1" "Gateway" "" "") -}}
+{{- $servers := include "openshell-driver-kyma.nonHttpIngressServers" (dict "gateways" (default (list) $gateways.items) "selector" $in.ingressSelector) -}}
+{{- if $servers -}}
+{{- fail (printf "gatewayIngress.policyAction=DENY with gatewayIngress.allowedCidrs cannot be installed on this ingress gateway. It has servers that are not HTTP, and Istio applies a DENY policy to those without its host condition: every connection to them from outside allowedCidrs would be refused.\n%s\nUse policyAction=ALLOW if the ingress gateway already allowlists per host; otherwise leave allowedCidrs and serviceHosts unset." $servers) -}}
 {{- end -}}
 {{- end -}}
 {{- if $in.serviceHosts.enabled -}}

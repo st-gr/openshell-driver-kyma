@@ -250,7 +250,8 @@ spec:
 # Keycloak's host on the ingress gateway is reachable from the listed addresses only: the
 # operator's, and the cluster's own (the OpenShell gateway and the provider hook reach the
 # issuer through the public host). DENY names only this host, so it is safe on a gateway
-# without ALLOW policies; ALLOW is for a gateway that already denies what nothing allows.
+# without ALLOW policies whose servers are all HTTP (checked before anything is created);
+# ALLOW is for a gateway that already denies what nothing allows.
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
 metadata:
@@ -277,6 +278,16 @@ YAML
 if [[ ${OSH_RENDER_ONLY:-} == 1 ]]; then
 	manifests
 	exit 0
+fi
+
+# The DENY policy below is matched by host only on HTTP servers. On a TCP or TLS-passthrough
+# server of the same ingress gateway Istio applies it without the host and would refuse every
+# connection from other addresses (scripts/ingress-non-http-servers.sh): nothing is created
+# on such a gateway.
+if [[ $ACTION == DENY ]]; then
+	rc=0
+	servers=$("$DIR/../../scripts/ingress-non-http-servers.sh" 2>&1) || rc=$?
+	[[ $rc == 0 ]] || die "OSH_POLICY_ACTION=DENY cannot be used on this ingress gateway: it would close its servers that are not HTTP to every source address but the listed ones: $servers"
 fi
 
 kubectl get namespace "$OSH_NS" >/dev/null 2>&1 \

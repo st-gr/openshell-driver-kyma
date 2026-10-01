@@ -56,6 +56,8 @@
 #      8b: in every render, nothing applies to the shared ingress gateway as a whole:
 #      no RequestAuthentication, and no AuthorizationPolicy rule without this
 #      release's hosts.
+#      8c: DENY policies with source addresses are refused on an ingress gateway that
+#      has TCP or TLS-passthrough servers, where Istio would apply them without the host.
 # Needs helm, python3 with PyYAML, and network access (for check 1).
 set -euo pipefail
 
@@ -330,6 +332,47 @@ try bad-8-client-ca 'gateway.tls.clientCa.enabled' t "${ingress_common[@]}" --se
 try bad-8-no-ca-hook-image 'gatewayIngress.caHook.image' t "${ingress_common[@]}" --set gatewayIngress.caHook.image=
 # A server TLS Secret under the operator's own name is the one the CA is copied from.
 try good-8-pki-names '' t "${ingress_common[@]}" --set gateway.sandboxJwt.serverTlsSecretName=own-server-tls
+
+# 8c. A DENY rule is matched by host only on HTTP servers. For a TCP or TLS-passthrough
+# server of the same ingress gateway Istio builds the rule without its hosts (an HTTP-only
+# field) and keeps the source addresses: every connection to that server from outside
+# allowedCidrs would be refused, whatever application it belongs to. So with DENY and
+# allowedCidrs the chart reads the cluster's Gateways and refuses when one on this ingress
+# gateway has such a server. `lookup` returns nothing in `helm template`: these renders use
+# a copy of the chart in which the lookup is replaced by the value probeGateways.
+probe_chart="$WORK/chart-probe"
+cp -R "$CHART" "$probe_chart"
+python3 - "$probe_chart/templates/_gateway-ingress.tpl" <<'PROBE'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+lookup = '(lookup "networking.istio.io/v1" "Gateway" "" "")'
+if text.count(lookup) != 1:
+    sys.exit("CHART_RENDER_FAIL: _gateway-ingress.tpl must read the cluster's Gateways with "
+             f"{lookup} exactly once, found {text.count(lookup)}")
+path.write_text(text.replace(lookup, '(dict "items" .Values.probeGateways)'))
+PROBE
+probe_try() { # NAME EXPECT [helm args...]: like try, on the chart copy, with remote access on
+	local name=$1 expect=$2 rc=0
+	shift 2
+	helm template t "$probe_chart" --set gateway.enabled=true --set gateway.sandboxJwt.enabled=true \
+		--set gatewayService.enabled=true "${ingress_common[@]}" "$@" >"$WORK/$name.yaml" 2>"$WORK/$name.err" || rc=$?
+	printf '%s' "$rc" >"$WORK/$name.rc"
+	printf '%s' "$expect" >"$WORK/$name.expect"
+}
+# The Kyma gateway (HTTPS and HTTP), and a Gateway of another gateway deployment.
+gateways_http='{"metadata":{"namespace":"kyma-system","name":"kyma-gateway"},"spec":{"selector":{"istio":"ingressgateway","app":"istio-ingressgateway"},"servers":[{"port":{"number":443,"protocol":"HTTPS"},"tls":{"mode":"SIMPLE"}},{"port":{"number":80,"protocol":"HTTP"}}]}},{"metadata":{"namespace":"mesh","name":"eastwest"},"spec":{"selector":{"istio":"eastwestgateway"},"servers":[{"port":{"number":15443,"protocol":"TLS"},"tls":{"mode":"AUTO_PASSTHROUGH"}}]}}'
+# ...and two more on this ingress gateway: a TCP server and a TLS-passthrough one.
+gateways_tcp='{"metadata":{"namespace":"apps","name":"db-gateway"},"spec":{"selector":{"istio":"ingressgateway"},"servers":[{"port":{"number":5432,"protocol":"TCP"}}]}},{"metadata":{"namespace":"apps","name":"passthrough"},"spec":{"selector":{"istio":"ingressgateway"},"servers":[{"port":{"number":443,"protocol":"HTTPS"},"tls":{"mode":"PASSTHROUGH"}}]}}'
+probe_cidrs=(--set-json 'gatewayIngress.allowedCidrs=["203.0.113.0/24"]')
+probe_try bad-8c-deny-tcp 'apps/db-gateway port 5432 (TCP)' "${probe_cidrs[@]}" \
+	--set-json "probeGateways=[$gateways_http,$gateways_tcp]"
+probe_try good-8c-deny-http '' "${probe_cidrs[@]}" --set-json "probeGateways=[$gateways_http]"
+# ALLOW rules with HTTP-only fields are skipped on such servers, and without allowedCidrs
+# DENY renders no source-address rule.
+probe_try good-8c-allow-tcp '' "${probe_cidrs[@]}" --set gatewayIngress.policyAction=ALLOW \
+	--set-json "probeGateways=[$gateways_http,$gateways_tcp]"
+probe_try good-8c-deny-no-cidrs '' --set-json "probeGateways=[$gateways_http,$gateways_tcp]"
 try bad-8-services-no-cidrs 'gatewayIngress.allowedCidrs' t "${ingress_common[@]}" \
 	--set gatewayIngress.serviceHosts.enabled=true
 try bad-8-cidr 'office' t "${ingress_common[@]}" --set-json 'gatewayIngress.allowedCidrs=["office"]'
@@ -1270,9 +1313,11 @@ def check_ca(name, release_ns, fullname, server_secret=None):
     job = one("Job", release_ns, hook)
     for d in (account, role, binding, job):
         hooks = ((d or {}).get("metadata", {}).get("annotations") or {}).get("helm.sh/hook")
-        if d and hooks != "post-install,post-upgrade":
+        # post-rollback too: a rollback to a revision with remote access from one without
+        # recreates the Secret empty, and only this Job fills it.
+        if d and hooks != "post-install,post-upgrade,post-rollback":
             failures.append(f"{name}: {d['kind']} {d['metadata']['name']} has helm.sh/hook {hooks!r}, "
-                            "want post-install,post-upgrade")
+                            "want post-install,post-upgrade,post-rollback")
     if not job:
         return
     pod = job["spec"]["template"]["spec"]
@@ -1382,6 +1427,18 @@ for path in sorted(work.glob("*.yaml")):
             if not hosts or any(h.startswith("*") for h in hosts):
                 failures.append(f"{where}: a rule matches hosts {hosts}; every rule must name this release's "
                                 "hosts, and a suffix wildcard covers other applications")
+
+# 8c. The refusal names every server that is not HTTP on this ingress gateway, and no other.
+if (work / "bad-8c-deny-tcp.err").exists():
+    refusal = (work / "bad-8c-deny-tcp.err").read_text()
+    for server, named in (("apps/db-gateway port 5432 (TCP)", True),
+                          ("apps/passthrough port 443 (HTTPS, PASSTHROUGH)", True),
+                          ("kyma-gateway", False), ("eastwest", False)):
+        if (server in refusal) != named:
+            failures.append(f"bad-8c-deny-tcp: the refusal {'does not name' if named else 'names'} {server}: "
+                            + first_line(refusal))
+for name in ("good-8c-deny-http", "good-8c-allow-tcp", "good-8c-deny-no-cidrs"):
+    rendered(name)
 
 # The provider hook under OIDC: it registers the gateway once with the client-credentials
 # grant and then addresses it by name. --gateway-endpoint bypasses the registered gateway

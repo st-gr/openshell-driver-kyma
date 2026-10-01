@@ -310,9 +310,23 @@ kubectl -n istio-system get authorizationpolicies
 - **No policy with action ALLOW selects the ingress gateway** (a stock Kyma
   cluster): Istio lets every request through. Keep `policyAction: DENY`. The
   chart writes DENY policies that name only its own hosts, and every other
-  application behind the gateway is left alone. `ALLOW` here would be an
+  HTTP application behind the gateway is left alone. `ALLOW` here would be an
   outage: the gateway would start denying every host no policy allows, which
   is every other application.
+
+  DENY has one limit. Istio matches a DENY rule by host only on HTTP servers.
+  If the ingress gateway also has a TCP or TLS-passthrough server, it applies
+  the rule there without the host, and with `allowedCidrs` every connection to
+  that server from another address would be refused. Look for one before you
+  install (`protocol: TCP` or `TLS`, or `tls.mode: PASSTHROUGH`):
+
+  ```bash
+  kubectl get gateways.networking.istio.io -A -o yaml | grep -E 'protocol:|mode:'
+  ```
+
+  The chart makes the same check at install time and refuses DENY with
+  `allowedCidrs` on such a gateway. There, publish the gateway without
+  `allowedCidrs` and `serviceHosts`.
 - **The ingress gateway already has ALLOW policies** (it allowlists per host):
   Istio denies whatever no policy allows, so this chart's hosts answer
   `403 RBAC: access denied` until you set `policyAction: ALLOW`, which adds
@@ -323,6 +337,13 @@ hosts are reached only from `allowedCidrs`, and so is the gateway host when
 `allowedCidrs` is set. Without `allowedCidrs` the gateway host is open to every
 address (under DENY the chart then writes no policy for it), and the gateway's
 own token check is the only gate.
+
+The fence compares the client address the ingress gateway sees. Know where
+that address comes from on your cluster: if the mesh is configured to trust
+forwarding hops (`numTrustedProxies`) and nothing in front of the ingress
+gateway rewrites `X-Forwarded-For`, a client can claim an allowed address in
+that header. Test it from an allowed address: a request to a service URL with
+`-H 'X-Forwarded-For: 198.51.100.1'` must still be answered, not refused.
 
 ### 3b. Register the inference provider
 
@@ -484,8 +505,10 @@ Things to know:
 - Service hosts are published per workspace. Routes and policies match
   `<workspace>--*` for the workspaces in `gatewayIngress.serviceHosts.workspaces`
   (default `[default]`), never the whole domain, so no other host under the
-  domain is affected. A workspace that is not listed is not reachable from
-  outside: add it to the list and `helm upgrade`.
+  domain is affected, with one exception: a host of another application whose
+  name itself begins with `<workspace>--` is matched too. A workspace that is
+  not listed is not reachable from outside: add it to the list and
+  `helm upgrade`.
 - The fence is at the ingress gateway. A pod inside the cluster reaches a
   service URL through the gateway's Service without passing it, as it always
   could with the port-forward URLs.

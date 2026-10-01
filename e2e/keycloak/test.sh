@@ -42,6 +42,9 @@ case "$*" in
 	[[ ${STUB_NS_MISSING:-} == 1 ]] && exit 1
 	printf '%s' "${STUB_NS_LABEL:-}"
 	;;
+"get gateways.networking.istio.io -A -o json")
+	if [[ -n ${STUB_GATEWAYS:-} ]]; then printf '%s' "$STUB_GATEWAYS"; else printf '{"items":[]}'; fi
+	;;
 esac
 exit 0
 STUB
@@ -68,6 +71,31 @@ fi
 rc=$(stub own-delete OSH_DELETE=1 STUB_NS_LABEL=keycloak)
 if [[ $rc != 0 ]] || ! grep -q "^delete namespace keycloak" "$WORK/own-delete.log"; then
 	echo "KEYCLOAK_FIXTURE_FAIL: OSH_DELETE=1 (without OSH_DOMAIN) did not remove the fixture's own namespace (exit $rc)"
+	exit 1
+fi
+
+# Under DENY the fence on Keycloak's host would close TCP and TLS-passthrough servers of the
+# same ingress gateway to every other source address (Istio builds a DENY rule for them
+# without its host): deploy.sh refuses such a gateway before it creates anything. ALLOW
+# rules do not reach those servers.
+tcp_gateway='{"items":[{"metadata":{"namespace":"apps","name":"db-gateway"},"spec":{"selector":{"istio":"ingressgateway"},"servers":[{"port":{"number":5432,"protocol":"TCP"}}]}}]}'
+tcp_deploy() { # log-name [VAR=value...]: deploy.sh onto a gateway with a TCP server; prints its output
+	local log="$WORK/$1.log"
+	shift
+	: >"$log"
+	env PATH="$WORK/bin:$PATH" STUB_LOG="$log" STUB_NS_LABEL=keycloak STUB_GATEWAYS="$tcp_gateway" \
+		OSH_DOMAIN=example.org OSH_ALLOWED_CIDRS=203.0.113.0/24 OSH_CLUSTER_CIDRS=10.0.0.0/8 "$@" "$DIR/deploy.sh" 2>&1 || true
+}
+out=$(tcp_deploy tcp-deny)
+if ! grep -q 'apps/db-gateway port 5432 (TCP)' <<<"$out" || grep -qE "$mutating" "$WORK/tcp-deny.log"; then
+	echo "KEYCLOAK_FIXTURE_FAIL: under DENY, deploy.sh did not refuse an ingress gateway with a TCP server before changing anything:"
+	head -3 <<<"$out"
+	grep -E "$mutating" "$WORK/tcp-deny.log" | head -3
+	exit 1
+fi
+out=$(tcp_deploy tcp-allow OSH_POLICY_ACTION=ALLOW)
+if grep -q 'port 5432' <<<"$out"; then
+	echo "KEYCLOAK_FIXTURE_FAIL: under ALLOW, deploy.sh refused because of a TCP server, which ALLOW rules do not touch"
 	exit 1
 fi
 

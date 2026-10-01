@@ -17,6 +17,13 @@
 # deny every other application's hosts: there the chart writes DENY policies (the
 # default), which name only its own hosts. A gateway that already has ALLOW policies
 # denies whatever no policy allows: there the chart writes ALLOW policies for its hosts.
+#
+# Two limits of "its own hosts". A DENY rule is matched by host only on HTTP servers:
+# for a TCP or TLS-passthrough server of the same ingress gateway Istio builds the rule
+# without its hosts and keeps the source addresses, so the chart refuses DENY with
+# allowedCidrs when the cluster has such a server (_gateway-ingress.tpl). And
+# <workspace>--* is a prefix: it also matches another application's host whose name
+# begins with "<workspace>--".
 {{- if or $allow $in.allowedCidrs }}
 ---
 # The CLI host. With allowedCidrs, only those source addresses reach it; under ALLOW

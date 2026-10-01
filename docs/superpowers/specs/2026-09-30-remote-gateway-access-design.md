@@ -70,7 +70,7 @@ pod and validates its certificate.
 | D3 | With remote access the gateway serves TLS (`gateway.tls.enabled`) without client-certificate verification, on its usual port, and the ingress re-encrypts to it. | Upstream's default is TLS on. The gateway then reports `https://<host>:8080/` and the CLI, replacing the port with the endpoint's, prints `https://<host>/` (upstream unit-tests exactly this case). The ingress-to-pod hop is encrypted and the pod's certificate verified. |
 | D4 | The ingress validates the gateway's certificate against the chart's CA (`DestinationRule` `credentialName`), not `insecureSkipVerify`. | Parity with `backendTLSPolicy`. Cost: one Secret with a public CA certificate in the ingress namespace, kept current by a hook (§6.4). |
 | D5 | The PKI hook mints the server certificate with this release's Service names. | Today it passes no names, so the certificate carries only upstream's defaults (`openshell`, `openshell.openshell.svc…`; verified on the live install) and no in-cluster client can verify it. `gateway.tls.enabled` has therefore never worked in this chart. Upstream's chart passes its Service names the same way. |
-| D6 | `gatewayIngress.policyAction` (`DENY` default, `ALLOW` for a gateway that already allowlists) decides how the source-address fence is written. | Unchanged from revision 1 (W4). |
+| D6 | `gatewayIngress.policyAction` (`DENY` default, `ALLOW` for a gateway that already allowlists) decides how the source-address fence is written. DENY with `allowedCidrs` is refused on an ingress gateway that has TCP or TLS-passthrough servers. | Unchanged from revision 1 (W4). The refusal is from the review of this revision: Istio builds a DENY rule for a non-HTTP server without its hosts (an HTTP-only field) and keeps the source addresses, so the fence would refuse every connection to such a server from another address. ALLOW rules with HTTP-only fields are skipped there. |
 | D7 | Service hosts are published per workspace (`serviceHosts.workspaces`): routes and policies match `<workspace>--*`, behind `allowedCidrs`. | Unchanged from revision 1. Upstream's gateway runs only gRPC through its authenticators; requests to a service host go to the sandbox relay unauthenticated unless client certificates are required (source: `multiplex.rs`, `http.rs`; the live run of revision 1 served a token-less request). The source-address fence is therefore the only protection, and the chart refuses to publish service hosts without CIDRs. |
 | D8 | `gateway.oidc.authOnly` is explicit; `adminRole` and `userRole` are set together. | Unchanged: upstream defaults the roles to `openshell-admin` / `openshell-user`. |
 | D9 | The provider hook authenticates with the client-credentials grant and trusts the chart's CA. | Unchanged grant; new: the gateway speaks TLS inside the cluster too. |
@@ -207,8 +207,9 @@ No `RequestAuthentication`. No policy rule without `to.operation.hosts`.
   upstream's chart. It applies whenever the hook runs, with or without remote
   access.
 - CA for the ingress: the chart renders `Secret <ns>-<fullname>-gateway-ca` in
-  `ingressNamespace` **without data**, and a post-install/post-upgrade hook Job
-  writes `ca.crt` into it. The CA does not exist when the chart is rendered (the
+  `ingressNamespace` **without data**, and a post-install, post-upgrade and
+  post-rollback hook Job writes `ca.crt` into it (a rollback from a revision
+  without remote access recreates the Secret empty). The CA does not exist when the chart is rendered (the
   PKI hook creates it), and a manifest without data means Helm never overwrites
   what the Job wrote. Helm owns the Secret, so `helm uninstall` removes it. The
   Job mounts only `ca.crt` of the server-TLS Secret (it never sees the key and
@@ -243,7 +244,11 @@ domain, host, CIDR and workspace shapes; boolean types; non-empty
 `gatewayApirule.enabled`.
 
 New: `gatewayIngress.enabled` requires `gateway.tls.enabled=true`,
-`gateway.tls.clientCa.enabled=false` and a `gatewayIngress.caHook.image`.
+`gateway.tls.clientCa.enabled=false` and a `gatewayIngress.caHook.image`; and
+`policyAction: DENY` with `allowedCidrs` is refused when a Gateway on the ingress
+gateway has a server that is not HTTP. The chart reads the Gateways with `lookup`,
+which sees nothing in `helm template`; `scripts/ingress-non-http-servers.sh` makes
+the same check with kubectl, and the live check and the Keycloak fixture call it.
 
 ## 7. Migration
 
@@ -281,7 +286,14 @@ Keycloak (`e2e/keycloak`, upstream's development realm) is the verified provider
 ## 9. Security considerations
 
 - **Shared ingress.** W1 is the governing constraint: host-scoped objects only.
-  The render check enforces it on every render (§10.1).
+  The render check enforces it on every render (§10.1). Two limits, found in the
+  review of this revision: a DENY rule is host-scoped only on HTTP servers (D6:
+  refused where it would not be), and `<workspace>--*` is a prefix, so it also
+  matches another application's host whose name begins with `<workspace>--`.
+- **The source-address fence** compares the client address the ingress gateway
+  sees. Where the mesh trusts forwarding hops (`numTrustedProxies`) and nothing
+  in front rewrites `X-Forwarded-For`, a client can forge it. The live check
+  tests that with a forged header; the docs tell operators to.
 - **Who can reach what.** The gateway API: anyone who can reach the CLI host
   (optionally fenced by `allowedCidrs`), authenticated by the gateway. A published
   service URL: any source in `allowedCidrs`, not authenticated by the gateway
@@ -327,7 +339,15 @@ Runs only with the operator's explicit go-ahead. New against revision 1:
   stand-ins for helm and kubectl), and CI runs it.
 - **PKI.** The script does not upgrade a release whose gateway certificate lacks
   the Service name unless `OSH_REGENERATE_PKI=1` tells it to delete the three PKI
-  Secrets first (§7).
+  Secrets first (§7). A certificate it cannot read is never deleted.
+- **Nothing is changed that cannot be undone or watched** (from the review): the
+  release's latest revision must be a deployed one, which is the rollback target;
+  every neighbour must answer; the probes record, besides the status, whether an
+  answer is the ingress gateway's own refusal, so a 401 that moves from an
+  application to the ingress gateway shows; `OSH_POLICY_ACTION` is mandatory, and
+  under DENY the ingress gateway must have no server that is not HTTP.
+- A request to the service URL with a forged `X-Forwarded-For` must still be
+  served.
 - The printed service URL must be `https://default--<sandbox>.<domain>/` exactly.
 - A call without a token must be refused by the **gateway** (`grpc-status 16`).
 - Kept: sandbox create and exec through the ingress, the service URL serving the
