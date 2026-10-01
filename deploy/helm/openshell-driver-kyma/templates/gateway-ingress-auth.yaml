@@ -1,0 +1,86 @@
+{{- if .Values.gatewayIngress.enabled -}}
+{{- $prefix := include "openshell-driver-kyma.gatewayIngressPolicyPrefix" . -}}
+{{- $in := .Values.gatewayIngress -}}
+# Policies on the cluster's Istio ingress gateway, in its namespace. With any ALLOW
+# policy on that gateway Istio denies what no rule allows, so these are also what
+# lets the hosts through on a cluster that allowlists per host.
+#
+# The RequestAuthentication selects the whole ingress gateway: a request to any
+# host that carries an invalid token of this issuer is answered 401 there.
+# Requests without a token, or with another issuer's, are not affected.
+apiVersion: security.istio.io/v1
+kind: RequestAuthentication
+metadata:
+  name: {{ $prefix }}-openshell-jwt
+  namespace: {{ $in.ingressNamespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- toYaml $in.ingressSelector | nindent 6 }}
+  jwtRules:
+    - issuer: {{ .Values.gateway.oidc.issuer | quote }}
+      {{- with .Values.gateway.oidc.jwksUri }}
+      jwksUri: {{ . | quote }}
+      {{- end }}
+      audiences:
+        - {{ .Values.gateway.oidc.audience | quote }}
+      # The gateway validates the same token again.
+      forwardOriginalToken: true
+---
+# The CLI host: a valid token of the issuer and, when allowedCidrs is set, a
+# source address in it.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: {{ $prefix }}-openshell-cli
+  namespace: {{ $in.ingressNamespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- toYaml $in.ingressSelector | nindent 6 }}
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            requestPrincipals:
+              - {{ printf "%s/*" .Values.gateway.oidc.issuer | quote }}
+            {{- with $in.allowedCidrs }}
+            remoteIpBlocks:
+              {{- toYaml . | nindent 14 }}
+            {{- end }}
+      to:
+        - operation:
+            hosts:
+              - {{ include "openshell-driver-kyma.gatewayIngressHost" . | quote }}
+{{- if $in.serviceHosts.enabled }}
+---
+# Sandbox service hosts: browsers carry no token, so the source address is the
+# fence. Istio's hosts take only a prefix wildcard, so this admits allowedCidrs
+# to every host under the domain, not only to sandbox service hosts.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: {{ $prefix }}-openshell-services
+  namespace: {{ $in.ingressNamespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- toYaml $in.ingressSelector | nindent 6 }}
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            remoteIpBlocks:
+              {{- toYaml $in.allowedCidrs | nindent 14 }}
+      to:
+        - operation:
+            hosts:
+              - {{ printf "*.%s" $in.domain | quote }}
+{{- end }}
+{{- end }}

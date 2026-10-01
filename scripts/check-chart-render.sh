@@ -1068,6 +1068,82 @@ for name, want in OIDC_FLAGS.items():
         failures.append(f"{name}: gateway OIDC flags (roles claim, admin role, user role) are {got}, want {want}, "
                         f"with issuer {flag(args, '--oidc-issuer')} and audience {flag(args, '--oidc-audience')}")
 
+# The Istio objects. Routes live in the release namespace, policies on the ingress
+# gateway in its own namespace, named for the release namespace so releases never collide.
+INGRESS_KINDS = ("VirtualService", "RequestAuthentication", "AuthorizationPolicy")
+SELECTOR = {"matchLabels": {"istio": "ingressgateway"}}
+CIDRS = ["203.0.113.0/24", "2001:db8::/32"]
+SERVICE_HOST = (r"^[a-z0-9]+(-[a-z0-9]+)*--[a-z0-9]+(-[a-z0-9]+)*(--[a-z0-9]+(-[a-z0-9]+)*)?"
+                r"\.example\.org(:[0-9]+)?$")
+
+def ingress_objects(name):
+    return {(d["kind"], d["metadata"]["namespace"], d["metadata"]["name"]): d["spec"]
+            for d in docs(work / f"{name}.yaml") if d.get("kind") in INGRESS_KINDS}
+
+def route(service, port, match=None):
+    rule = {"route": [{"destination": {"host": service, "port": {"number": port}}}], "timeout": "0s"}
+    return [dict(match=[{"authority": {"regex": match}}], **rule) if match else rule]
+
+def expected_ingress(release_ns, fullname, host, issuer, cidrs, services, jwks=None):
+    service = f"{fullname}.{release_ns}.svc.cluster.local"
+    prefix = f"{release_ns}-{fullname}"
+    rule = {"issuer": issuer, "audiences": ["osh-client"], "forwardOriginalToken": True}
+    if jwks:
+        rule["jwksUri"] = jwks
+    source = {"requestPrincipals": [issuer + "/*"]}
+    if cidrs:
+        source["remoteIpBlocks"] = cidrs
+    want = {
+        ("VirtualService", release_ns, f"{fullname}-gateway"): {
+            "hosts": [host], "gateways": ["kyma-system/kyma-gateway"], "http": route(service, 8080)},
+        ("RequestAuthentication", "istio-system", f"{prefix}-openshell-jwt"): {
+            "selector": SELECTOR, "jwtRules": [rule]},
+        ("AuthorizationPolicy", "istio-system", f"{prefix}-openshell-cli"): {
+            "selector": SELECTOR, "action": "ALLOW",
+            "rules": [{"from": [{"source": source}], "to": [{"operation": {"hosts": [host]}}]}]},
+    }
+    if services:
+        want[("VirtualService", release_ns, f"{fullname}-sandbox-services")] = {
+            "hosts": ["*.example.org"], "gateways": ["kyma-system/kyma-gateway"],
+            "http": route(service, 80, SERVICE_HOST)}
+        want[("AuthorizationPolicy", "istio-system", f"{prefix}-openshell-services")] = {
+            "selector": SELECTOR, "action": "ALLOW",
+            "rules": [{"from": [{"source": {"remoteIpBlocks": cidrs}}],
+                       "to": [{"operation": {"hosts": ["*.example.org"]}}]}]}
+    return want
+
+T = ("default", "t-openshell-driver-kyma")   # helm template's namespace and the fullname of release t
+INGRESS_OBJECTS = {
+    "good-8-ingress": expected_ingress(*T, "openshell.example.org", "https://issuer.example", None, False),
+    "good-8-services": expected_ingress(*T, "openshell.example.org", "https://issuer.example", CIDRS, True),
+    "good-8-host": expected_ingress(*T, "osh.example.org", "https://issuer.example", None, False,
+                                    jwks="https://issuer.example/oauth2/certs"),
+    # The principal is the issuer verbatim plus "/*": Istio builds it as <iss>/<sub>.
+    "good-8-issuer-slash": expected_ingress(*T, "openshell.example.org", "https://issuer.example/", None, False),
+    "good-8-long-names": expected_ingress("a-rather-long-release-namespace-name", "prod-sandboxes-openshell-driver-kyma",
+                                          "openshell.example.org", "https://issuer.example", CIDRS, True),
+}
+for name, want in INGRESS_OBJECTS.items():
+    if not succeeded(name):
+        continue
+    got = ingress_objects(name)
+    for key in sorted(set(got) | set(want)):
+        if got.get(key) != want.get(key):
+            failures.append(f"{name}: {'/'.join(key)} is {got.get(key)}, want {want.get(key)}")
+# Nothing of it without gatewayIngress: not by default, and not with OIDC alone.
+for name in ("render-shared-true", "good-8-oidc-default-roles"):
+    stray = sorted("/".join(k) for k in ingress_objects(name))
+    if stray:
+        failures.append(f"{name}: gatewayIngress is off, but the chart rendered {stray}")
+# The service-host pattern admits exactly <workspace>--<sandbox>[--<service>].<domain>.
+service_host = re.compile(SERVICE_HOST)
+for host, want in (("default--web.example.org", True), ("team-a--my-app--admin.example.org:443", True),
+                   ("openshell.example.org", False), ("default--web.example.org.evil.test", False),
+                   ("default--web-example.org", False), ("a--b--c--d.example.org", False),
+                   ("-a--b.example.org", False), ("a--.example.org", False)):
+    if bool(service_host.fullmatch(host)) != want:
+        failures.append(f"the sandbox service host pattern {'rejects' if want else 'accepts'} {host!r}")
+
 if failures:
     print("CHART_RENDER_FAIL:")
     for f in failures:

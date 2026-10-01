@@ -1,0 +1,26 @@
+{{- if .Values.gatewayIngress.enabled -}}
+{{- include "openshell-driver-kyma.gatewayIngressGuards" . -}}
+# The CLI's route: gRPC with an OIDC bearer, through the cluster's Istio ingress
+# gateway to this release's gateway. gateway-ingress-auth.yaml holds the policies
+# that admit it.
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: {{ include "openshell-driver-kyma.fullname" . }}-gateway
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+spec:
+  hosts:
+    - {{ include "openshell-driver-kyma.gatewayIngressHost" . | quote }}
+  gateways:
+    - {{ .Values.gatewayIngress.istioGateway | quote }}
+  http:
+    - route:
+        - destination:
+            host: {{ include "openshell-driver-kyma.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local
+            port:
+              number: {{ .Values.gateway.grpcPort }}
+      # Streaming RPCs (WatchSandboxes, Exec, RelayStream) have no deadline.
+      timeout: 0s
+{{- end }}
