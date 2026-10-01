@@ -44,7 +44,12 @@ gateway TLS off need nothing.
   whole.** It creates no RequestAuthentication (on an ingress gateway one
   answers 401 to every other application's Bearer tokens), and every
   AuthorizationPolicy rule names this release's hosts. `allowedCidrs` is an
-  optional source-address fence for the gateway host.
+  optional source-address fence for the gateway host. It compares the address
+  of the connection the ingress gateway accepted (`gatewayIngress.sourceAddress:
+  connection`, Istio `ipBlocks`), which no request header can change;
+  `forwarded` compares the address taken from `X-Forwarded-For`
+  (`remoteIpBlocks`), for an ingress gateway behind an HTTP proxy, and is only
+  as good as the mesh's `numTrustedProxies`.
 - **`gatewayIngress.policyAction`** chooses how the policies are written:
   `DENY` (default) for an ingress gateway without ALLOW policies, naming only
   the chart's own hosts and leaving every other HTTP host alone; `ALLOW` for a

@@ -23,7 +23,9 @@ render() { # output-file [VAR=value...]
 }
 render "$WORK/manifests.yaml"
 render "$WORK/manifests-allow.yaml" OSH_POLICY_ACTION=ALLOW
-for bad in OSH_POLICY_ACTION=allow OSH_DOMAIN='*.example.org' OSH_ALLOWED_CIDRS=office; do
+render "$WORK/manifests-forwarded.yaml" OSH_SOURCE_ADDRESS=forwarded
+render "$WORK/manifests-allow-forwarded.yaml" OSH_POLICY_ACTION=ALLOW OSH_SOURCE_ADDRESS=forwarded
+for bad in OSH_POLICY_ACTION=allow OSH_DOMAIN='*.example.org' OSH_ALLOWED_CIDRS=office OSH_SOURCE_ADDRESS=xff; do
 	if render /dev/null "$bad" 2>/dev/null; then
 		echo "KEYCLOAK_FIXTURE_FAIL: deploy.sh accepted $bad"
 		exit 1
@@ -109,7 +111,8 @@ if ! grep -q "port: 8443" "$WORK/networkpolicy.yaml" || ! grep -q "istio: ingres
 	exit 1
 fi
 
-python3 - "$WORK/manifests.yaml" "$DIR/realm.json" "$WORK/manifests-allow.yaml" <<'PY'
+python3 - "$WORK/manifests.yaml" "$DIR/realm.json" "$WORK/manifests-allow.yaml" "$WORK/manifests-forwarded.yaml" \
+	"$WORK/manifests-allow-forwarded.yaml" <<'PY'
 import json, re, sys, yaml
 docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
 realm = json.load(open(sys.argv[2]))
@@ -153,14 +156,17 @@ def policy_of(documents):
     found = [d for d in documents if d["kind"] == "AuthorizationPolicy"]
     return found[0] if len(found) == 1 else None
 BLOCKS = ["203.0.113.0/24", "2001:db8::/32", "10.96.0.0/13", "10.250.0.0/16"]
-allow_docs = [d for d in yaml.safe_load_all(open(sys.argv[3])) if d]
-for action, key, documents in (("DENY", "notRemoteIpBlocks", docs), ("ALLOW", "remoteIpBlocks", allow_docs)):
+# The fence compares the address of the connection the ingress gateway accepted (ipBlocks),
+# as the chart does by default; OSH_SOURCE_ADDRESS=forwarded compares the forwarded one.
+renders = [[d for d in yaml.safe_load_all(open(path)) if d] for path in sys.argv[3:6]]
+for action, key, documents in (("DENY", "notIpBlocks", docs), ("ALLOW", "ipBlocks", renders[0]),
+                               ("DENY", "notRemoteIpBlocks", renders[1]), ("ALLOW", "remoteIpBlocks", renders[2])):
     policy = policy_of(documents)
     want = {"selector": {"matchLabels": {"istio": "ingressgateway"}}, "action": action,
             "rules": [{"from": [{"source": {key: BLOCKS}}],
                        "to": [{"operation": {"hosts": ["keycloak.example.org", "keycloak.example.org:*"]}}]}]}
     if not policy or policy["spec"] != want or policy["metadata"]["namespace"] != "istio-system":
-        failures.append(f"with OSH_POLICY_ACTION={action} the AuthorizationPolicy is {policy and policy['spec']}, want {want} in istio-system")
+        failures.append(f"with OSH_POLICY_ACTION={action} ({key}) the AuthorizationPolicy is {policy and policy['spec']}, want {want} in istio-system")
 fence = one("NetworkPolicy")
 if fence:
     want = {"podSelector": {"matchLabels": {"app": "keycloak"}}, "policyTypes": ["Ingress"],

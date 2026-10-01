@@ -338,18 +338,27 @@ hosts are reached only from `allowedCidrs`, and so is the gateway host when
 address (under DENY the chart then writes no policy for it), and the gateway's
 own token check is the only gate.
 
-The fence compares the client address the ingress gateway sees. Know where
-that address comes from on your cluster: if the mesh is configured to trust
-forwarding hops (`numTrustedProxies`) and nothing in front of the ingress
-gateway rewrites `X-Forwarded-For`, a client can claim an allowed address in
-that header. Test it from an allowed address, on any URL behind a source-address
-allowlist: repeat the request with `-H 'X-Forwarded-For: 198.51.100.1'`, then
+**Which address the fence compares** is `gatewayIngress.sourceAddress`:
+
+- `connection` (the default): the address of the connection the ingress gateway
+  accepted. Behind a load balancer that keeps the client's address (the ingress
+  Service with `externalTrafficPolicy: Local`) it is the client's, and no
+  request header can change it. Where it is not the client's
+  (`externalTrafficPolicy: Cluster`, or an HTTP proxy in front), nobody matches
+  and the fence is closed to everyone, which you notice at once.
+- `forwarded`: the address Istio takes from `X-Forwarded-For`, for an ingress
+  gateway behind an HTTP proxy. It is only as good as the mesh's
+  `numTrustedProxies`. If the mesh trusts more forwarding hops than really
+  stand in front, a client can name an allowed address in that header and
+  pass, and nothing shows it.
+
+Before you rely on `forwarded`, test it from an allowed address against a
+fenced URL: repeat the request with `-H 'X-Forwarded-For: 198.51.100.1'`, then
 with two and with three comma-separated addresses in that header (a mesh that
 trusts N hops ignores a shorter header). Each must be answered like the plain
 request. If one is refused, the ingress gateway believed the header, and anyone
-can name an allowed address in it: do not rely on `allowedCidrs`, and do not
-publish service hosts, until the mesh's trusted hops match what really stands
-in front of the ingress gateway.
+can name an allowed address in it: do not publish service hosts that way until
+the mesh's trusted hops match what really stands in front.
 
 ### 3b. Register the inference provider
 

@@ -15,6 +15,10 @@
 #   OSH_POLICY_ACTION  DENY (default) for an ingress gateway without ALLOW policies, ALLOW
 #                      for one that already allowlists per host; as the chart's
 #                      gatewayIngress.policyAction, and for the same reason.
+#   OSH_SOURCE_ADDRESS connection (default): the allowlist compares the address of the
+#                      connection the ingress gateway accepted, which no header can change;
+#                      forwarded: the address Istio takes from X-Forwarded-For, for an ingress
+#                      gateway behind an HTTP proxy. As the chart's gatewayIngress.sourceAddress.
 #   OSH_CLUSTER_CIDRS  comma-separated in-cluster source ranges (pod and node networks).
 #                      The OpenShell gateway and the provider hook reach the issuer through
 #                      the same public host. Default: kube-system/shoot-info (Gardener).
@@ -68,6 +72,9 @@ fi
 ACTION=${OSH_POLICY_ACTION:-DENY}
 [[ $ACTION == DENY || $ACTION == ALLOW ]] \
 	|| die "OSH_POLICY_ACTION must be DENY (an ingress gateway without ALLOW policies) or ALLOW (one that already allowlists)"
+SOURCE=${OSH_SOURCE_ADDRESS:-connection}
+[[ $SOURCE == connection || $SOURCE == forwarded ]] \
+	|| die "OSH_SOURCE_ADDRESS must be connection (the accepted connection's address) or forwarded (the address from X-Forwarded-For)"
 domain_re='^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)+$'
 [[ $OSH_DOMAIN =~ $domain_re ]] || die "OSH_DOMAIN is not a lowercase DNS name (give the domain alone, without \"*.\")"
 # check_cidrs NAME LIST: every comma-separated entry is an address or CIDR block.
@@ -103,9 +110,13 @@ yaml_list() {
 }
 
 manifests() {
-	local realm_sum blocks=notRemoteIpBlocks
+	local realm_sum blocks=notIpBlocks
 	realm_sum=$(openssl dgst -sha256 -r "$DIR/realm.json" | cut -d' ' -f1)
-	[[ $ACTION == ALLOW ]] && blocks=remoteIpBlocks
+	[[ $ACTION == ALLOW ]] && blocks=ipBlocks
+	if [[ $SOURCE == forwarded ]]; then
+		blocks=notRemoteIpBlocks
+		[[ $ACTION == ALLOW ]] && blocks=remoteIpBlocks
+	fi
 	cat <<YAML
 apiVersion: apps/v1
 kind: Deployment

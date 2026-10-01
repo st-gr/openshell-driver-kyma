@@ -104,6 +104,9 @@ enables it would render cleanly and drop the gateway's public route. */ -}}
 {{- if not (has $in.policyAction (list "DENY" "ALLOW")) -}}
 {{- fail (printf "gatewayIngress.policyAction %q must be DENY or ALLOW: DENY for an ingress gateway without ALLOW AuthorizationPolicies (the default), ALLOW for one that already allowlists per host." (toString $in.policyAction)) -}}
 {{- end -}}
+{{- if not (has $in.sourceAddress (list "connection" "forwarded")) -}}
+{{- fail (printf "gatewayIngress.sourceAddress %q must be connection or forwarded: connection compares allowedCidrs with the address of the connection the ingress gateway accepted (the default), forwarded with the address Istio takes from X-Forwarded-For, for an ingress gateway behind an HTTP proxy." (toString $in.sourceAddress)) -}}
+{{- end -}}
 {{- /* The policies render into the ingress gateway's namespace, usually the mesh's
 root namespace, where a policy without a selector applies to every workload. */ -}}
 {{- if not (and (kindIs "map" $in.ingressSelector) $in.ingressSelector) -}}

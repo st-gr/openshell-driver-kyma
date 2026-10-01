@@ -3,6 +3,10 @@
 {{- $in := .Values.gatewayIngress -}}
 {{- $allow := eq $in.policyAction "ALLOW" -}}
 {{- $host := include "openshell-driver-kyma.gatewayIngressHost" . -}}
+{{- /* The source field of the fence: the address of the connection the ingress gateway
+accepted (ipBlocks), or the one Istio takes from X-Forwarded-For (remoteIpBlocks). */ -}}
+{{- $forwarded := eq $in.sourceAddress "forwarded" -}}
+{{- $blocks := ternary (ternary "remoteIpBlocks" "ipBlocks" $forwarded) (ternary "notRemoteIpBlocks" "notIpBlocks" $forwarded) $allow -}}
 # Source-address fences on the cluster's Istio ingress gateway, in its namespace.
 #
 # The ingress gateway is shared with every other application of the cluster, so
@@ -51,7 +55,7 @@ spec:
       {{- with $in.allowedCidrs }}
       from:
         - source:
-            {{ ternary "remoteIpBlocks" "notRemoteIpBlocks" $allow }}:
+            {{ $blocks }}:
               {{- toYaml . | nindent 14 }}
       {{- end }}
 {{- end }}
@@ -77,7 +81,7 @@ spec:
   rules:
     - from:
         - source:
-            {{ ternary "remoteIpBlocks" "notRemoteIpBlocks" $allow }}:
+            {{ $blocks }}:
               {{- toYaml $in.allowedCidrs | nindent 14 }}
       to:
         - operation:

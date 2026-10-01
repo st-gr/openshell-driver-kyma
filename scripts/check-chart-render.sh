@@ -391,6 +391,13 @@ try good-8-allow '' t "${ingress_common[@]}" --set gatewayIngress.policyAction=A
 try good-8-allow-services '' t "${ingress_common[@]}" "${ingress_services[@]}" --set gatewayIngress.policyAction=ALLOW \
 	--set-json 'gatewayIngress.serviceHosts.workspaces=["default","team-a"]'
 try bad-8-policy-action 'gatewayIngress.policyAction' t "${ingress_common[@]}" --set gatewayIngress.policyAction=allow
+# The fence compares the address of the connection the ingress gateway accepted (ipBlocks),
+# which no request header can change. sourceAddress=forwarded compares the address Istio
+# takes from X-Forwarded-For (remoteIpBlocks), for an ingress gateway behind an HTTP proxy.
+try good-8-forwarded '' t "${ingress_common[@]}" "${ingress_services[@]}" --set gatewayIngress.sourceAddress=forwarded
+try good-8-allow-forwarded '' t "${ingress_common[@]}" "${ingress_services[@]}" --set gatewayIngress.policyAction=ALLOW \
+	--set gatewayIngress.sourceAddress=forwarded
+try bad-8-source-address 'gatewayIngress.sourceAddress' t "${ingress_common[@]}" --set gatewayIngress.sourceAddress=xff
 try bad-8-workspaces-empty 'gatewayIngress.serviceHosts.workspaces' t "${ingress_common[@]}" "${ingress_services[@]}" \
 	--set-json 'gatewayIngress.serviceHosts.workspaces=[]'
 try bad-8-workspace-name 'Team_A' t "${ingress_common[@]}" "${ingress_services[@]}" \
@@ -1109,7 +1116,7 @@ if userinfo_err.exists() and "secretpw" in userinfo_err.read_text():
 # bad-* cases above); these renders must succeed, and the removed APIRule is gone.
 INGRESS_RENDERS = ("good-8-ingress", "good-8-services", "good-8-host",
                    "good-8-long-names", "good-8-rbac-roles", "good-8-oidc-default-roles",
-                   "good-8-allow", "good-8-allow-services")
+                   "good-8-allow", "good-8-allow-services", "good-8-forwarded", "good-8-allow-forwarded")
 for name in INGRESS_RENDERS:
     rendered(name)
 
@@ -1220,10 +1227,18 @@ def route(service, port, match=None):
     rule = {"route": [{"destination": {"host": service, "port": {"number": port}}}]}
     return [dict(match=[{"authority": {"regex": match}}], **rule) if match else rule]
 
-def expected_ingress(release_ns, fullname, host, cidrs, services, action="DENY", workspaces=("default",)):
+def expected_ingress(release_ns, fullname, host, cidrs, services, action="DENY", workspaces=("default",),
+                     forwarded=False):
     service = f"{fullname}.{release_ns}.svc.cluster.local"
     prefix = f"{release_ns}-{fullname}"
-    blocks = "remoteIpBlocks" if action == "ALLOW" else "notRemoteIpBlocks"
+    # By default the address of the connection the ingress gateway accepted (ipBlocks): it is
+    # the client's behind a load balancer that preserves it, and no header can change it. If it
+    # is not the client's, nobody matches and the fence is closed, which shows at once. The
+    # forwarded address (remoteIpBlocks) comes from X-Forwarded-For as far as the mesh trusts
+    # forwarding hops; a mesh that trusts hops nothing in front fills lets any client name an
+    # allowed address there, and the fence is open without a sign of it.
+    blocks = ("remoteIpBlocks" if forwarded else "ipBlocks") if action == "ALLOW" else (
+        "notRemoteIpBlocks" if forwarded else "notIpBlocks")
     want = {
         ("VirtualService", release_ns, f"{fullname}-gateway"): {
             "hosts": [host], "gateways": ["kyma-system/kyma-gateway"], "http": route(service, 8080)},
@@ -1264,6 +1279,9 @@ INGRESS_OBJECTS = {
     "good-8-allow": expected_ingress(*T, "openshell.example.org", None, False, action="ALLOW"),
     "good-8-allow-services": expected_ingress(*T, "openshell.example.org", CIDRS, True, action="ALLOW",
                                               workspaces=("default", "team-a")),
+    "good-8-forwarded": expected_ingress(*T, "openshell.example.org", CIDRS, True, forwarded=True),
+    "good-8-allow-forwarded": expected_ingress(*T, "openshell.example.org", CIDRS, True, action="ALLOW",
+                                               forwarded=True),
 }
 for name, want in INGRESS_OBJECTS.items():
     if not succeeded(name):

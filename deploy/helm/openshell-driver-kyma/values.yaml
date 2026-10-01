@@ -531,12 +531,23 @@ gatewayIngress:
   # this chart's hosts answer `403 RBAC: access denied` until you set ALLOW. Check with
   #   kubectl -n istio-system get authorizationpolicies
   policyAction: DENY
-  # Source addresses or CIDR blocks (Istio remoteIpBlocks). Optional fence for
-  # `host` (the gateway authenticates every call either way); required for
-  # serviceHosts. The fence compares the client address the ingress gateway
-  # sees: if your mesh takes it from an X-Forwarded-For header (numTrustedProxies)
-  # that a client can set, the fence can be bypassed.
+  # Source addresses or CIDR blocks. Optional fence for `host` (the gateway
+  # authenticates every call either way); required for serviceHosts.
   allowedCidrs: []
+  # Which address allowedCidrs is compared with.
+  #   connection  the address of the connection the ingress gateway accepted (Istio
+  #               ipBlocks). It is the client's behind a load balancer that keeps
+  #               it (a Kyma ingress Service with externalTrafficPolicy: Local), and
+  #               no request header can change it. Where it is not the client's
+  #               (externalTrafficPolicy: Cluster, or an HTTP proxy in front),
+  #               nobody matches and the fence is closed to everyone: you see it.
+  #   forwarded   the address Istio takes from X-Forwarded-For (remoteIpBlocks),
+  #               for an ingress gateway behind an HTTP proxy. Only as good as the
+  #               mesh's numTrustedProxies: if it trusts more hops than really
+  #               stand in front, any client can name an allowed address in that
+  #               header and pass, and nothing shows it. Test it before you rely
+  #               on it (docs/production-deployment.md).
+  sourceAddress: connection
   # Publish sandbox services (`openshell service expose`) at
   # https://<workspace>--<sandbox>[--<service>].<domain>/, the URL the CLI prints.
   # (API and SDK clients get the gateway's own value, which carries the port the

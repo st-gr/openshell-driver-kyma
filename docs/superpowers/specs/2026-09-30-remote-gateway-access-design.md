@@ -116,6 +116,7 @@ gatewayIngress:
     istio: ingressgateway
   policyAction: DENY              # DENY: gateway without ALLOW policies; ALLOW: one that already allowlists
   allowedCidrs: []                # source addresses; required for serviceHosts, optional for the CLI host
+  sourceAddress: connection       # connection: the accepted connection's address (ipBlocks); forwarded: from X-Forwarded-For (remoteIpBlocks)
   serviceHosts:
     enabled: false
     workspaces: [default]
@@ -290,10 +291,16 @@ Keycloak (`e2e/keycloak`, upstream's development realm) is the verified provider
   review of this revision: a DENY rule is host-scoped only on HTTP servers (D6:
   refused where it would not be), and `<workspace>--*` is a prefix, so it also
   matches another application's host whose name begins with `<workspace>--`.
-- **The source-address fence** compares the client address the ingress gateway
-  sees. Where the mesh trusts forwarding hops (`numTrustedProxies`) and nothing
-  in front rewrites `X-Forwarded-For`, a client can forge it. The live check
-  tests that with a forged header; the docs tell operators to.
+- **The source-address fence** compares, by default, the address of the
+  connection the ingress gateway accepted (`gatewayIngress.sourceAddress:
+  connection`, Istio `ipBlocks`/`notIpBlocks`): no header can change it, and
+  where it is not the client's the fence is closed to everyone, which shows.
+  `forwarded` (`remoteIpBlocks`/`notRemoteIpBlocks`) is for an ingress gateway
+  behind an HTTP proxy and is only as good as the mesh's `numTrustedProxies`:
+  where the mesh trusts hops that nothing in front fills, a client can name an
+  allowed address in `X-Forwarded-For`. That was the case on the test cluster
+  (found before the live run; the chart used `remoteIpBlocks` until then). The
+  live check tests it with forged headers of one to four entries.
 - **Who can reach what.** The gateway API: anyone who can reach the CLI host
   (optionally fenced by `allowedCidrs`), authenticated by the gateway. A published
   service URL: any source in `allowedCidrs`, not authenticated by the gateway
