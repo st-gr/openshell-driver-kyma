@@ -39,6 +39,15 @@ validate its signature, issuer and audience. You need:
 - **The issuer URL** → `gateway.oidc.issuer`, over HTTPS. Keep it reachable
   from the cluster (the gateway and the ingress gateway fetch its JWKS) and
   from your users' laptops (the CLI redirects to it on first auth).
+
+  If the issuer is published through **this cluster's own ingress gateway**,
+  the gateway pod reaches it on the ingress pod's container port (8443 for
+  Istio) wherever the CNI applies NetworkPolicy after DNAT (Calico does), and
+  the chart's policy for the pod allows 443 only. The gateway then fails at
+  startup with `OIDC discovery request failed`. Add the rule shown at
+  `networkPolicy.extraEgress` in `values.yaml`. The same goes for an ingress
+  allowlist: it must admit the cluster's own pod and node networks to the
+  issuer's host.
 - **A client secret**, only if you use `inferenceProvider`: the chart's
   provider hook authenticates with the client-credentials grant. If your
   provider wants a separate confidential client for that grant (Keycloak

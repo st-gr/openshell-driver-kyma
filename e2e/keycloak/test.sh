@@ -71,6 +71,16 @@ if [[ $rc != 0 ]] || ! grep -q "^delete namespace keycloak" "$WORK/own-delete.lo
 	exit 1
 fi
 
+# values.yaml of this directory: the chart's driver+gateway pod may reach an issuer that sits
+# behind the cluster's own ingress gateway (its container port, after DNAT).
+KUBECONFIG=/dev/null helm template t "$DIR/../../deploy/helm/openshell-driver-kyma" --set gateway.enabled=true \
+	--set gateway.sandboxJwt.enabled=true --set gatewayService.enabled=true -f "$DIR/values.yaml" \
+	--show-only templates/networkpolicy.yaml >"$WORK/networkpolicy.yaml"
+if ! grep -q "port: 8443" "$WORK/networkpolicy.yaml" || ! grep -q "istio: ingressgateway" "$WORK/networkpolicy.yaml"; then
+	echo "KEYCLOAK_FIXTURE_FAIL: values.yaml does not open the driver pod's egress to the ingress gateway's port 8443"
+	exit 1
+fi
+
 python3 - "$WORK/manifests.yaml" "$DIR/realm.json" "$WORK/manifests-allow.yaml" <<'PY'
 import json, re, sys, yaml
 docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]

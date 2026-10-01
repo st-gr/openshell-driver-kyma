@@ -39,6 +39,9 @@ below) before `helm upgrade`; the chart refuses a values file that still enables
   authentication-only mode (both roles passed empty; every authenticated
   identity is then a platform admin); `adminRole` and
   `userRole` must now be set together.
+- **`networkPolicy.extraEgress`**: extra egress rules for the driver+gateway
+  pod, for destinations that are not on 443 from the pod's point of view, such
+  as an OIDC issuer published through the cluster's own ingress gateway.
 - **`inferenceProvider` with OIDC**: the provider hook logs in with the
   client-credentials grant when `gateway.oidc.clientCredentialsSecret` names
   the client secret (and, for providers with a separate confidential client,

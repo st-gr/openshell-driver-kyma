@@ -41,6 +41,12 @@ and the command that reads the `dev` password. The script labels the namespace
 and the Secret it creates and refuses to deploy into, overwrite or delete
 anything it did not create. `OSH_DELETE=1` removes it all.
 
+An OpenShell release that uses this issuer also needs `values.yaml` of this
+directory (`-f e2e/keycloak/values.yaml`, or `OSH_EXTRA_VALUES` for the live
+check): the gateway reaches the issuer through the cluster's own ingress
+gateway, on its pod's port 8443, which the chart's NetworkPolicy does not allow
+by itself.
+
 ## Test
 
 ```bash

@@ -413,6 +413,12 @@ render_as t --set driver.otlpEndpoint=collector.example:4317 >"$WORK/rbac-otlp-n
 render_as t --set driver.otlpEndpoint=http://collector.example:4317 --set networkPolicy.enabled=false \
 	>"$WORK/rbac-otlp-no-netpol.yaml"
 render_as t --set gateway.enabled=false >"$WORK/rbac-shared-no-gateway.yaml"
+# Operator-supplied egress for the driver+gateway pod, appended to the chart's own rules:
+# for example an OIDC issuer published through this cluster's own ingress gateway, which a
+# CNI that applies policy after DNAT sees on the ingress pod's port, not on 443.
+render_as t --set-json 'networkPolicy.extraEgress=[{"to":[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"istio-system"}},"podSelector":{"matchLabels":{"istio":"ingressgateway"}}}],"ports":[{"protocol":"TCP","port":8443}]}]' \
+	>"$WORK/rbac-extra-egress.yaml"
+try bad-4-extra-egress-string 'networkPolicy.extraEgress' t --set networkPolicy.extraEgress=istio-system
 render_as t --set bedrockBridge.enabled=true --set bedrockBridge.sap.serviceKeySecret.name=sap-key \
 	--set bedrockBridge.singleDeploymentId=deployment >"$WORK/rbac-bedrock-bridge.yaml"
 # An inference provider, whose hook has a Role of its own that must not reach the driver.
@@ -695,6 +701,11 @@ MANAGED_SSH = {
 DRIVER_EGRESS = [{"ports": [{"port": 53, "protocol": "UDP"}, {"port": 53, "protocol": "TCP"}]},
                  {"ports": [{"port": 443, "protocol": "TCP"}]}]
 OTLP_PORT = {"good-all-options.yaml": 4317, "rbac-otlp-https.yaml": 443, "rbac-otlp-http.yaml": 80}
+# networkPolicy.extraEgress is appended as given (render -> rules).
+EXTRA_EGRESS = {"rbac-extra-egress.yaml": [
+    {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "istio-system"}},
+             "podSelector": {"matchLabels": {"istio": "ingressgateway"}}}],
+     "ports": [{"protocol": "TCP", "port": 8443}]}]}
 
 def ssh_restriction(release_namespace):
     return {"podSelector": {"matchLabels": {"openshell.ai/managed-by": "openshell"}},
@@ -738,7 +749,8 @@ for render in sorted(work.glob("r*.yaml")) + [work / "good-all-options.yaml"]:
     driver_policy = [d for d in policies if d["metadata"]["name"] == pod["metadata"]["name"] + "-driver"]
     if driver_policy:
         otlp = OTLP_PORT.get(render.name)
-        want_egress = DRIVER_EGRESS + ([{"ports": [{"port": otlp, "protocol": "TCP"}]}] if otlp else [])
+        want_egress = (DRIVER_EGRESS + ([{"ports": [{"port": otlp, "protocol": "TCP"}]}] if otlp else [])
+                       + EXTRA_EGRESS.get(render.name, []))
         if (driver_policy[0].get("spec") or {}).get("egress") != want_egress:
             failures.append(f"{render.name}: the driver pod's egress is {driver_policy[0]['spec'].get('egress')}, "
                             f"want {want_egress}")
@@ -860,6 +872,7 @@ EXPECTED = {
     "render-shared-false": (SHARED, SHARED_CLUSTER),
     "rbac-shared-no-netpol": (SHARED, SHARED_CLUSTER),
     "rbac-shared-no-gateway": (SHARED, SHARED_CLUSTER),                                    # an external gateway changes no RBAC
+    "rbac-extra-egress": (SHARED, SHARED_CLUSTER),                                         # a NetworkPolicy rule changes no RBAC
     "rbac-shared-secrets": (SHARED, SHARED_CLUSTER),                                       # shared mode stages no Secret
     "rbac-inference": (SHARED, SHARED_CLUSTER),                                            # the hook's own Role is bound to the hook
     # Managed SSH ingress is on by default with the in-pod gateway and networkPolicy.enabled.
@@ -1146,7 +1159,9 @@ def ingress_objects(name):
             for d in docs(work / f"{name}.yaml") if d.get("kind") in INGRESS_KINDS}
 
 def route(service, port, match=None):
-    rule = {"route": [{"destination": {"host": service, "port": {"number": port}}}], "timeout": "0s"}
+    # No timeout field: Istio's default is no timeout, which the streaming RPCs need, and its
+    # CRD validation rejects an explicit `0s` (live run on Kyma: "must be ... greater than 1ms").
+    rule = {"route": [{"destination": {"host": service, "port": {"number": port}}}]}
     return [dict(match=[{"authority": {"regex": match}}], **rule) if match else rule]
 
 def expected_ingress(release_ns, fullname, host, issuer, cidrs, services, jwks=None, action="DENY",

@@ -111,13 +111,15 @@ New, rendered only when `gatewayIngress.enabled`:
 
 - `gateway-virtualservice.yaml` — `VirtualService <fullname>-gateway` in the
   release namespace: `hosts: [<host>]`, `gateways: [<istioGateway>]`, one
-  `http` route to `<fullname>.<ns>.svc.cluster.local:<gateway.grpcPort>`,
-  `timeout: 0s` (streaming RPCs: `WatchSandboxes`, `Exec`, `RelayStream`).
+  `http` route to `<fullname>.<ns>.svc.cluster.local:<gateway.grpcPort>`, with no
+  `timeout` field: Istio's default is no timeout, which the streaming RPCs
+  (`WatchSandboxes`, `Exec`, `RelayStream`) need, and its validation rejects an
+  explicit `0s` (found in the live run).
 - `gateway-services-virtualservice.yaml` (when `serviceHosts.enabled`) —
   `VirtualService <fullname>-sandbox-services`: `hosts: ["*.<domain>"]`, same
   gateway, one `http` route with
   `match.authority.regex: ^(<listed workspaces, |-joined>)--[a-z0-9]+(-[a-z0-9]+)*(--[a-z0-9]+(-[a-z0-9]+)*)?\.<domain, dots escaped>(:[0-9]+)?$`
-  to the Service's `http-services` port (80) and `timeout: 0s`. Exact-host
+  to the Service's `http-services` port (80), again without a `timeout`. Exact-host
   VirtualServices of other apps keep precedence (Envoy matches exact domains
   before wildcards); non-matching `*.<domain>` hosts get Envoy's 404.
 - `gateway-ingress-auth.yaml` — in `gatewayIngress.ingressNamespace`, named
@@ -153,7 +155,11 @@ Changed:
   (80 → `targetPort: grpc`): under an `http-*` name Istio speaks HTTP/1.1 to
   the gateway, so WebSocket upgrades of sandbox services pass. `grpc` stays
   `gateway.grpcPort`.
-- `networkpolicy.yaml`: the driver-pod ingress rule lists the bind port.
+- `networkpolicy.yaml`: the driver-pod ingress rule lists the bind port, and
+  `networkPolicy.extraEgress` (operator-supplied rules) is appended to its
+  egress. Found in the live run: an issuer published through the cluster's own
+  ingress gateway is reached on the ingress pod's port (8443) where the CNI
+  applies policy after DNAT, which the chart's 443-only egress blocks.
 - `inference-provider-hook.yaml`: when `gateway.oidc.issuer` is set, the Job
   gets `OPENSHELL_NO_BROWSER=1`, `OPENSHELL_OIDC_CLIENT_SECRET` from
   `clientCredentialsSecret`, registers the gateway with

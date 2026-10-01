@@ -325,6 +325,7 @@ For scripts/remote-access-check.sh:
   OSH_OIDC_JWKS_URI=http://keycloak.${NS}.svc.cluster.local:8080/realms/openshell/protocol/openid-connect/certs
   OSH_CLIENT_SECRET=openshell-oidc-client
   OSH_POLICY_ACTION=${ACTION}
+  OSH_EXTRA_VALUES=e2e/keycloak/values.yaml   (lets the gateway pod reach this issuer)
 
 Remove it again with OSH_DELETE=1 $0
 NEXT

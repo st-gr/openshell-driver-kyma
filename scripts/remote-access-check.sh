@@ -18,6 +18,7 @@
 # OSH_HOOK_CLIENT_ID (the confidential client that secret belongs to, when it is not
 # OSH_OIDC_CLIENT_ID), OSH_OIDC_AUDIENCE (the tokens' audience; default the client id),
 # OSH_OIDC_JWKS_URI (JWKS URL for the ingress gateway, e.g. an in-cluster one),
+# OSH_EXTRA_VALUES (a second values file, applied after OSH_VALUES),
 # OSH_AUTH_ONLY=1 (accept every authenticated identity instead of upstream's roles),
 # OSH_POLICY_ACTION (ALLOW when the ingress gateway already has ALLOW policies; the
 # chart's default, DENY, is for a gateway without any),
@@ -84,25 +85,45 @@ fi
 if [[ -n ${OSH_POLICY_ACTION:-} ]]; then
 	helm_args+=(--set "gatewayIngress.policyAction=$OSH_POLICY_ACTION")
 fi
+values_args=(-f "$OSH_VALUES")
+extra_values=()
+if [[ -n ${OSH_EXTRA_VALUES:-} ]]; then
+	extra_values=(-f "$OSH_EXTRA_VALUES")
+fi
 if [[ ${OSH_DRY_RUN:-} == 1 ]]; then
-	helm template "$RELEASE" "$CHART" -n "$NS" -f "$OSH_VALUES" "${helm_args[@]}" >/dev/null
-	printf '%s\n' "${helm_args[@]}"
+	helm template "$RELEASE" "$CHART" -n "$NS" "${values_args[@]}" ${extra_values[@]+"${extra_values[@]}"} \
+		"${helm_args[@]}" >/dev/null
+	printf '%s\n' ${extra_values[@]+"${extra_values[@]}"} "${helm_args[@]}"
 	exit 0
 fi
 
+# finish: print the results and exit with the verdict.
+finish() {
+	printf '\n'
+	printf '%s\n' "${results[@]}" | sed "s/${OSH_DOMAIN//./\\.}/<domain>/g"
+	if [[ $failed == 1 ]]; then
+		printf '\nREMOTE_ACCESS_FAIL\n'
+		exit 1
+	fi
+	printf '\nREMOTE_ACCESS_OK\n'
+	exit 0
+}
+
 # The provider the chart's hook registers with these values; empty when the values do
 # not enable inferenceProvider (the hook template then renders nothing).
-provider=$(helm template "$RELEASE" "$CHART" -n "$NS" -f "$OSH_VALUES" "${helm_args[@]}" \
-	--show-only templates/inference-provider-hook.yaml 2>/dev/null \
+provider=$(helm template "$RELEASE" "$CHART" -n "$NS" "${values_args[@]}" ${extra_values[@]+"${extra_values[@]}"} \
+	"${helm_args[@]}" --show-only templates/inference-provider-hook.yaml 2>/dev/null \
 	| awk '/- name: PROVIDER_NAME/ { getline; gsub(/^[[:space:]]*value:[[:space:]]*"?|"?[[:space:]]*$/, ""); print; exit }' || true)
 
 if [[ ${OSH_SKIP_INSTALL:-} != 1 ]]; then
 	log "upgrading $RELEASE with gatewayIngress"
-	if helm upgrade "$RELEASE" "$CHART" -n "$NS" -f "$OSH_VALUES" "${helm_args[@]}" \
-		--wait --timeout 10m >/dev/null; then
+	if helm upgrade "$RELEASE" "$CHART" -n "$NS" "${values_args[@]}" ${extra_values[@]+"${extra_values[@]}"} \
+		"${helm_args[@]}" --wait --timeout 10m >/dev/null; then
 		pass "helm upgrade with gatewayIngress${provider:+ (the provider hook ran)}"
 	else
-		fail "helm upgrade with gatewayIngress (kubectl -n $NS get pods,jobs)"
+		# Nothing below can pass against a release that did not install.
+		fail "helm upgrade with gatewayIngress (kubectl -n $NS get pods,jobs); the release may be half-applied"
+		finish
 	fi
 fi
 
@@ -190,10 +211,4 @@ if [[ ${OSH_REVERT:-} == 1 ]]; then
 	check "no ingress policy of this release is left in istio-system (found $left)" test "$left" = 0
 fi
 
-printf '\n'
-printf '%s\n' "${results[@]}" | sed "s/${OSH_DOMAIN//./\\.}/<domain>/g"
-if [[ $failed == 1 ]]; then
-	printf '\nREMOTE_ACCESS_FAIL\n'
-	exit 1
-fi
-printf '\nREMOTE_ACCESS_OK\n'
+finish

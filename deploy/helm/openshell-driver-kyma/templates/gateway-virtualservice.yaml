@@ -21,6 +21,6 @@ spec:
             host: {{ include "openshell-driver-kyma.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local
             port:
               number: {{ .Values.gateway.grpcPort }}
-      # Streaming RPCs (WatchSandboxes, Exec, RelayStream) have no deadline.
-      timeout: 0s
+      # No timeout field: Istio's default is no timeout, which the streaming RPCs
+      # (WatchSandboxes, Exec, RelayStream) need; its validation rejects an explicit 0s.
 {{- end }}

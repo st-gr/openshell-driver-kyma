@@ -28,5 +28,4 @@ spec:
             host: {{ include "openshell-driver-kyma.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local
             port:
               number: 80
-      timeout: 0s
 {{- end }}
