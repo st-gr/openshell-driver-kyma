@@ -38,6 +38,14 @@
 # ingress gateway must have no TCP or TLS-passthrough server (ingress-non-http-servers.sh
 # says why).
 #
+# A sandbox service URL is not authenticated; OSH_ALLOWED_CIDRS is its only fence. The
+# fence compares the client address the ingress gateway believes. A mesh that trusts
+# forwarding hops (numTrustedProxies) with nothing in front that rewrites X-Forwarded-For
+# takes that address from the client's own header: anyone can then claim an allowed
+# address. The script looks for that before the upgrade, on the neighbour URLs, and after
+# it, on the service URL, and refuses or fails. OSH_FENCE_ONLY=1 with OSH_FENCE_URL=<a URL
+# that is fenced by source address, called from an allowed address> runs that test alone.
+#
 # Optional: OSH_RELEASE (ods), OSH_NAMESPACE (openshell-system), OSH_CLIENT_SECRET
 # (openshell-oidc-client: a Secret in OSH_NAMESPACE whose key client-secret holds the
 # OIDC client secret; needed when the values enable inferenceProvider),
@@ -131,6 +139,32 @@ require_neighbours() {
 		exit 1
 	fi
 }
+
+# forged_source_changes URL: true when the answer to URL changes once the request carries
+# an X-Forwarded-For header naming one to four addresses that are nobody's (TEST-NET-2).
+# An ingress gateway that trusts N forwarding hops takes the client address from a header
+# of N entries or more; fewer are ignored, so one entry alone proves nothing.
+forged_source_changes() {
+	local url=$1 plain forged entries="" n
+	plain=$(http_code "$url")
+	for n in 1 2 3 4; do
+		entries="${entries:+$entries, }198.51.100.$n"
+		forged=$(http_code -H "x-forwarded-for: $entries" "$url")
+		[[ $forged == "$plain" ]] || return 0
+	done
+	return 1
+}
+FORGEABLE="the ingress gateway takes the client address from a client's own X-Forwarded-For header (the mesh trusts forwarding hops, numTrustedProxies, and nothing in front rewrites the header): a source-address allowlist can be passed by anyone who names an allowed address in that header"
+
+if [[ ${OSH_FENCE_ONLY:-} == 1 ]]; then
+	need OSH_FENCE_URL "set OSH_FENCE_URL to a URL that is fenced by source address, and call from an allowed address"
+	if forged_source_changes "$OSH_FENCE_URL"; then
+		echo "FENCE_FORGEABLE: $FORGEABLE"
+		exit 1
+	fi
+	echo "FENCE_OK: a forged X-Forwarded-For header does not change the answer"
+	exit 0
+fi
 
 if [[ ${OSH_PROBE_ONLY:-} == 1 ]]; then
 	need OSH_NEIGHBOUR_URLS "set OSH_NEIGHBOUR_URLS (comma-separated URLs of other applications behind the ingress gateway)"
@@ -282,6 +316,15 @@ if [[ ${OSH_SKIP_INSTALL:-} != 1 ]]; then
 		echo "note: a neighbour already refuses a Bearer probe. A change there shows only if the ingress gateway's own refusal replaces the application's; a URL that answers all three probes alike is a better watch."
 	fi
 
+	log "the source-address fence"
+	for url in ${OSH_NEIGHBOUR_URLS//,/ }; do
+		if forged_source_changes "$url"; then
+			fail "not publishing unauthenticated service hosts behind OSH_ALLOWED_CIDRS: $FORGEABLE (seen on a neighbour URL)"
+			finish
+		fi
+	done
+	pass "a forged X-Forwarded-For header does not change a neighbour's answer"
+
 	if [[ $OSH_POLICY_ACTION == DENY ]]; then
 		log "DENY policies and the ingress gateway's other servers"
 		rc=0
@@ -411,13 +454,14 @@ check "service expose prints https://default--$SANDBOX.<domain>/ (printed: $url)
 body=$(curl -s -m 20 "https://default--$SANDBOX.$OSH_DOMAIN/" || true)
 check "https://default--$SANDBOX.<domain>/ serves the sandbox's directory listing" \
 	grep -q "Directory listing for /" <<<"$body"
-# The source-address fence is the only protection of a service URL, and it compares the
-# client address the ingress gateway believes. If the gateway believed a client's own
-# X-Forwarded-For header, this request would be refused as coming from 198.51.100.1, and
-# any client could claim an allowed address the same way.
-code=$(http_code -H 'x-forwarded-for: 198.51.100.1' "https://default--$SANDBOX.$OSH_DOMAIN/")
-check "the ingress gateway does not take the client address from a client's X-Forwarded-For header (HTTP $code, want 200)" \
-	test "$code" = 200
+# The source-address fence is the only protection of a service URL. If the ingress
+# gateway believed a client's own X-Forwarded-For header, these requests would be refused
+# as coming from the forged address, and any client could claim an allowed one the same way.
+if forged_source_changes "https://default--$SANDBOX.$OSH_DOMAIN/"; then
+	fail "the service URL's fence can be forged: $FORGEABLE"
+else
+	pass "the service URL's fence does not follow a client's X-Forwarded-For header"
+fi
 code=$(http_code "https://default--no-such-sandbox.$OSH_DOMAIN/")
 check "an unknown sandbox host is answered by the gateway, not by a sandbox (HTTP $code, want 404 or 503)" \
 	test "$code" = 404 -o "$code" = 503

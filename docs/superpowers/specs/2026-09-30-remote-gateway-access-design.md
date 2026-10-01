@@ -346,8 +346,10 @@ Runs only with the operator's explicit go-ahead. New against revision 1:
   answer is the ingress gateway's own refusal, so a 401 that moves from an
   application to the ingress gateway shows; `OSH_POLICY_ACTION` is mandatory, and
   under DENY the ingress gateway must have no server that is not HTTP.
-- A request to the service URL with a forged `X-Forwarded-For` must still be
-  served.
+- Requests with a forged `X-Forwarded-For` of one to four entries (a mesh that
+  trusts N hops ignores a shorter header) must be answered like plain ones: on
+  the neighbour URLs before the upgrade, where a change refuses the run, and on
+  the service URL after it. `OSH_FENCE_ONLY=1` runs that test alone.
 - The printed service URL must be `https://default--<sandbox>.<domain>/` exactly.
 - A call without a token must be refused by the **gateway** (`grpc-status 16`).
 - Kept: sandbox create and exec through the ingress, the service URL serving the

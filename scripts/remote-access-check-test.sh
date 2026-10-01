@@ -20,6 +20,10 @@
 #      way back is known; one that cannot be read is never deleted.
 #   7. scripts/ingress-non-http-servers.sh lists TCP and TLS-passthrough servers of the
 #      Gateways on the ingress gateway, and fails closed.
+#   8. A source-address fence that a client can forge its way through, because the ingress
+#      gateway takes the client address from the client's own X-Forwarded-For header, is
+#      detected (OSH_FENCE_ONLY=1), however many forwarding hops the mesh trusts; and an
+#      install run refuses to publish unauthenticated service hosts behind such a fence.
 # The neighbour is a local web server; helm, kubectl and openshell are stand-ins.
 # Requires: helm, curl, openssl, python3.
 set -euo pipefail
@@ -39,6 +43,9 @@ die() {
 #   while $WORK/broken exists: 401 the way Istio's JWT filter does;
 #   while $WORK/hiccup exists: that 401 for the 5th and 6th such request since the file
 #     appeared, which is one probe round (the baseline and one round come before it).
+# Under /trust<N> it answers like a host fenced by source address behind an ingress
+# gateway that trusts N forwarding hops: 403 when the request's X-Forwarded-For header
+# has N entries or more (the client address is then taken from the header), else 200.
 cat >"$WORK/neighbour.py" <<'PY'
 import http.server, os, sys
 
@@ -48,6 +55,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         global count
         code, body = 200, b"ok\n"
+        if self.path.startswith("/trust"):
+            hops = int(self.path[len("/trust"):])
+            forwarded = [e for e in (self.headers.get("X-Forwarded-For") or "").split(",") if e.strip()]
+            if hops and len(forwarded) >= hops:
+                code, body = 403, b"RBAC: access denied"
         if self.headers.get("Authorization"):
             if os.path.exists(work + "/app401"):
                 code, body = 401, b"invalid api key\n"
@@ -78,6 +90,7 @@ for _ in $(seq 1 50); do
 	sleep 0.1
 done
 NEIGHBOUR="http://127.0.0.1:$(cat "$WORK/port")/app"
+FENCED="http://127.0.0.1:$(cat "$WORK/port")/trust"
 UNREACHABLE="http://127.0.0.1:1/app"
 
 # 1. Probes and baseline comparison.
@@ -303,5 +316,18 @@ chmod +x "$WORK/no-cluster/kubectl"
 rc=0
 env PATH="$WORK/no-cluster:$PATH" "$DIR/ingress-non-http-servers.sh" >/dev/null 2>&1 || rc=$?
 [[ $rc == 2 ]] || die "without a working kubectl the script must fail closed with status 2, got $rc"
+
+# 8. A forgeable source-address fence.
+fence() { env OSH_FENCE_ONLY=1 OSH_FENCE_URL="$1" "$SCRIPT"; }
+fence "${FENCED}0" >/dev/null || die "a fence that ignores X-Forwarded-For was reported as forgeable"
+for hops in 1 2 3; do
+	if fence "${FENCED}$hops" >"$WORK/fence" 2>&1; then
+		die "an ingress gateway that trusts $hops forwarding hop(s) was not detected: $(cat "$WORK/fence")"
+	fi
+	grep -q 'X-Forwarded-For' "$WORK/fence" || die "the report does not name X-Forwarded-For: $(cat "$WORK/fence")"
+done
+rc=$(stubbed forgeable OSH_NEIGHBOUR_URLS="${FENCED}2")
+if [[ $rc == 0 ]] || ! unchanged; then die "service hosts were published behind a forgeable fence: $(cat "$WORK/calls.log")"; fi
+grep -q 'X-Forwarded-For' "$WORK/forgeable.out" || die "the refusal does not name X-Forwarded-For: $(out forgeable)"
 
 echo "REMOTE_ACCESS_SELFTEST_OK"

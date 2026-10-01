@@ -342,8 +342,14 @@ The fence compares the client address the ingress gateway sees. Know where
 that address comes from on your cluster: if the mesh is configured to trust
 forwarding hops (`numTrustedProxies`) and nothing in front of the ingress
 gateway rewrites `X-Forwarded-For`, a client can claim an allowed address in
-that header. Test it from an allowed address: a request to a service URL with
-`-H 'X-Forwarded-For: 198.51.100.1'` must still be answered, not refused.
+that header. Test it from an allowed address, on any URL behind a source-address
+allowlist: repeat the request with `-H 'X-Forwarded-For: 198.51.100.1'`, then
+with two and with three comma-separated addresses in that header (a mesh that
+trusts N hops ignores a shorter header). Each must be answered like the plain
+request. If one is refused, the ingress gateway believed the header, and anyone
+can name an allowed address in it: do not rely on `allowedCidrs`, and do not
+publish service hosts, until the mesh's trusted hops match what really stands
+in front of the ingress gateway.
 
 ### 3b. Register the inference provider
 

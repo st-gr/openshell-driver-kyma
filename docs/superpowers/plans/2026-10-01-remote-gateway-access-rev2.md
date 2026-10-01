@@ -3129,7 +3129,8 @@ PASS  no RequestAuthentication of this release on the ingress gateway (found 0)
 PASS  istio-system/<…>-gateway-ca holds the chart CA
 PASS  a gRPC call without a bearer is refused by the gateway (grpc-status 16, want 16)
 PASS  service expose prints https://default--rac-web.<domain>/ (printed: …)
-PASS  the ingress gateway does not take the client address from a client's X-Forwarded-For header (HTTP 200, want 200)
+PASS  a forged X-Forwarded-For header does not change a neighbour's answer
+PASS  the service URL's fence does not follow a client's X-Forwarded-For header
 PASS  provider <name> is registered: the hook's login worked and it trusted the chart CA
 PASS  an exec stream idle for 400 s survives
 PASS  the neighbours answer as before the run
