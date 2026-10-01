@@ -15,7 +15,6 @@ use miette::{IntoDiagnostic, Result};
 use openshell_core::proto::compute::v1::compute_driver_server::ComputeDriverServer;
 use openshell_core::VERSION;
 use openshell_driver_kubernetes::{ComputeDriverService, KubernetesComputeDriver};
-use openshell_driver_kyma::exposure::{ExposureConfig, ExposureReconciler};
 use openshell_driver_kyma::hooks::KymaHookSet;
 use openshell_driver_kyma::kyma_args::KymaArgs;
 use openshell_driver_kyma::namespaces::NamespaceLabeler;
@@ -107,19 +106,8 @@ async fn main() -> Result<()> {
     let config = compute_config(upstream, selector);
     // The Kyma layer's own client; upstream's driver builds its own internally.
     let hook_client = kube::Client::try_default().await.into_diagnostic()?;
-    let exposure = kyma.kyma_enable_apirule.then(|| {
-        ExposureReconciler::new(
-            hook_client.clone(),
-            ExposureConfig {
-                cluster_domain: kyma.kyma_cluster_domain.clone(),
-                ingress_namespace: kyma.kyma_ingress_namespace.clone(),
-                search_namespace: (!config.is_multi_namespace()).then(|| config.namespace.clone()),
-                gateway_id: config.gateway_id.clone(),
-            },
-        )
-    });
     let namespaces = NamespaceLabeler::new(
-        hook_client.clone(),
+        hook_client,
         config.clone(),
         kyma.kyma_workspace_psa_level.clone(),
     );
@@ -132,7 +120,7 @@ async fn main() -> Result<()> {
     let workspace_namespaces = UpstreamNamespaces::new(driver.clone(), config.gateway_id.clone());
     let service = ComputeDriverServer::new(KymaComputeDriver::new(
         ComputeDriverService::new(driver),
-        Arc::new(KymaHookSet::new(kyma.enrich_config(), exposure, namespaces)),
+        Arc::new(KymaHookSet::new(kyma.enrich_config(), namespaces)),
         Arc::new(workspace_namespaces),
     ));
     let shutdown = async move {

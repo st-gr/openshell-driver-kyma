@@ -237,6 +237,32 @@ How the routing works (per
 interpreter of any other SDK your sandbox image uses to
 `inferenceProvider.binaries`.
 
+### Reach a web service inside the sandbox
+
+Upstream's `openshell service expose` relays a loopback port of the sandbox
+through the gateway; nothing routes to the pod itself (see
+[`production-deployment.md`](production-deployment.md)). The service must
+listen on `127.0.0.1`:
+
+```bash
+openshell sandbox create --detach --name web --from python:3.12-slim \
+  -- python3 -m http.server 8080 --bind 127.0.0.1
+openshell service expose web 8080
+#   URL: http://default--web.openshell.localhost:8080/
+```
+
+With the port-forward from above still running, open that URL in Chrome (it
+resolves `*.openshell.localhost` to the forwarded port by itself), or:
+
+```bash
+curl --resolve default--web.openshell.localhost:8080:127.0.0.1 \
+  http://default--web.openshell.localhost:8080/
+```
+
+`openshell service expose web 8080 admin` adds a named endpoint at
+`http://default--web--admin.openshell.localhost:8080/`, and
+`openshell service list web` shows them. Verified live on v0.9.0.
+
 ### Two operational notes
 
 **Upload/download needs `rsync` + `openssh-client` on the host.**

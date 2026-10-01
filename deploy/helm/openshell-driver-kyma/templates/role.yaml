@@ -1,9 +1,9 @@
 {{- if eq .Values.driver.workspaceMode "shared" }}
 # The driver's rights in the shared sandbox namespace: the Role upstream's
 # chart binds to the same driver in shared mode (deploy/helm/openshell/
-# templates/role.yaml at the pinned tag), plus the Kyma layer's APIRule
-# exposure when enabled. The other workspace modes get these rights, cluster-wide,
-# from clusterrole.yaml. scripts/check-chart-render.sh asserts both, rule for rule.
+# templates/role.yaml at the pinned tag). The other workspace modes get these
+# rights, cluster-wide, from clusterrole.yaml. scripts/check-chart-render.sh
+# asserts both, rule for rule.
 # Upstream also gates its Role on workspaceResources.enabled, a toggle for a
 # gateway-only release; this chart has no such toggle, so the Role always renders
 # in shared mode.
@@ -42,21 +42,4 @@ rules:
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
     verbs: ["create", "get"]
-  {{- if .Values.driver.enableApirule }}
-  # Kyma layer: server-side apply of the exposure Service, NetworkPolicy and
-  # APIRule (patch, and create for a new object), and a Warning Event when
-  # exposure fails.
-  - apiGroups: [""]
-    resources: ["services"]
-    verbs: ["patch"]
-  - apiGroups: ["networking.k8s.io"]
-    resources: ["networkpolicies"]
-    verbs: ["patch"]
-  - apiGroups: ["gateway.kyma-project.io"]
-    resources: ["apirules"]
-    verbs: ["create", "patch"]
-  - apiGroups: [""]
-    resources: ["events"]
-    verbs: ["create"]
-  {{- end }}
 {{- end }}

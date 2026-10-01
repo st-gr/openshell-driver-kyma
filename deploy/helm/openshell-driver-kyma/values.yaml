@@ -77,11 +77,6 @@ driver:
   # it from its disableTls; without the gateway it is left to upstream.
   gatewayEndpoint: ""
   istioInjectSandboxes: false
-  # Expose each sandbox's port 8080 through a Kyma APIRule, on a host under
-  # clusterDomain. Requires clusterDomain; the chart refuses to render without
-  # it.
-  enableApirule: false
-  clusterDomain: ""
   # When true, the driver adds `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`
   # to every sandbox's environment (an explicit sandboxEnv entry for the same
   # key wins). Pair with an in-cluster LLM gateway that
@@ -241,8 +236,6 @@ driver:
   # than OPENSHELL_LOG_LEVEL (upstream strips them); the chart refuses to render
   # either.
   sandboxEnv: []
-  # Namespace of the Istio ingress gateway APIRule traffic arrives from.
-  ingressNamespace: istio-system
   # Pod Security level for namespaces the driver creates in managed mode
   # (privileged, baseline, restricted, or empty for none). Default chosen on
   # the v0.9.0 live check: with a sandbox running, a server-side dry run of

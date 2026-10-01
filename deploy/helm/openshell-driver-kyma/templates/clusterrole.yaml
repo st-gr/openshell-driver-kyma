@@ -92,19 +92,3 @@ rules:
     verbs: ["get", "create", "patch", "update"]
   {{- end }}
   {{- end }}
-  {{- if and (ne $mode "shared") .Values.driver.enableApirule }}
-  # Kyma layer: APIRule exposure in whichever namespace a sandbox lives, as in
-  # role.yaml.
-  - apiGroups: [""]
-    resources: ["services"]
-    verbs: ["patch"]
-  - apiGroups: ["networking.k8s.io"]
-    resources: ["networkpolicies"]
-    verbs: ["patch"]
-  - apiGroups: ["gateway.kyma-project.io"]
-    resources: ["apirules"]
-    verbs: ["create", "patch"]
-  - apiGroups: [""]
-    resources: ["events"]
-    verbs: ["create"]
-  {{- end }}

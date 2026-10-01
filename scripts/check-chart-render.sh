@@ -258,17 +258,13 @@ try good-7-binaries '' t "${inference_common[@]}" --set "inferenceProvider.baseU
 
 # 4 and 5. Renders for the NetworkPolicy and RBAC checks. Named rbac-*, so check 2's
 # render-*.yaml glob skips them, and check 4's r*.yaml glob takes them.
-# Exposure on, in shared, managed (which also labels namespaces) and operator mode.
-render_as t --set driver.enableApirule=true --set driver.clusterDomain=example.org \
-	>"$WORK/rbac-apirule.yaml"
+# Managed with an explicit PSA level (which labels namespaces) and without one, and operator mode.
 render_as t --set driver.workspaceMode=managed --set gateway.sandboxJwt.gatewayId=gw \
-	--set driver.enableApirule=true --set driver.clusterDomain=example.org \
-	--set driver.workspacePsaLevel=baseline >"$WORK/rbac-managed-apirule.yaml"
+	--set driver.workspacePsaLevel=baseline >"$WORK/rbac-managed-psa.yaml"
 render_as t --set driver.workspaceMode=managed --set gateway.sandboxJwt.gatewayId=gw \
 	--set driver.workspacePsaLevel="" >"$WORK/rbac-managed-no-psa.yaml"
 render_as t --set driver.workspaceMode=operator --set driver.operatorNamespaceLabel=team=a \
-	--set driver.enableApirule=true --set driver.clusterDomain=example.org \
-	>"$WORK/rbac-operator-apirule.yaml"
+	>"$WORK/rbac-operator.yaml"
 # Managed SSH ingress, which makes the driver write a NetworkPolicy in every workspace:
 # on by default with the in-pod gateway and networkPolicy.enabled (every managed render
 # above), here with an explicit namespace and selector, and off when networkPolicy is,
@@ -578,7 +574,7 @@ NO_SSH_RESTRICTION = {"rbac-shared-no-netpol.yaml": "networkPolicy.enabled=false
 MANAGED_SSH = {
     "render-managed-true": (None, own_pods[0]),
     "render-managed-false": (None, own_pods[0]),
-    "rbac-managed-apirule": (None, own_pods[0]),
+    "rbac-managed-psa": (None, own_pods[0]),
     "rbac-managed-secrets": (None, own_pods[0]),
     "rbac-managed-no-psa": (None, own_pods[0]),                 # in-pod gateway, PSA label cleared
     "rbac-managed-ssh": ("gw-ns", {"app": "gateway"}),            # explicit values override the defaults
@@ -735,11 +731,7 @@ WORKSPACE_SERVICEACCOUNTS = [("", "serviceaccounts", ["create", "get"])]        
 # networkPolicy.enabled, which sets managed_ssh_ingress.enabled there; here it follows the effective
 # managed SSH ingress, which derives from networkPolicy.enabled with the in-pod gateway (see check 4).
 SSH_INGRESS_POLICY = [("networking.k8s.io", "networkpolicies", ["get", "create", "patch", "update"])]
-# The Kyma layer (src/exposure.rs, src/namespaces.rs): server-side apply of a Service, a
-# NetworkPolicy and an APIRule (patch, and create for a new object; nothing reads an
-# APIRule), a failure Event, and a merge patch that labels a managed namespace.
-KYMA_EXPOSURE = [("", "services", ["patch"]), ("networking.k8s.io", "networkpolicies", ["patch"]),
-                 ("gateway.kyma-project.io", "apirules", ["create", "patch"]), ("", "events", ["create"])]
+# The Kyma layer (src/namespaces.rs): a merge patch that labels a managed namespace.
 KYMA_PSA_LABEL = [("", "namespaces", ["patch"])]
 
 def secret_sources(*names):
@@ -763,26 +755,25 @@ EXPECTED = {
     "render-shared-false": (SHARED, SHARED_CLUSTER),
     "rbac-shared-no-netpol": (SHARED, SHARED_CLUSTER),
     "rbac-shared-no-gateway": (SHARED, SHARED_CLUSTER),                                    # an external gateway changes no RBAC
-    "rbac-apirule": (SHARED + [KYMA_EXPOSURE], SHARED_CLUSTER),
     "rbac-shared-secrets": (SHARED, SHARED_CLUSTER),                                       # shared mode stages no Secret
     "rbac-inference": (SHARED, SHARED_CLUSTER),                                            # the hook's own Role is bound to the hook
     # Managed SSH ingress is on by default with the in-pod gateway and networkPolicy.enabled.
     "render-managed-true": ([], MANAGED + [PVC_GET, SSH_INGRESS_POLICY]),
     "render-managed-false": ([], MANAGED + [SSH_INGRESS_POLICY]),
-    "rbac-managed-apirule": ([], MANAGED + [SSH_INGRESS_POLICY, KYMA_EXPOSURE, KYMA_PSA_LABEL]),
+    "rbac-managed-psa": ([], MANAGED + [SSH_INGRESS_POLICY]),                                  # an explicit level grants the same rights
     "rbac-managed-no-psa": ([], [b for b in MANAGED if b is not KYMA_PSA_LABEL] + [SSH_INGRESS_POLICY]),
     "rbac-managed-ssh": ([], MANAGED + [SSH_INGRESS_POLICY]),
     "rbac-managed-no-netpol": ([], MANAGED),                                               # as upstream, off with networkPolicy
     "rbac-managed-no-gateway": ([], MANAGED),                                              # an external gateway: off unless set
     "rbac-managed-ssh-off": ([], MANAGED),
     "rbac-managed-secrets": ([secret_sources("client-tls", "pull-a", "pull-b")], MANAGED + [SSH_INGRESS_POLICY]),
-    "rbac-operator-apirule": ([], OPERATOR + [KYMA_EXPOSURE]),
+    "rbac-operator": ([], OPERATOR),
     "rbac-operator-secrets": ([secret_sources("client-tls")], OPERATOR),                   # TLS Secret only, no pull Secrets
     # Gateway TLS: the PKI hook's client TLS Secret is the driver's by default.
     "rbac-shared-tls": (SHARED, SHARED_CLUSTER),                                           # shared mode stages no Secret
     "rbac-managed-tls": ([secret_sources("t-openshell-driver-kyma-client-tls")], MANAGED + [SSH_INGRESS_POLICY]),
     "rbac-operator-tls": ([secret_sources("own-tls")], OPERATOR),                          # an explicit name wins
-    "good-all-options": ([all_options_secrets], MANAGED + [PVC_GET, SSH_INGRESS_POLICY, KYMA_EXPOSURE, KYMA_PSA_LABEL]),
+    "good-all-options": ([all_options_secrets], MANAGED + [PVC_GET, SSH_INGRESS_POLICY]),
 }
 
 def table(scope, blocks):

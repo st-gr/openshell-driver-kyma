@@ -20,7 +20,7 @@ flowchart TB
         V["inferenceProvider:<br/>baseUrl, modelId, credential Secret"]
     end
 
-    subgraph S3["3 — helm install chart 0.9.0"]
+    subgraph S3["3 — helm install chart 0.9.1"]
         POD["driver + gateway pod 2/2<br/>gateway v0.1.2, Unix socket"]
         HOOK["hook Job: provider profile import +<br/>provider create (auto-deletes)"]
     end
@@ -217,7 +217,7 @@ Notes on why this is short:
 
 ```bash
 helm install ods oci://ghcr.io/st-gr/charts/openshell-driver-kyma \
-  --version 0.9.0 \
+  --version 0.9.1 \
   --namespace "$NS" \
   -f my-values.yaml \
   --wait --timeout=300s
@@ -438,7 +438,7 @@ cluster-wide — remove it separately with a matching
 
 ## Versions
 
-This tutorial targets chart `openshell-driver-kyma` `0.9.0`, which deploys
+This tutorial targets chart `openshell-driver-kyma` `0.9.1`, which deploys
 upstream NVIDIA OpenShell `v0.1.2`: the gateway, supervisor and sandbox
 runtime images are pinned by digest to that release, and the CLI you install
 in step 4 must be the same release. The agent-sandbox controller is v0.5.2.

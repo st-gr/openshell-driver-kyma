@@ -163,14 +163,6 @@ scripts/check-chart-render.sh fails CI when an upstream option is missing here.
 - name: OPENSHELL_KYMA_DISABLE_CLAUDE_TELEMETRY
   value: "true"
 {{- end }}
-{{- if $d.enableApirule }}
-- name: OPENSHELL_KYMA_ENABLE_APIRULE
-  value: "true"
-- name: OPENSHELL_KYMA_CLUSTER_DOMAIN
-  value: {{ required "driver.clusterDomain is required when driver.enableApirule is true" $d.clusterDomain | quote }}
-{{- end }}
-- name: OPENSHELL_KYMA_INGRESS_NAMESPACE
-  value: {{ $d.ingressNamespace | quote }}
 {{- with $d.workspacePsaLevel }}
 - name: OPENSHELL_KYMA_WORKSPACE_PSA_LEVEL
   value: {{ . | quote }}

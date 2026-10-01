@@ -32,23 +32,6 @@ pub struct KymaArgs {
     #[arg(long, env = "OPENSHELL_KYMA_SANDBOX_ENV", value_delimiter = ',')]
     pub kyma_sandbox_env: Vec<String>,
 
-    /// Expose each sandbox's port 8080 through a Kyma APIRule.
-    #[arg(long, env = "OPENSHELL_KYMA_ENABLE_APIRULE")]
-    pub kyma_enable_apirule: bool,
-
-    /// Domain for APIRule hosts (`<workspace>--<name>.<domain>`). Required with
-    /// --kyma-enable-apirule.
-    #[arg(long, env = "OPENSHELL_KYMA_CLUSTER_DOMAIN", default_value = "")]
-    pub kyma_cluster_domain: String,
-
-    /// Namespace of the Istio ingress gateway that APIRule traffic arrives from.
-    #[arg(
-        long,
-        env = "OPENSHELL_KYMA_INGRESS_NAMESPACE",
-        default_value = "istio-system"
-    )]
-    pub kyma_ingress_namespace: String,
-
     /// Pod Security level applied to namespaces the driver creates in Managed
     /// mode. Empty leaves them unlabelled.
     #[arg(long, env = "OPENSHELL_KYMA_WORKSPACE_PSA_LEVEL", default_value = "")]
@@ -63,11 +46,6 @@ impl KymaArgs {
     /// Reject combinations that would misbehave at runtime, naming the culprit.
     pub fn validate(&self) -> Result<(), String> {
         self.sandbox_env()?;
-        if self.kyma_enable_apirule && self.kyma_cluster_domain.is_empty() {
-            return Err(
-                "--kyma-cluster-domain is required when --kyma-enable-apirule is set".into(),
-            );
-        }
         if !matches!(
             self.kyma_workspace_psa_level.as_str(),
             "" | "privileged" | "baseline" | "restricted"
@@ -204,8 +182,6 @@ mod tests {
     fn defaults() {
         let args = parse(&[]);
         assert!(!args.kyma_istio_inject_sandboxes);
-        assert!(!args.kyma_enable_apirule);
-        assert_eq!(args.kyma_ingress_namespace, "istio-system");
         assert_eq!(args.kyma_workspace_psa_level, "");
         assert_eq!(args.kyma_health_port, 9090);
         assert!(args.validate().is_ok());
@@ -303,19 +279,6 @@ mod tests {
         let environment = sandbox.spec.unwrap().template.unwrap().environment;
         assert_eq!(environment["A"], "first");
         assert_eq!(environment[CLAUDE_TELEMETRY_ENV], "0");
-    }
-
-    #[test]
-    fn apirule_requires_a_cluster_domain() {
-        let err = parse(&["--kyma-enable-apirule"]).validate().unwrap_err();
-        assert!(err.contains("--kyma-cluster-domain"), "{err}");
-        assert!(parse(&[
-            "--kyma-enable-apirule",
-            "--kyma-cluster-domain",
-            "example.org"
-        ])
-        .validate()
-        .is_ok());
     }
 
     #[test]
