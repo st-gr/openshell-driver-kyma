@@ -5,6 +5,8 @@ on:
       - 'deploy/helm/**'
       - '.github/workflows/helm-lint.yml'
       - 'scripts/check-chart-render.sh'
+      - 'scripts/remote-access-check.sh'
+      - 'scripts/remote-access-check-test.sh'
       - 'scripts/check-upstream-args.sh'
       - 'scripts/proto-lib.sh'
       - 'scripts/testdata/**'
@@ -15,6 +17,8 @@ on:
     paths:
       - 'deploy/helm/**'
       - 'scripts/check-chart-render.sh'
+      - 'scripts/remote-access-check.sh'
+      - 'scripts/remote-access-check-test.sh'
       - 'scripts/check-upstream-args.sh'
       - 'scripts/proto-lib.sh'
       - 'scripts/testdata/**'
@@ -66,3 +70,7 @@ jobs:
       - name: Assert the driver's configuration surface
         shell: bash
         run: ./scripts/check-chart-render.sh
+
+      - name: The live check watches the ingress gateway's other applications
+        shell: bash
+        run: ./scripts/remote-access-check-test.sh

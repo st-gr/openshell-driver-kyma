@@ -34,8 +34,7 @@ chart's `gatewayIngress.policyAction`).
 Keycloak is published at `keycloak.<cluster-domain>` through the cluster's
 Istio ingress gateway, reachable from your CIDR blocks and from the cluster's own
 pod and node networks (the OpenShell gateway and the provider hook reach the
-issuer through that public host; the ingress gateway's JWKS fetch uses the
-in-cluster Service). Credentials are generated into Secrets in the cluster and
+issuer through that public host). Credentials are generated into Secrets in the cluster and
 never printed; the script ends with the values `remote-access-check.sh` needs
 and the command that reads the `dev` password. The script labels the namespace
 and the Secret it creates and refuses to deploy into, overwrite or delete

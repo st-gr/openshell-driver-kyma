@@ -208,8 +208,8 @@ spec:
       port: 8080
       targetPort: http
 ---
-# Only the Istio ingress gateway and istiod (which fetches the JWKS for the ingress
-# gateway's RequestAuthentication) reach Keycloak.
+# Only the Istio ingress gateway's namespace reaches Keycloak: every caller, the OpenShell
+# gateway included, comes through the public host.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -322,10 +322,10 @@ For scripts/remote-access-check.sh:
   OSH_OIDC_ISSUER=https://${HOST}/realms/openshell
   OSH_OIDC_CLIENT_ID=openshell-cli
   OSH_HOOK_CLIENT_ID=openshell-ci
-  OSH_OIDC_JWKS_URI=http://keycloak.${NS}.svc.cluster.local:8080/realms/openshell/protocol/openid-connect/certs
   OSH_CLIENT_SECRET=openshell-oidc-client
   OSH_POLICY_ACTION=${ACTION}
   OSH_EXTRA_VALUES=e2e/keycloak/values.yaml   (lets the gateway pod reach this issuer)
+  OSH_NEIGHBOUR_URLS=...                      (yours to choose: other applications behind this ingress gateway)
 
 Remove it again with OSH_DELETE=1 $0
 NEXT

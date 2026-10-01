@@ -3,7 +3,7 @@
 #   1. deploy.sh renders the manifests it would apply, with no credential in them;
 #   2. realm.json carries no credential either, and has the clients the chart needs;
 #   3. the realm imports into a throwaway Keycloak (Docker) and issues tokens the
-#      OpenShell gateway and the ingress gateway accept: issuer, audience, roles, for
+#      OpenShell gateway accepts: issuer, audience, roles, for
 #      the client-credentials grant (the provider hook) and for the browser login with
 #      PKCE on a loopback redirect (the openshell CLI).
 # Requires: docker, curl, python3 with PyYAML.
