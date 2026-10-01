@@ -58,9 +58,6 @@ driver:
   sandboxStorageClass: example-class
   istioInjectSandboxes: true
   disableClaudeTelemetry: true
-  enableApirule: true
-  clusterDomain: example.org
-  ingressNamespace: example-ingress
   workspacePsaLevel: baseline
   healthPort: 9191
   sandboxEnv: [EXAMPLE=1]

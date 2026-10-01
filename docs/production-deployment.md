@@ -275,45 +275,37 @@ kubectl -n openshell-system get apirule
   `networkPolicy.enabled` the chart lets the driver pod reach that endpoint's
   port (80 when the URL names none), on any address.
 
-## Exposing a sandbox through an APIRule (opt-in exception)
+## Reaching a service inside a sandbox
 
-`driver.enableApirule` (default `false`) publishes each sandbox's port 8080 on
-a Kyma hostname. It is an explicit exception to upstream's isolation, so read
-what it does before turning it on.
+Nothing in this chart routes traffic to a sandbox pod, and nothing can:
+upstream's sandbox runtime brokers the workload's `bind`/`listen`/`accept`
+syscalls and resets every inbound connection that does not arrive through the
+gateway's relay, even one from inside the pod. An `APIRule` or
+`VirtualService` to the pod answers `503 … reset reason: connection
+termination` (verified live on Kyma; releases before 0.9.1 shipped such a
+route behind `driver.enableApirule`, now removed).
 
-```yaml
-driver:
-  enableApirule: true
-  clusterDomain: "<cluster-domain>"     # required with enableApirule
-  ingressNamespace: istio-system        # where the Istio ingress gateway runs
+Use upstream's path instead. The service must listen on `127.0.0.1`:
+
+```bash
+openshell sandbox create --detach --name web --from python:3.12-slim \
+  -- python3 -m http.server 8080 --bind 127.0.0.1
+openshell service expose web 8080          # → http://default--web.openshell.localhost:8080/
+openshell service expose web 8080 admin    # → http://default--web--admin.openshell.localhost:8080/
+openshell service list web
 ```
 
-For each sandbox the driver then creates three objects, all
-owner-referenced to the sandbox's `Sandbox` CR (so they are deleted with it)
-and labelled `app.kubernetes.io/managed-by: openshell-driver-kyma`:
+The gateway relays the URL to the loopback port through the supervisor. With
+the CLI on a `kubectl port-forward` to the gateway (the setup in
+[`getting-started.md`](getting-started.md)), Chrome resolves
+`*.openshell.localhost` to the forwarded port by itself; `curl` needs
+`--resolve default--web.openshell.localhost:8080:127.0.0.1`. A server bound to
+`0.0.0.0` or `[::]` opens the relay but never answers.
 
-- a Service `<cr>-svc` on port 8080, selecting the sandbox's workload pod;
-- a NetworkPolicy `<cr>-expose` that admits only the Istio ingress gateway
-  (pods labelled `istio: ingressgateway` in `driver.ingressNamespace`) to TCP
-  8080 of that workload pod;
-- an APIRule `<cr>`, host `<workspace>--<name>.<cluster-domain>` in every
-  workspace mode, through `kyma-system/kyma-gateway`, path `/*`, methods
-  `GET` and `POST`, with `noAuth`.
-
-Upstream's workload pods otherwise accept ingress only from their own
-supervisor. Exposure lets traffic from the internet reach whatever listens on
-port 8080 in the sandbox, without passing the supervisor, and the APIRule has
-no authentication. Enable it only for sandboxes that are meant to serve
-requests, and put authentication in the service itself. A failure to create
-the objects never fails the sandbox: it is logged and recorded as a
-`Warning` Event with reason `ExposureFailed` on the `Sandbox`
-(`kubectl describe sandbox <cr>`). The driver's RBAC gains the matching
-Service, NetworkPolicy, APIRule and Event rights only when the option is on.
-In managed and operator mode those rights are cluster-wide, because sandboxes
-live in many namespaces: the driver may then create and patch APIRules, and
-patch Services and NetworkPolicies, in every namespace.
-This is separate from `gatewayApirule`, which publishes the gateway, with
-OIDC, and is documented above.
+Reaching such a URL without a port-forward means publishing the gateway, not
+the pods: `gatewayApirule` above, or upstream's edge-authenticated mode
+(`enable_websocket_tunnel`, with a wildcard `server_sans` entry for the service
+hostnames). The latter is not wired into the chart yet.
 
 ## Known limitations
 

@@ -4,6 +4,28 @@ All notable changes to openshell-driver-kyma are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.9.1] — 2026-09-30
+
+### Removed
+
+- **Sandbox pod exposure** (`driver.enableApirule`, `driver.clusterDomain`,
+  `driver.ingressNamespace`; `--kyma-enable-apirule`, `--kyma-cluster-domain`,
+  `--kyma-ingress-namespace`) with its Service, NetworkPolicy, APIRule and
+  Event RBAC. It could never work: upstream's sandbox runtime brokers the
+  workload's `bind`/`listen`/`accept` syscalls and resets every inbound
+  connection that does not come through the gateway's relay, so any route to
+  the pod answered `503` (verified live; the VirtualService variant, PR #79,
+  was closed unmerged). Drop the three values from your values file;
+  `helm upgrade` ignores them otherwise. `gatewayApirule`, which publishes
+  the gateway, is unchanged.
+
+### Documentation
+
+- `openshell service expose` is the way to reach a service inside a sandbox
+  (loopback-bound; the URL is relayed through the gateway and works over the
+  CLI port-forward): recipe in getting-started and production-deployment, and
+  the Kyma-vs-OpenShift comparison updated.
+
 ## [0.9.0] — 2026-09-29
 
 **UPGRADE NOTE: delete all existing sandboxes before upgrading to this
