@@ -19,7 +19,7 @@
 #      no empty label set while admission is enabled); and 3h
 #      gateway settings that cannot work: the in-pod gateway without the Service
 #      sandboxes dial or without sandbox-JWT keys, and the provider hook without
-#      the gateway's Service or against an OIDC or TLS gateway it cannot reach;
+#      the gateway's Service, against a TLS gateway, or against an OIDC gateway without a client secret;
 #   4. the chart's NetworkPolicies: exactly one selects OpenShell sandbox pods, the
 #      mirror of upstream's SSH-ingress restriction, present in shared mode with the
 #      in-pod gateway only; in managed mode the driver applies it instead, so the
@@ -240,8 +240,18 @@ inference_try bad-3h-inference-no-service 'gatewayService.enabled' --set "infere
 	--set gatewayService.enabled=false --set driver.gatewayEndpoint=http://gateway.example:8080
 inference_try bad-3h-inference-no-gateway 'gateway.enabled' --set "inferenceProvider.baseUrl=$inference_url" \
 	--set gateway.enabled=false
-inference_try bad-3h-inference-oidc 'gateway.oidc.issuer' --set "inferenceProvider.baseUrl=$inference_url" \
-	--set gateway.oidc.issuer=https://issuer.example --set gateway.oidc.audience=openshell
+# With OIDC the hook needs a client and its secret for the client-credentials grant.
+inference_try bad-3h-inference-oidc 'gateway.oidc.clientCredentialsSecret.name' \
+	--set "inferenceProvider.baseUrl=$inference_url" \
+	--set gateway.oidc.issuer=https://issuer.example --set gateway.oidc.audience=osh-client \
+	--set gateway.oidc.clientId=osh-client
+inference_try bad-3h-inference-oidc-no-client 'gateway.oidc.clientId' \
+	--set "inferenceProvider.baseUrl=$inference_url" \
+	--set gateway.oidc.issuer=https://issuer.example --set gateway.oidc.audience=osh-client \
+	--set gateway.oidc.clientCredentialsSecret.name=oidc-client
+inference_try good-8-inference-oidc '' --set "inferenceProvider.baseUrl=$inference_url" \
+	--set gateway.oidc.issuer=https://issuer.example --set gateway.oidc.audience=osh-client \
+	--set gateway.oidc.clientId=osh-client --set gateway.oidc.clientCredentialsSecret.name=oidc-client
 # ...and the hook dials http:// with no client certificate, so it cannot reach a gateway
 # with TLS: in three series, both together fail; TLS alone and the provider alone render.
 inference_try bad-3h-inference-tls 'gateway.tls.enabled' --set "inferenceProvider.baseUrl=$inference_url" \
@@ -1143,6 +1153,46 @@ for host, want in (("default--web.example.org", True), ("team-a--my-app--admin.e
                    ("-a--b.example.org", False), ("a--.example.org", False)):
     if bool(service_host.fullmatch(host)) != want:
         failures.append(f"the sandbox service host pattern {'rejects' if want else 'accepts'} {host!r}")
+
+# The provider hook under OIDC: it registers the gateway once with the client-credentials
+# grant and then addresses it by name. --gateway-endpoint bypasses the registered gateway
+# and its token, so it must not appear; the client secret reaches the CLI only through
+# its environment, from the operator's Secret.
+def hook_of(name):
+    job = next(d for d in docs(work / f"{name}.yaml") if d.get("kind") == "Job"
+               and d["metadata"]["name"].endswith("-inference-provider-hook"))
+    container = job["spec"]["template"]["spec"]["containers"][0]
+    return container.get("env", []), container["command"][-1]
+
+if rendered("good-8-inference-oidc") is not None:
+    env, script = hook_of("good-8-inference-oidc")
+    literal = {e["name"]: e.get("value") for e in env}
+    for key, want in (("OPENSHELL_NO_BROWSER", "1"), ("OIDC_ISSUER", "https://issuer.example"),
+                      ("OIDC_CLIENT_ID", "osh-client"), ("OIDC_AUDIENCE", "osh-client")):
+        if literal.get(key) != want:
+            failures.append(f"good-8-inference-oidc: hook env {key}={literal.get(key)!r}, want {want!r}")
+    secret = [e for e in env if e["name"] == "OPENSHELL_OIDC_CLIENT_SECRET"]
+    ref = (secret[0].get("valueFrom") or {}).get("secretKeyRef") if len(secret) == 1 else None
+    if len(secret) != 1 or "value" in secret[0] or ref != {"name": "oidc-client", "key": "client-secret"}:
+        failures.append("good-8-inference-oidc: OPENSHELL_OIDC_CLIENT_SECRET must be exactly one secretKeyRef "
+                        f"to gateway.oidc.clientCredentialsSecret with no literal value: {secret}")
+    if re.search(r"\$\{?OPENSHELL_OIDC_CLIENT_SECRET\b", script):
+        failures.append("good-8-inference-oidc: the hook script expands OPENSHELL_OIDC_CLIENT_SECRET; "
+                        "the CLI must read it from its own environment")
+    add = re.search(r'openshell gateway add "\$\{GATEWAY_URL\}" --name in-cluster(?:[^\n]*\\\n)*[^\n]*', script)
+    if not add or any(f not in add.group(0) for f in
+                      ('--oidc-issuer "${OIDC_ISSUER}"', '--oidc-client-id "${OIDC_CLIENT_ID}"',
+                       '--oidc-audience "${OIDC_AUDIENCE}"')):
+        failures.append("good-8-inference-oidc: the hook does not register the gateway with "
+                        "`openshell gateway add ... --oidc-issuer --oidc-client-id --oidc-audience`")
+    if "--gateway-endpoint" in script or "openshell --gateway in-cluster" not in script:
+        failures.append("good-8-inference-oidc: under OIDC the hook must address the registered gateway "
+                        "(--gateway in-cluster), never --gateway-endpoint, which sends no token")
+# Without OIDC nothing changes: no registration, no OIDC environment.
+env, script = hook_of("rbac-inference")
+if "gateway add" in script or '--gateway-endpoint "${GATEWAY_URL}"' not in script or any(
+        e["name"].startswith(("OPENSHELL_OIDC", "OIDC_")) or e["name"] == "OPENSHELL_NO_BROWSER" for e in env):
+    failures.append("rbac-inference: without OIDC the hook must dial --gateway-endpoint and carry no OIDC settings")
 
 if failures:
     print("CHART_RENDER_FAIL:")

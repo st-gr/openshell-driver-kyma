@@ -64,10 +64,15 @@ never answers and fails the install. */ -}}
 {{- /* With an OIDC issuer the gateway runs allow_unauthenticated_users = false
 (gateway-config.yaml), and upstream then answers a call without a bearer token
 with Unauthenticated (openshell-server src/multiplex.rs AuthGrpcRouter at the
-pinned tag). The hook's CLI calls carry no token, so every one fails and so does
-the install. */ -}}
+pinned tag). The hook therefore authenticates with the client-credentials grant
+(inference-provider-hook.yaml), which needs the client and its secret. */ -}}
 {{- if .Values.gateway.oidc.issuer -}}
-{{- fail "inferenceProvider.enabled=true cannot be combined with gateway.oidc.issuer: the provider hook calls the gateway without a token, and a gateway with OIDC refuses unauthenticated calls. Leave inferenceProvider disabled and register the profile and provider from an authenticated CLI session (docs/production-deployment.md)." -}}
+{{- if not .Values.gateway.oidc.clientId -}}
+{{- fail "inferenceProvider.enabled=true with gateway.oidc.issuer requires gateway.oidc.clientId: the provider hook authenticates to the gateway with that client's client-credentials grant." -}}
+{{- end -}}
+{{- if not (and .Values.gateway.oidc.clientCredentialsSecret.name .Values.gateway.oidc.clientCredentialsSecret.key) -}}
+{{- fail "inferenceProvider.enabled=true with gateway.oidc.issuer requires gateway.oidc.clientCredentialsSecret.name (and .key): a Secret you manage in .Release.Namespace holding the OIDC client secret, which the provider hook exchanges for a token. Without one, leave inferenceProvider disabled and register the profile and provider from an authenticated CLI session (docs/production-deployment.md)." -}}
+{{- end -}}
 {{- end -}}
 {{- /* The hook dials the gateway at http:// (GATEWAY_URL and GATEWAY_HEALTH_URL in
 inference-provider-hook.yaml, whatever gateway.tls.enabled says) and mounts no
