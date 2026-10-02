@@ -129,21 +129,43 @@ kubectl -n "$NS" logs deploy/ods-openshell-driver-kyma -c gateway --tail=50
 The last line proves the gateway is talking to the driver over the shared
 Unix socket. If it is missing, check the driver container's logs.
 
-Reach the gateway, create a sandbox, exec into it:
+Reach the gateway from your laptop, create a sandbox, get a shell in it
+(install the v0.1.2 CLI first, see [install-cli.md](install-cli.md)):
 
 ```bash
 kubectl -n "$NS" port-forward svc/ods-openshell-driver-kyma 8080:8080 &
 
+# No --from: the sandbox runs the chart's driver.sandboxImage (upstream's
+# default Ubuntu image). No command: the sandbox's main process is the
+# image's login shell, which is what `sandbox connect` attaches to.
 openshell --gateway-endpoint http://localhost:8080 sandbox create \
-  --name hello \
-  --from ghcr.io/nvidia/openshell-community/sandboxes/base:latest \
-  --detach \
-  -- sleep infinity
+  --name hello --detach
+
+openshell --gateway-endpoint http://localhost:8080 sandbox connect hello
+#   ...an interactive shell inside the sandbox. Detach with Ctrl-P Ctrl-Q to
+#   keep the sandbox running; `exit` ends its main process, after which the
+#   sandbox shows `Completed` and cannot be connected to again.
 
 openshell --gateway-endpoint http://localhost:8080 sandbox exec \
   --name hello \
   -- echo "hello from inside the sandbox"
+
+openshell --gateway-endpoint http://localhost:8080 sandbox delete hello
 ```
+
+Two things that look like "the sandbox is unreachable" but are not:
+
+- `sandbox connect` attaches to the sandbox's **main process**. A sandbox
+  created with `-- sleep infinity` connects to `sleep`, which prints nothing
+  and takes no input; create it without a command (login shell) if you want
+  `connect`, and use `sandbox exec` for one-off commands. Typing `exit` in a
+  connected login shell ends the sandbox (`Completed`); detach with
+  Ctrl-P Ctrl-Q instead.
+- Do not create sandboxes from
+  `ghcr.io/nvidia/openshell-community/sandboxes/base:latest`: that image
+  embeds a sandbox policy the v0.1.2 supervisor rejects ("Image policy is
+  invalid"), so the sandbox never reaches Ready. Use the default image, or an
+  image without an embedded policy such as `ghcr.io/st-gr/sandbox-claude`.
 
 `sandbox create --detach` returns once the gateway reports the sandbox
 `Ready`. Behind that: the CLI calls `CreateSandbox` on the gateway → the
@@ -214,6 +236,32 @@ How the routing works (per
 `node` and `claude` under `/usr/bin` and `/usr/local/bin`. Add the
 interpreter of any other SDK your sandbox image uses to
 `inferenceProvider.binaries`.
+
+### Reach a web service inside the sandbox
+
+Upstream's `openshell service expose` relays a loopback port of the sandbox
+through the gateway; nothing routes to the pod itself (see
+[`production-deployment.md`](production-deployment.md)). The service must
+listen on `127.0.0.1`:
+
+```bash
+openshell sandbox create --detach --name web --from python:3.12-slim \
+  -- python3 -m http.server 8080 --bind 127.0.0.1
+openshell service expose web 8080
+#   URL: http://default--web.openshell.localhost:8080/
+```
+
+With the port-forward from above still running, open that URL in Chrome (it
+resolves `*.openshell.localhost` to the forwarded port by itself), or:
+
+```bash
+curl --resolve default--web.openshell.localhost:8080:127.0.0.1 \
+  http://default--web.openshell.localhost:8080/
+```
+
+`openshell service expose web 8080 admin` adds a named endpoint at
+`http://default--web--admin.openshell.localhost:8080/`, and
+`openshell service list web` shows them. Verified live on v0.9.0.
 
 ### Two operational notes
 
@@ -330,14 +378,17 @@ The Job is idempotent (re-runs cleanly on `helm upgrade`). The chart
 never sees the API key — it's mounted into the Job pod from your Secret
 via `secretKeyRef`.
 
-## Appendix B: public exposure via Kyma APIRule
+## Appendix B: remote access without a port-forward
 
-For exposing the gateway outside the cluster (so the `openshell` CLI
-runs on a developer laptop, not via port-forward), set
-`gatewayApirule.enabled=true` and supply `gateway.oidc.issuer`. The
-chart refuses to render an APIRule for an unauthenticated gateway. See
-[`production-deployment.md`](production-deployment.md) for the full
-setup.
+To use the `openshell` CLI from a laptop without a port-forward, publish the
+gateway through the cluster's Istio ingress gateway: set
+`gatewayIngress.enabled=true`, `gatewayIngress.domain`,
+`gateway.tls.enabled=true` and `gateway.oidc.{issuer,audience,clientId}`. The
+gateway authenticates every call with OIDC, and the chart refuses to publish an
+unauthenticated one. `gatewayIngress.serviceHosts.enabled` additionally
+publishes the URLs `openshell service expose` prints. An install from before
+0.10.0 must delete its PKI Secrets first ("Upgrading to gateway TLS" there). See
+[`production-deployment.md`](production-deployment.md) for the full setup.
 
 ## Troubleshooting
 
@@ -371,11 +422,10 @@ only if you set an OIDC issuer) or the driver's ClusterRole lacks
 
 **`inference-provider-hook` Job stuck or failed.** Read its log
 (`kubectl -n "$NS" logs job/<release>-openshell-driver-kyma-inference-provider-hook`).
-The chart refuses to render `inferenceProvider.enabled` together with
-`gateway.oidc.issuer`: the Job calls the gateway without a token, which a
-gateway with OIDC refuses. With OIDC, register the profile and provider from
-an authenticated CLI session instead; see
-[`production-deployment.md`](production-deployment.md), step 3b.
+With `gateway.oidc.issuer` the Job logs in with the client-credentials grant
+and needs `gateway.oidc.clientCredentialsSecret`; without a client secret,
+register the profile and provider from an authenticated CLI session instead;
+see [`production-deployment.md`](production-deployment.md), step 3b.
 
 If the Job's log says the provider "exists with type …", a provider of that
 name was created under another profile (for example by 0.8.0). A provider's

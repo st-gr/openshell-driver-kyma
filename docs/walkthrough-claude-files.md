@@ -4,7 +4,7 @@ This is the canonical hands-on guide. It takes a clean Kyma cluster
 through:
 
 1. Cluster prerequisites + namespace bootstrap.
-2. Installing the chart (`0.9.0`) from OCI.
+2. Installing the chart (`0.10.0`) from OCI.
 3. Installing the `openshell` CLI on your host.
 4. Creating a Claude-equipped sandbox.
 5. Uploading a file to the sandbox.
@@ -122,7 +122,7 @@ curl -fsSL https://raw.githubusercontent.com/st-gr/openshell-driver-kyma/main/de
 
 ```bash
 helm install ods oci://ghcr.io/st-gr/charts/openshell-driver-kyma \
-  --version 0.9.0 \
+  --version 0.10.0 \
   --namespace "$NS" \
   -f my-values.yaml \
   --wait --timeout=300s
@@ -176,7 +176,10 @@ What's happening:
   from `inferenceProvider.baseUrl` and `.modelId`.
 - `--detach -- sleep infinity` — `--detach` returns once the gateway reports
   the sandbox `Ready`; the trailing command is the sandbox's main process,
-  kept alive with `sleep`.
+  kept alive with `sleep`. `sandbox connect` would attach to that `sleep`,
+  so this walkthrough uses `sandbox exec`; for an interactive shell create a
+  sandbox without a trailing command and detach with Ctrl-P Ctrl-Q (`exit`
+  ends it).
 
 ## 7. Upload a file
 

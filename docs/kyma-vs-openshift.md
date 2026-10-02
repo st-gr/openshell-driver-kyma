@@ -7,10 +7,10 @@ concrete differences between it and the Kyma driver.
 
 The Kyma driver runs upstream OpenShell's Kubernetes driver
 (`openshell-driver-kubernetes`, release v0.1.2) unchanged, so provisioning,
-sandbox authentication and isolation are upstream's, and it adds three things
+sandbox authentication and isolation are upstream's, and it adds two things
 of its own: request enrichment (the Istio opt-out and Kagenti labels, plus
-configured sandbox environment), optional APIRule exposure, and Pod Security
-labels on the namespaces the driver creates in managed mode. Everything below
+configured sandbox environment) and Pod Security labels on the namespaces the
+driver creates in managed mode. Everything below
 that reads "Kyma" describes those additions and the chart around them.
 
 ## Pod admission policy
@@ -46,16 +46,18 @@ reasoning behind defaulting injection off for sandboxes.
 | | OpenShift | Kyma |
 |---|---|---|
 | Native CR | `Route` (`route.openshift.io/v1`) | `APIRule` (`gateway.kyma-project.io/v2`) |
-| Driver support | Phase 2 in upstream OpenShift driver (not yet) | Optional in this driver behind `--kyma-enable-apirule` (`driver.enableApirule`) |
-| Cluster domain | Often `*.<cluster-name>.<base>` | `*.<cluster-id>.kyma.ondemand.com`, set via `--kyma-cluster-domain` (`driver.clusterDomain`, required with exposure) |
+| Gateway | Phase 2 in upstream OpenShift driver (not yet) | `gatewayIngress` publishes the gateway, which authenticates with OIDC (VirtualService, TLS from the ingress gateway to the gateway pod, source-address policies) |
+| Sandbox pods | — | Never, by upstream design (below) |
+| Cluster domain | Often `*.<cluster-name>.<base>` | `*.<cluster-id>.kyma.ondemand.com`, set as `gatewayIngress.domain` |
 
-Each exposed sandbox gets a Service, a NetworkPolicy admitting only the Istio
-ingress gateway on port 8080, and an APIRule at
-`<workspace>--<name>.<cluster-domain>`. That is an explicit exception to
-upstream's isolation; see [`production-deployment.md`](production-deployment.md).
-When `--kyma-enable-apirule` is off, no `apirules.gateway.kyma-project.io`
-RBAC is granted to the driver's ServiceAccount. The driver runs cleanly
-in clusters that don't have the Kyma API Gateway module installed.
+Nothing routes to a sandbox pod: upstream's sandbox runtime brokers the
+workload's `bind`/`listen`/`accept` syscalls and resets every inbound
+connection that does not arrive through the gateway's relay, so an `APIRule`
+or `VirtualService` to the pod answers `503`. A service inside a sandbox is
+reached with `openshell service expose` through the gateway; see
+[`production-deployment.md`](production-deployment.md). The driver needs no
+`apirules.gateway.kyma-project.io` RBAC and runs cleanly in clusters that
+don't have the Kyma API Gateway module installed.
 
 ## Compute / GPU
 
@@ -104,7 +106,7 @@ enrollment labels, GPU validation, `platform_config` passthrough) are all
 upstream's Kubernetes driver's own behaviour here, apart from the Kagenti
 label, which the Kyma layer adds. The OpenShift driver's "Phase 2" roadmap
 (SCC detection, SELinux, Routes, OAuth proxy, Prometheus, Helm chart) is
-mapped to: Istio injection toggle (done), `APIRule` rendering (done), Helm
+mapped to: Istio injection toggle (done), gateway `APIRule` rendering (done), Helm
 chart (done); the driver's Prometheus metrics endpoint is gone (upstream
 traces over OTLP: `driver.otlpEndpoint`), and SCC detection has no Kyma
 equivalent. OAuth proxy sidecar injection is not in scope for the Kyma
@@ -116,8 +118,8 @@ OpenShift driver: relies on a shared sandbox secret + `Route` for the
 gateway. The supervisor reads the secret from a mounted ConfigMap.
 
 Kyma driver: provisioning and authentication are upstream's, unchanged. The
-driver runs upstream's Kubernetes driver and adds request enrichment, APIRule
-exposure and managed-namespace PSA labels; see the top of this page. No shared
+driver runs upstream's Kubernetes driver and adds request enrichment and
+managed-namespace PSA labels; see the top of this page. No shared
 cluster-wide secret exists: a projected, kubelet-rotated ServiceAccount token
 is exchanged for a per-sandbox JWT, which suits Kyma clusters that issue OIDC
 kubeconfigs through SAP IAS.
@@ -140,14 +142,13 @@ metrics ports; egress to DNS and 443). Set `networkPolicy.enabled=false` to
 render neither. The cluster's CNI must enforce NetworkPolicy in every sandbox
 namespace.
 
-## Public APIRule guard
+## Public ingress guard
 
-The chart refuses to render `gatewayApirule.yaml` if
-`gatewayApirule.enabled=true` and `gateway.oidc.issuer=""`. Without
-this guard, an operator could combine a public host with
-`allow_unauthenticated_users=true` (set automatically when no
-issuer) and `--disable-tls`, producing a world-writable sandbox
-factory.
+The chart refuses to render with `gatewayIngress.enabled=true` unless
+`gateway.oidc.issuer`, `audience` and `clientId` are set. Without this guard,
+an operator could combine a public host with
+`allow_unauthenticated_users=true` (set automatically when no issuer) and
+`--disable-tls`, producing a world-writable sandbox factory.
 
 ## Provider-profile inference routing
 

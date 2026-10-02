@@ -4,6 +4,140 @@ All notable changes to openshell-driver-kyma are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.10.0] — 2026-10-01
+
+**UPGRADE NOTE: `gatewayApirule` is removed.** Move to `gatewayIngress` (table
+below) before `helm upgrade`; the chart refuses a values file that still enables
+`gatewayApirule`, so the gateway cannot silently lose its public route.
+
+**UPGRADE NOTE: turning on `gateway.tls.enabled`, which `gatewayIngress`
+requires, needs a new PKI on an existing install, once.** The PKI hook creates
+the gateway's certificate at the first install and never replaces it, and until
+this release it did not put the release's Service names into it, so no client
+could verify it. Before the upgrade that enables gateway TLS, delete the three
+PKI Secrets (all three: upstream's generator refuses a partial set); the upgrade
+creates them again:
+
+```bash
+kubectl -n <namespace> delete secret \
+  <fullname>-server-tls <fullname>-client-tls <fullname>-jwt-keys
+```
+
+Sandboxes from before that upgrade must be recreated: their pods carry the
+plaintext gateway endpoint and tokens of the old signing key. Installs that keep
+gateway TLS off need nothing.
+
+### Added
+
+- **Remote access (`gatewayIngress`)**: publishes the gateway through the
+  cluster's Istio ingress gateway, the way upstream intends a Kubernetes gateway
+  to be reached, so the `openshell` CLI works without a port-forward. The
+  gateway is the only authenticator: it serves TLS (`gateway.tls.enabled`,
+  required) and validates every caller's OIDC token itself. The ingress gateway
+  terminates the client's TLS, routes `openshell.<domain>` (a VirtualService),
+  re-encrypts to the gateway pod and verifies its certificate against the chart
+  CA (a DestinationRule; a post-install Job, which may write that one Secret
+  only, copies the CA's public certificate into `istio-system`). This is
+  upstream's `grpcRoute` with `backendTLSPolicy`, written for Istio. The chart
+  refuses to publish a gateway without `gateway.oidc.{issuer,audience,clientId}`.
+- **Nothing the chart renders applies to the shared ingress gateway as a
+  whole.** It creates no RequestAuthentication (on an ingress gateway one
+  answers 401 to every other application's Bearer tokens), and every
+  AuthorizationPolicy rule names this release's hosts. `allowedCidrs` is an
+  optional source-address fence for the gateway host. It compares the address
+  of the connection the ingress gateway accepted (`gatewayIngress.sourceAddress:
+  connection`, Istio `ipBlocks`), which no request header can change;
+  `forwarded` compares the address taken from `X-Forwarded-For`
+  (`remoteIpBlocks`), for an ingress gateway behind an HTTP proxy, and is only
+  as good as the mesh's `numTrustedProxies`.
+- **`gatewayIngress.policyAction`** chooses how the policies are written:
+  `DENY` (default) for an ingress gateway without ALLOW policies, naming only
+  the chart's own hosts and leaving every other HTTP host alone; `ALLOW` for a
+  gateway that already allowlists per host. An ALLOW policy on a gateway
+  without any would make it deny every other application's hosts; see
+  production-deployment before choosing. Istio applies a DENY rule to TCP and
+  TLS-passthrough servers without its host, so the chart refuses DENY with
+  `allowedCidrs` when the ingress gateway has such a server.
+- **Published service URLs (`gatewayIngress.serviceHosts`)**:
+  services exposed with `openshell service expose` are reachable at
+  `https://<workspace>--<sandbox>.<domain>/`, the URL the CLI prints, routed to
+  the gateway and fenced by `allowedCidrs` (required: the gateway does not
+  authenticate a request to a service URL). Published per workspace
+  (`serviceHosts.workspaces`, default `[default]`): routes and policies match
+  `<workspace>--*`, never the whole domain. API and SDK clients receive the
+  gateway's own URL, with the port it binds in its pod (`:8080`); drop the port.
+- **`gateway.oidc.authOnly`**, `rolesClaim`, `clientId` and
+  `clientCredentialsSecret`. `authOnly: true` selects upstream's
+  authentication-only mode (both roles passed empty; every authenticated
+  identity is then a platform admin); `adminRole` and
+  `userRole` must now be set together.
+- **`networkPolicy.extraEgress`**: extra egress rules for the driver+gateway
+  pod, for destinations that are not on 443 from the pod's point of view, such
+  as an OIDC issuer published through the cluster's own ingress gateway.
+- **`inferenceProvider` with OIDC, and with gateway TLS**: the provider hook
+  logs in with the client-credentials grant when
+  `gateway.oidc.clientCredentialsSecret` names the client secret (and, for
+  providers with a separate confidential client, its `clientId`), and against a
+  gateway that serves TLS it dials `https://` and trusts the chart CA. Both
+  pairs were refused before; the provider with gateway TLS but without OIDC
+  still is.
+- `e2e/keycloak`: a Keycloak test identity provider for clusters without one
+  (upstream's development realm, no credential in the repository), with its
+  own test.
+- `scripts/remote-access-check.sh`, the live acceptance check. While it
+  upgrades a release it watches other applications behind the same ingress
+  gateway, and rolls the release back if one of them starts answering
+  differently; `scripts/remote-access-check-test.sh` tests that without a
+  cluster. `scripts/ingress-non-http-servers.sh` lists an ingress gateway's TCP
+  and TLS-passthrough servers. And a flag check in
+  `scripts/check-gateway-config.sh` (the pinned gateway image must know every
+  flag the chart renders).
+
+### Fixed
+
+- **`gateway.tls.enabled` produced a certificate no client could verify.** The
+  PKI hook now passes the release's Service names and loopback to upstream's
+  certificate generator, as upstream's own chart does; before, the certificate
+  carried only upstream's default names (`openshell`, `openshell.openshell.svc`,
+  …). Existing installs: see the upgrade note.
+
+### Removed
+
+- **`gatewayApirule`** and its APIRule template: never verified, and APIRule v2
+  needs an Istio sidecar on the gateway pod.
+
+### Values migration
+
+| 0.9.x | 0.10.0 |
+|---|---|
+| `gatewayApirule.enabled` | `gatewayIngress.enabled` |
+| `gatewayApirule.host: openshell.<domain>` | `gatewayIngress.domain: <domain>` (and `host` only if it is not `openshell.<domain>`) |
+| `gatewayApirule.gateway` | `gatewayIngress.istioGateway` |
+| `gatewayApirule.rules[].jwt.authentications[].issuer` | `gateway.oidc.issuer` (the gateway validates tokens; the ingress gateway does not) |
+| (none) | `gateway.oidc.clientId` and `gateway.tls.enabled: true` (required with `gatewayIngress`) |
+
+## [0.9.1] — 2026-09-30
+
+### Removed
+
+- **Sandbox pod exposure** (`driver.enableApirule`, `driver.clusterDomain`,
+  `driver.ingressNamespace`; `--kyma-enable-apirule`, `--kyma-cluster-domain`,
+  `--kyma-ingress-namespace`) with its Service, NetworkPolicy, APIRule and
+  Event RBAC. It could never work: upstream's sandbox runtime brokers the
+  workload's `bind`/`listen`/`accept` syscalls and resets every inbound
+  connection that does not come through the gateway's relay, so any route to
+  the pod answered `503` (verified live; the VirtualService variant, PR #79,
+  was closed unmerged). Drop the three values from your values file;
+  `helm upgrade` ignores them otherwise. `gatewayApirule`, which publishes
+  the gateway, is unchanged.
+
+### Documentation
+
+- `openshell service expose` is the way to reach a service inside a sandbox
+  (loopback-bound; the URL is relayed through the gateway and works over the
+  CLI port-forward): recipe in getting-started and production-deployment, and
+  the Kyma-vs-OpenShift comparison updated.
+
 ## [0.9.0] — 2026-09-29
 
 **UPGRADE NOTE: delete all existing sandboxes before upgrading to this
@@ -316,6 +450,12 @@ upgrade. To upgrade from 0.8.0 with only this section in front of you:
 
 ### Known limitations
 
+- **Do not create sandboxes from
+  `ghcr.io/nvidia/openshell-community/sandboxes/base:latest`.** Its embedded
+  sandbox policy is rejected by the v0.1.2 supervisor ("Image policy is
+  invalid"), so such a sandbox never reaches Ready. Use the chart's default
+  image (no `--from`) or an image without an embedded policy. The docs and
+  smokes no longer reference it.
 - **APIRule exposure does not carry traffic yet.** Kyma's APIRule v2 refuses a
   rule whose target pod has no Istio sidecar (`Pod … does not have an injected
   istio sidecar`, live check on v0.9.0), and upstream v0.1.2's workload fence

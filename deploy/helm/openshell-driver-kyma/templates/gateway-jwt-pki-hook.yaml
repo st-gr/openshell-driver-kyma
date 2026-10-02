@@ -119,4 +119,14 @@ spec:
             - --server-secret-name={{ include "openshell-driver-kyma.serverTlsSecretName" . }}
             - --client-secret-name={{ include "openshell-driver-kyma.clientTlsSecretName" . }}
             - --jwt-secret-name={{ include "openshell-driver-kyma.jwtSecretName" . }}
+            # The names clients verify the gateway under: this release's Service
+            # (sandboxes, the provider hook, the ingress gateway) and loopback (a
+            # port-forward). Upstream's own defaults name a release called "openshell".
+            {{- $service := include "openshell-driver-kyma.fullname" . }}
+            - --server-san={{ $service }}
+            - --server-san={{ $service }}.{{ .Release.Namespace }}
+            - --server-san={{ $service }}.{{ .Release.Namespace }}.svc
+            - --server-san={{ $service }}.{{ .Release.Namespace }}.svc.cluster.local
+            - --server-san=localhost
+            - --server-san=127.0.0.1
 {{- end }}

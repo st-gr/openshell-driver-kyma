@@ -28,8 +28,11 @@ RUN apt-get update \
          ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-RUN groupadd -g 1000660000 sandbox \
-    && useradd -m -u 1000660000 -g sandbox sandbox
+# uid/gid 10001 is what upstream OpenShell v0.1.2's supervisor runs the
+# workload as by default (its run_as_user); a matching passwd entry gives
+# `sandbox connect` a named prompt instead of "I have no name!".
+RUN groupadd -g 10001 sandbox \
+    && useradd -m -u 10001 -g sandbox sandbox
 
 RUN install -d -o sandbox -g sandbox /sandbox
 WORKDIR /sandbox

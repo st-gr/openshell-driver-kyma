@@ -19,7 +19,7 @@
 #      no empty label set while admission is enabled); and 3h
 #      gateway settings that cannot work: the in-pod gateway without the Service
 #      sandboxes dial or without sandbox-JWT keys, and the provider hook without
-#      the gateway's Service or against an OIDC or TLS gateway it cannot reach;
+#      the gateway's Service, against a TLS gateway, or against an OIDC gateway without a client secret;
 #   4. the chart's NetworkPolicies: exactly one selects OpenShell sandbox pods, the
 #      mirror of upstream's SSH-ingress restriction, present in shared mode with the
 #      in-pod gateway only; in managed mode the driver applies it instead, so the
@@ -44,6 +44,20 @@
 #      model or binaries list the driver or upstream would refuse (a comma, a URL
 #      that is not plain http(s) to a host name, credentials in the URL, nothing
 #      listed) fails the render, naming the value and never echoing credentials.
+#   8. remote access (gatewayIngress): values that cannot work (no OIDC, no domain, a
+#      host outside it, a gateway without TLS or with a client CA, service hosts
+#      without an allowlist, a malformed CIDR, one OIDC role without the other) fail
+#      the render; the gateway serves TLS on its usual port, with a certificate that
+#      names this release's Service; the Istio routes, the TLS rule from the ingress
+#      gateway to the pod and the policies are exactly the documented ones; the
+#      ingress gateway's namespace gets nothing but those policies, the chart CA's
+#      public certificate and the right of one Job to write it; and the provider
+#      hook authenticates with the client-credentials grant under OIDC.
+#      8b: in every render, nothing applies to the shared ingress gateway as a whole:
+#      no RequestAuthentication, and no AuthorizationPolicy rule without this
+#      release's hosts.
+#      8c: DENY policies with source addresses are refused on an ingress gateway that
+#      has TCP or TLS-passthrough servers, where Istio would apply them without the host.
 # Needs helm, python3 with PyYAML, and network access (for check 1).
 set -euo pipefail
 
@@ -234,11 +248,36 @@ inference_try bad-3h-inference-no-service 'gatewayService.enabled' --set "infere
 	--set gatewayService.enabled=false --set driver.gatewayEndpoint=http://gateway.example:8080
 inference_try bad-3h-inference-no-gateway 'gateway.enabled' --set "inferenceProvider.baseUrl=$inference_url" \
 	--set gateway.enabled=false
-inference_try bad-3h-inference-oidc 'gateway.oidc.issuer' --set "inferenceProvider.baseUrl=$inference_url" \
-	--set gateway.oidc.issuer=https://issuer.example --set gateway.oidc.audience=openshell
-# ...and the hook dials http:// with no client certificate, so it cannot reach a gateway
-# with TLS: in three series, both together fail; TLS alone and the provider alone render.
-inference_try bad-3h-inference-tls 'gateway.tls.enabled' --set "inferenceProvider.baseUrl=$inference_url" \
+# With OIDC the hook needs a client and its secret for the client-credentials grant.
+inference_try bad-3h-inference-oidc 'gateway.oidc.clientCredentialsSecret.name' \
+	--set "inferenceProvider.baseUrl=$inference_url" \
+	--set gateway.oidc.issuer=https://issuer.example --set gateway.oidc.audience=osh-client \
+	--set gateway.oidc.clientId=osh-client
+inference_try bad-3h-inference-oidc-no-client 'gateway.oidc.clientId' \
+	--set "inferenceProvider.baseUrl=$inference_url" \
+	--set gateway.oidc.issuer=https://issuer.example --set gateway.oidc.audience=osh-client \
+	--set gateway.oidc.clientCredentialsSecret.name=oidc-client
+inference_try good-8-inference-oidc '' --set "inferenceProvider.baseUrl=$inference_url" \
+	--set gateway.oidc.issuer=https://issuer.example --set gateway.oidc.audience=osh-client \
+	--set gateway.oidc.clientId=osh-client --set gateway.oidc.clientCredentialsSecret.name=oidc-client
+# A provider with a separate confidential client for the grant (Keycloak): the hook logs in
+# with that client, the CLI keeps gateway.oidc.clientId; either one satisfies the hook.
+inference_try good-8-inference-oidc-hook-client '' --set "inferenceProvider.baseUrl=$inference_url" \
+	--set gateway.oidc.issuer=https://issuer.example --set gateway.oidc.audience=osh-client \
+	--set gateway.oidc.clientId=osh-client --set gateway.oidc.clientCredentialsSecret.name=oidc-client \
+	--set gateway.oidc.clientCredentialsSecret.clientId=osh-hook
+inference_try good-8-inference-oidc-only-hook-client '' --set "inferenceProvider.baseUrl=$inference_url" \
+	--set gateway.oidc.issuer=https://issuer.example --set gateway.oidc.audience=osh-client \
+	--set gateway.oidc.clientCredentialsSecret.name=oidc-client \
+	--set gateway.oidc.clientCredentialsSecret.clientId=osh-hook
+# ...and against a gateway with TLS the hook has a path only under OIDC, where it registers
+# the gateway and trusts the chart CA. Without OIDC both together fail; TLS alone, the
+# provider alone, and both with OIDC render.
+inference_try bad-3h-inference-tls 'requires gateway.oidc.issuer' --set "inferenceProvider.baseUrl=$inference_url" \
+	--set gateway.tls.enabled=true
+inference_try good-8-inference-oidc-tls '' --set "inferenceProvider.baseUrl=$inference_url" \
+	--set gateway.oidc.issuer=https://issuer.example --set gateway.oidc.audience=osh-client \
+	--set gateway.oidc.clientId=osh-client --set gateway.oidc.clientCredentialsSecret.name=oidc-client \
 	--set gateway.tls.enabled=true
 try good-3h-tls-no-inference '' t --set gateway.tls.enabled=true
 try good-3h-inference-no-tls '' t "${inference_common[@]}" --set "inferenceProvider.baseUrl=$inference_url" \
@@ -256,19 +295,140 @@ try good-7-binaries '' t "${inference_common[@]}" --set "inferenceProvider.baseU
 	--set "inferenceProvider.modelId=$inference_model" \
 	--set-json 'inferenceProvider.binaries=["/opt/agent/bin/python3","/usr/bin/node"]'
 
+# 8. Remote access (gatewayIngress): the gateway published through the cluster's Istio
+# ingress gateway. The names start with good-8/bad-8, so checks 4 and 5 (r*.yaml) skip them.
+ingress_common=(--set gatewayIngress.enabled=true --set gatewayIngress.domain=example.org
+	--set gateway.oidc.issuer=https://issuer.example --set gateway.oidc.audience=osh-client
+	--set gateway.oidc.clientId=osh-client --set gateway.oidc.authOnly=true
+	--set gateway.tls.enabled=true)
+ingress_services=(--set gatewayIngress.serviceHosts.enabled=true
+	--set-json 'gatewayIngress.allowedCidrs=["203.0.113.0/24","2001:db8::/32"]')
+try good-8-ingress '' t "${ingress_common[@]}"
+try good-8-services '' t "${ingress_common[@]}" "${ingress_services[@]}"
+try good-8-host '' t "${ingress_common[@]}" --set gatewayIngress.host=osh.example.org
+# Another release name and namespace.
+try good-8-long-names '' prod-sandboxes "${ingress_common[@]}" "${ingress_services[@]}" \
+	--namespace a-rather-long-release-namespace-name
+# RBAC roles instead of authentication-only, and an issuer with neither (upstream's defaults).
+try good-8-rbac-roles '' t "${ingress_common[@]}" --set gateway.oidc.authOnly=false \
+	--set gateway.oidc.rolesClaim=groups --set gateway.oidc.adminRole=osh-admin --set gateway.oidc.userRole=osh-user
+try good-8-oidc-default-roles '' t --set gateway.oidc.issuer=https://issuer.example --set gateway.oidc.audience=osh-client
+try bad-8-no-oidc 'REFUSING to publish an unauthenticated gateway' t --set gatewayIngress.enabled=true \
+	--set gatewayIngress.domain=example.org
+try bad-8-no-client-id 'gateway.oidc.clientId' t "${ingress_common[@]}" --set gateway.oidc.clientId=
+try bad-8-no-service 'gatewayService.enabled' t "${ingress_common[@]}" --set gatewayService.enabled=false \
+	--set driver.gatewayEndpoint=http://gateway.example:8080
+try bad-8-no-domain 'gatewayIngress.domain' t "${ingress_common[@]}" --set gatewayIngress.domain=
+try bad-8-wildcard-domain '*.example.org' t "${ingress_common[@]}" --set 'gatewayIngress.domain=*.example.org'
+try bad-8-upper-domain 'Example.org' t "${ingress_common[@]}" --set gatewayIngress.domain=Example.org
+try bad-8-dot-domain 'example.org.' t "${ingress_common[@]}" --set gatewayIngress.domain=example.org.
+try bad-8-host-elsewhere 'openshell.other.org' t "${ingress_common[@]}" --set gatewayIngress.host=openshell.other.org
+try bad-8-host-two-labels 'a.b.example.org' t "${ingress_common[@]}" --set gatewayIngress.host=a.b.example.org
+try bad-8-host-service-shape 'a--b.example.org' t "${ingress_common[@]}" --set gatewayIngress.host=a--b.example.org
+# Behind the ingress gateway the gateway serves TLS, and takes no client certificate:
+# the ingress gateway has none to present.
+try bad-8-no-tls 'requires gateway.tls.enabled=true' t "${ingress_common[@]}" --set gateway.tls.enabled=false
+try bad-8-client-ca 'gateway.tls.clientCa.enabled' t "${ingress_common[@]}" --set gateway.tls.clientCa.enabled=true
+try bad-8-no-ca-hook-image 'gatewayIngress.caHook.image' t "${ingress_common[@]}" --set gatewayIngress.caHook.image=
+# A server TLS Secret under the operator's own name is the one the CA is copied from.
+try good-8-pki-names '' t "${ingress_common[@]}" --set gateway.sandboxJwt.serverTlsSecretName=own-server-tls
+
+# 8c. A DENY rule is matched by host only on HTTP servers. For a TCP or TLS-passthrough
+# server of the same ingress gateway Istio builds the rule without its hosts (an HTTP-only
+# field) and keeps the source addresses: every connection to that server from outside
+# allowedCidrs would be refused, whatever application it belongs to. So with DENY and
+# allowedCidrs the chart reads the cluster's Gateways and refuses when one on this ingress
+# gateway has such a server. `lookup` returns nothing in `helm template`: these renders use
+# a copy of the chart in which the lookup is replaced by the value probeGateways.
+probe_chart="$WORK/chart-probe"
+cp -R "$CHART" "$probe_chart"
+python3 - "$probe_chart/templates/_gateway-ingress.tpl" <<'PROBE'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+lookup = '(lookup "networking.istio.io/v1" "Gateway" "" "")'
+if text.count(lookup) != 1:
+    sys.exit("CHART_RENDER_FAIL: _gateway-ingress.tpl must read the cluster's Gateways with "
+             f"{lookup} exactly once, found {text.count(lookup)}")
+path.write_text(text.replace(lookup, '(dict "items" .Values.probeGateways)'))
+PROBE
+probe_try() { # NAME EXPECT [helm args...]: like try, on the chart copy, with remote access on
+	local name=$1 expect=$2 rc=0
+	shift 2
+	helm template t "$probe_chart" --set gateway.enabled=true --set gateway.sandboxJwt.enabled=true \
+		--set gatewayService.enabled=true "${ingress_common[@]}" "$@" >"$WORK/$name.yaml" 2>"$WORK/$name.err" || rc=$?
+	printf '%s' "$rc" >"$WORK/$name.rc"
+	printf '%s' "$expect" >"$WORK/$name.expect"
+}
+# The Kyma gateway (HTTPS and HTTP), and a Gateway of another gateway deployment.
+gateways_http='{"metadata":{"namespace":"kyma-system","name":"kyma-gateway"},"spec":{"selector":{"istio":"ingressgateway","app":"istio-ingressgateway"},"servers":[{"port":{"number":443,"protocol":"HTTPS"},"tls":{"mode":"SIMPLE"}},{"port":{"number":80,"protocol":"HTTP"}}]}},{"metadata":{"namespace":"mesh","name":"eastwest"},"spec":{"selector":{"istio":"eastwestgateway"},"servers":[{"port":{"number":15443,"protocol":"TLS"},"tls":{"mode":"AUTO_PASSTHROUGH"}}]}}'
+# ...and two more on this ingress gateway: a TCP server and a TLS-passthrough one.
+gateways_tcp='{"metadata":{"namespace":"apps","name":"db-gateway"},"spec":{"selector":{"istio":"ingressgateway"},"servers":[{"port":{"number":5432,"protocol":"TCP"}}]}},{"metadata":{"namespace":"apps","name":"passthrough"},"spec":{"selector":{"istio":"ingressgateway"},"servers":[{"port":{"number":443,"protocol":"HTTPS"},"tls":{"mode":"PASSTHROUGH"}}]}}'
+probe_cidrs=(--set-json 'gatewayIngress.allowedCidrs=["203.0.113.0/24"]')
+probe_try bad-8c-deny-tcp 'apps/db-gateway port 5432 (TCP)' "${probe_cidrs[@]}" \
+	--set-json "probeGateways=[$gateways_http,$gateways_tcp]"
+probe_try good-8c-deny-http '' "${probe_cidrs[@]}" --set-json "probeGateways=[$gateways_http]"
+# ALLOW rules with HTTP-only fields are skipped on such servers, and without allowedCidrs
+# DENY renders no source-address rule.
+probe_try good-8c-allow-tcp '' "${probe_cidrs[@]}" --set gatewayIngress.policyAction=ALLOW \
+	--set-json "probeGateways=[$gateways_http,$gateways_tcp]"
+probe_try good-8c-deny-no-cidrs '' --set-json "probeGateways=[$gateways_http,$gateways_tcp]"
+try bad-8-services-no-cidrs 'gatewayIngress.allowedCidrs' t "${ingress_common[@]}" \
+	--set gatewayIngress.serviceHosts.enabled=true
+try bad-8-cidr 'office' t "${ingress_common[@]}" --set-json 'gatewayIngress.allowedCidrs=["office"]'
+try bad-8-services-port-80 'gateway.grpcPort=80' t "${ingress_common[@]}" "${ingress_services[@]}" \
+	--set gateway.grpcPort=80
+try bad-8-one-role 'must be set together' t --set gateway.oidc.issuer=https://issuer.example \
+	--set gateway.oidc.audience=osh-client --set gateway.oidc.adminRole=osh-admin
+try bad-8-auth-only-with-roles 'gateway.oidc.authOnly' t --set gateway.oidc.issuer=https://issuer.example \
+	--set gateway.oidc.audience=osh-client --set gateway.oidc.authOnly=true \
+	--set gateway.oidc.adminRole=osh-admin --set gateway.oidc.userRole=osh-user
+
+# The policy action follows the ingress gateway: DENY by default, which leaves every other
+# host alone; ALLOW only where the gateway already allowlists. Service hosts are published per
+# workspace, so no policy or route covers another application's host.
+try good-8-allow '' t "${ingress_common[@]}" --set gatewayIngress.policyAction=ALLOW
+try good-8-allow-services '' t "${ingress_common[@]}" "${ingress_services[@]}" --set gatewayIngress.policyAction=ALLOW \
+	--set-json 'gatewayIngress.serviceHosts.workspaces=["default","team-a"]'
+try bad-8-policy-action 'gatewayIngress.policyAction' t "${ingress_common[@]}" --set gatewayIngress.policyAction=allow
+# The fence compares the address of the connection the ingress gateway accepted (ipBlocks),
+# which no request header can change. sourceAddress=forwarded compares the address Istio
+# takes from X-Forwarded-For (remoteIpBlocks), for an ingress gateway behind an HTTP proxy.
+try good-8-forwarded '' t "${ingress_common[@]}" "${ingress_services[@]}" --set gatewayIngress.sourceAddress=forwarded
+try good-8-allow-forwarded '' t "${ingress_common[@]}" "${ingress_services[@]}" --set gatewayIngress.policyAction=ALLOW \
+	--set gatewayIngress.sourceAddress=forwarded
+try bad-8-source-address 'gatewayIngress.sourceAddress' t "${ingress_common[@]}" --set gatewayIngress.sourceAddress=xff
+try bad-8-workspaces-empty 'gatewayIngress.serviceHosts.workspaces' t "${ingress_common[@]}" "${ingress_services[@]}" \
+	--set-json 'gatewayIngress.serviceHosts.workspaces=[]'
+try bad-8-workspace-name 'Team_A' t "${ingress_common[@]}" "${ingress_services[@]}" \
+	--set-json 'gatewayIngress.serviceHosts.workspaces=["Team_A"]'
+try bad-8-workspace-double-hyphen 'a--b' t "${ingress_common[@]}" "${ingress_services[@]}" \
+	--set-json 'gatewayIngress.serviceHosts.workspaces=["a--b"]'
+# A boolean given as a string is truthy in a template, whatever it says.
+try bad-8-auth-only-string 'gateway.oidc.authOnly must be a boolean' t --set gateway.oidc.issuer=https://issuer.example \
+	--set gateway.oidc.audience=osh-client --set-string gateway.oidc.authOnly=false
+try bad-8-enabled-string 'gatewayIngress.enabled must be a boolean' t --set-string gatewayIngress.enabled=false
+try bad-8-services-enabled-string 'gatewayIngress.serviceHosts.enabled must be a boolean' t "${ingress_common[@]}" \
+	--set-string gatewayIngress.serviceHosts.enabled=false
+# A policy in the ingress gateway's namespace without a selector applies to every workload of the mesh.
+try bad-8-selector-empty 'gatewayIngress.ingressSelector' t "${ingress_common[@]}" \
+	--set-json 'gatewayIngress.ingressSelector=null'
+try bad-8-ingress-namespace-empty 'gatewayIngress.ingressNamespace' t "${ingress_common[@]}" \
+	--set gatewayIngress.ingressNamespace=
+try bad-8-istio-gateway-empty 'gatewayIngress.istioGateway' t "${ingress_common[@]}" --set gatewayIngress.istioGateway=
+# A 0.9.x values file that still enables the removed APIRule must not lose its route silently.
+try bad-8-apirule-leftover 'gatewayApirule' t --set gatewayApirule.enabled=true \
+	--set gatewayApirule.host=openshell.example.org
+
 # 4 and 5. Renders for the NetworkPolicy and RBAC checks. Named rbac-*, so check 2's
 # render-*.yaml glob skips them, and check 4's r*.yaml glob takes them.
-# Exposure on, in shared, managed (which also labels namespaces) and operator mode.
-render_as t --set driver.enableApirule=true --set driver.clusterDomain=example.org \
-	>"$WORK/rbac-apirule.yaml"
+# Managed with an explicit PSA level (which labels namespaces) and without one, and operator mode.
 render_as t --set driver.workspaceMode=managed --set gateway.sandboxJwt.gatewayId=gw \
-	--set driver.enableApirule=true --set driver.clusterDomain=example.org \
-	--set driver.workspacePsaLevel=baseline >"$WORK/rbac-managed-apirule.yaml"
+	--set driver.workspacePsaLevel=baseline >"$WORK/rbac-managed-psa.yaml"
 render_as t --set driver.workspaceMode=managed --set gateway.sandboxJwt.gatewayId=gw \
 	--set driver.workspacePsaLevel="" >"$WORK/rbac-managed-no-psa.yaml"
 render_as t --set driver.workspaceMode=operator --set driver.operatorNamespaceLabel=team=a \
-	--set driver.enableApirule=true --set driver.clusterDomain=example.org \
-	>"$WORK/rbac-operator-apirule.yaml"
+	>"$WORK/rbac-operator.yaml"
 # Managed SSH ingress, which makes the driver write a NetworkPolicy in every workspace:
 # on by default with the in-pod gateway and networkPolicy.enabled (every managed render
 # above), here with an explicit namespace and selector, and off when networkPolicy is,
@@ -312,6 +472,12 @@ render_as t --set driver.otlpEndpoint=collector.example:4317 >"$WORK/rbac-otlp-n
 render_as t --set driver.otlpEndpoint=http://collector.example:4317 --set networkPolicy.enabled=false \
 	>"$WORK/rbac-otlp-no-netpol.yaml"
 render_as t --set gateway.enabled=false >"$WORK/rbac-shared-no-gateway.yaml"
+# Operator-supplied egress for the driver+gateway pod, appended to the chart's own rules:
+# for example an OIDC issuer published through this cluster's own ingress gateway, which a
+# CNI that applies policy after DNAT sees on the ingress pod's port, not on 443.
+render_as t --set-json 'networkPolicy.extraEgress=[{"to":[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"istio-system"}},"podSelector":{"matchLabels":{"istio":"ingressgateway"}}}],"ports":[{"protocol":"TCP","port":8443}]}]' \
+	>"$WORK/rbac-extra-egress.yaml"
+try bad-4-extra-egress-string 'networkPolicy.extraEgress' t --set networkPolicy.extraEgress=istio-system
 render_as t --set bedrockBridge.enabled=true --set bedrockBridge.sap.serviceKeySecret.name=sap-key \
 	--set bedrockBridge.singleDeploymentId=deployment >"$WORK/rbac-bedrock-bridge.yaml"
 # An inference provider, whose hook has a Role of its own that must not reach the driver.
@@ -578,7 +744,7 @@ NO_SSH_RESTRICTION = {"rbac-shared-no-netpol.yaml": "networkPolicy.enabled=false
 MANAGED_SSH = {
     "render-managed-true": (None, own_pods[0]),
     "render-managed-false": (None, own_pods[0]),
-    "rbac-managed-apirule": (None, own_pods[0]),
+    "rbac-managed-psa": (None, own_pods[0]),
     "rbac-managed-secrets": (None, own_pods[0]),
     "rbac-managed-no-psa": (None, own_pods[0]),                 # in-pod gateway, PSA label cleared
     "rbac-managed-ssh": ("gw-ns", {"app": "gateway"}),            # explicit values override the defaults
@@ -594,6 +760,11 @@ MANAGED_SSH = {
 DRIVER_EGRESS = [{"ports": [{"port": 53, "protocol": "UDP"}, {"port": 53, "protocol": "TCP"}]},
                  {"ports": [{"port": 443, "protocol": "TCP"}]}]
 OTLP_PORT = {"good-all-options.yaml": 4317, "rbac-otlp-https.yaml": 443, "rbac-otlp-http.yaml": 80}
+# networkPolicy.extraEgress is appended as given (render -> rules).
+EXTRA_EGRESS = {"rbac-extra-egress.yaml": [
+    {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "istio-system"}},
+             "podSelector": {"matchLabels": {"istio": "ingressgateway"}}}],
+     "ports": [{"protocol": "TCP", "port": 8443}]}]}
 
 def ssh_restriction(release_namespace):
     return {"podSelector": {"matchLabels": {"openshell.ai/managed-by": "openshell"}},
@@ -637,7 +808,8 @@ for render in sorted(work.glob("r*.yaml")) + [work / "good-all-options.yaml"]:
     driver_policy = [d for d in policies if d["metadata"]["name"] == pod["metadata"]["name"] + "-driver"]
     if driver_policy:
         otlp = OTLP_PORT.get(render.name)
-        want_egress = DRIVER_EGRESS + ([{"ports": [{"port": otlp, "protocol": "TCP"}]}] if otlp else [])
+        want_egress = (DRIVER_EGRESS + ([{"ports": [{"port": otlp, "protocol": "TCP"}]}] if otlp else [])
+                       + EXTRA_EGRESS.get(render.name, []))
         if (driver_policy[0].get("spec") or {}).get("egress") != want_egress:
             failures.append(f"{render.name}: the driver pod's egress is {driver_policy[0]['spec'].get('egress')}, "
                             f"want {want_egress}")
@@ -735,11 +907,7 @@ WORKSPACE_SERVICEACCOUNTS = [("", "serviceaccounts", ["create", "get"])]        
 # networkPolicy.enabled, which sets managed_ssh_ingress.enabled there; here it follows the effective
 # managed SSH ingress, which derives from networkPolicy.enabled with the in-pod gateway (see check 4).
 SSH_INGRESS_POLICY = [("networking.k8s.io", "networkpolicies", ["get", "create", "patch", "update"])]
-# The Kyma layer (src/exposure.rs, src/namespaces.rs): server-side apply of a Service, a
-# NetworkPolicy and an APIRule (patch, and create for a new object; nothing reads an
-# APIRule), a failure Event, and a merge patch that labels a managed namespace.
-KYMA_EXPOSURE = [("", "services", ["patch"]), ("networking.k8s.io", "networkpolicies", ["patch"]),
-                 ("gateway.kyma-project.io", "apirules", ["create", "patch"]), ("", "events", ["create"])]
+# The Kyma layer (src/namespaces.rs): a merge patch that labels a managed namespace.
 KYMA_PSA_LABEL = [("", "namespaces", ["patch"])]
 
 def secret_sources(*names):
@@ -763,26 +931,26 @@ EXPECTED = {
     "render-shared-false": (SHARED, SHARED_CLUSTER),
     "rbac-shared-no-netpol": (SHARED, SHARED_CLUSTER),
     "rbac-shared-no-gateway": (SHARED, SHARED_CLUSTER),                                    # an external gateway changes no RBAC
-    "rbac-apirule": (SHARED + [KYMA_EXPOSURE], SHARED_CLUSTER),
+    "rbac-extra-egress": (SHARED, SHARED_CLUSTER),                                         # a NetworkPolicy rule changes no RBAC
     "rbac-shared-secrets": (SHARED, SHARED_CLUSTER),                                       # shared mode stages no Secret
     "rbac-inference": (SHARED, SHARED_CLUSTER),                                            # the hook's own Role is bound to the hook
     # Managed SSH ingress is on by default with the in-pod gateway and networkPolicy.enabled.
     "render-managed-true": ([], MANAGED + [PVC_GET, SSH_INGRESS_POLICY]),
     "render-managed-false": ([], MANAGED + [SSH_INGRESS_POLICY]),
-    "rbac-managed-apirule": ([], MANAGED + [SSH_INGRESS_POLICY, KYMA_EXPOSURE, KYMA_PSA_LABEL]),
+    "rbac-managed-psa": ([], MANAGED + [SSH_INGRESS_POLICY]),                                  # an explicit level grants the same rights
     "rbac-managed-no-psa": ([], [b for b in MANAGED if b is not KYMA_PSA_LABEL] + [SSH_INGRESS_POLICY]),
     "rbac-managed-ssh": ([], MANAGED + [SSH_INGRESS_POLICY]),
     "rbac-managed-no-netpol": ([], MANAGED),                                               # as upstream, off with networkPolicy
     "rbac-managed-no-gateway": ([], MANAGED),                                              # an external gateway: off unless set
     "rbac-managed-ssh-off": ([], MANAGED),
     "rbac-managed-secrets": ([secret_sources("client-tls", "pull-a", "pull-b")], MANAGED + [SSH_INGRESS_POLICY]),
-    "rbac-operator-apirule": ([], OPERATOR + [KYMA_EXPOSURE]),
+    "rbac-operator": ([], OPERATOR),
     "rbac-operator-secrets": ([secret_sources("client-tls")], OPERATOR),                   # TLS Secret only, no pull Secrets
     # Gateway TLS: the PKI hook's client TLS Secret is the driver's by default.
     "rbac-shared-tls": (SHARED, SHARED_CLUSTER),                                           # shared mode stages no Secret
     "rbac-managed-tls": ([secret_sources("t-openshell-driver-kyma-client-tls")], MANAGED + [SSH_INGRESS_POLICY]),
     "rbac-operator-tls": ([secret_sources("own-tls")], OPERATOR),                          # an explicit name wins
-    "good-all-options": ([all_options_secrets], MANAGED + [PVC_GET, SSH_INGRESS_POLICY, KYMA_EXPOSURE, KYMA_PSA_LABEL]),
+    "good-all-options": ([all_options_secrets], MANAGED + [PVC_GET, SSH_INGRESS_POLICY]),
 }
 
 def table(scope, blocks):
@@ -943,6 +1111,432 @@ if rendered("good-7-binaries") is not None:
 userinfo_err = work / "bad-7b-url-userinfo.err"
 if userinfo_err.exists() and "secretpw" in userinfo_err.read_text():
     failures.append("bad-7b-url-userinfo: the render error echoes the credentials in inferenceProvider.baseUrl")
+
+# 8. Remote access. The refused values are the bad-8-* cases (checked with the other
+# bad-* cases above); these renders must succeed, and the removed APIRule is gone.
+INGRESS_RENDERS = ("good-8-ingress", "good-8-services", "good-8-host",
+                   "good-8-long-names", "good-8-rbac-roles", "good-8-oidc-default-roles",
+                   "good-8-allow", "good-8-allow-services", "good-8-forwarded", "good-8-allow-forwarded")
+for name in INGRESS_RENDERS:
+    rendered(name)
+
+def succeeded(name):
+    return (work / f"{name}.rc").read_text() == "0"
+
+if "gatewayApirule" in (yaml.safe_load(values) or {}):
+    failures.append("values.yaml still has the removed gatewayApirule block")
+if (chart / "templates" / "gateway-apirule.yaml").exists():
+    failures.append("templates/gateway-apirule.yaml still exists; gatewayIngress replaces it")
+if "gatewayIngress" not in (yaml.safe_load(values) or {}):
+    failures.append("values.yaml has no gatewayIngress block")
+
+def gateway_parts(name):
+    """(gateway container, pod spec, the release's Service, the driver pod's NetworkPolicy)."""
+    documents = docs(work / f"{name}.yaml")
+    pod = driver_deployment(documents, name)["spec"]["template"]["spec"]
+    gateway = next(c for c in pod["containers"] if c["name"] == "gateway")
+    service = next(d for d in documents if d.get("kind") == "Service"
+                   and any(p["name"] == "grpc" for p in d["spec"]["ports"]))
+    policy = next((d for d in documents if d.get("kind") == "NetworkPolicy"
+                   and d["metadata"]["name"].endswith("-driver")), None)
+    return gateway, pod, service, policy
+
+def flag(args, name):
+    """The values of every occurrence of a gateway flag."""
+    return [args[i + 1] for i, a in enumerate(args) if a == name and i + 1 < len(args)]
+
+# The gateway's listener. Behind the ingress gateway it serves TLS on its usual port,
+# without a client CA (the ingress gateway has no client certificate to present). It then
+# reports https service URLs, which upstream's CLI prints with the gateway endpoint's port:
+# https://<host>/ through the ingress. No privileged port, so no pod sysctl. With published
+# service hosts it takes the service domain from a wildcard --server-san, and the Service
+# adds an http-* port on the same listener.
+LISTENER = {  # render -> (TLS, --server-san, Service ports on the listener)
+    "render-shared-true": (False, [], {"grpc": 8080}),
+    "good-8-ingress": (True, [], {"grpc": 8080}),
+    "good-8-services": (True, ["*.example.org"], {"grpc": 8080, "http-services": 80}),
+    "good-8-long-names": (True, ["*.example.org"], {"grpc": 8080, "http-services": 80}),
+}
+for name, (tls, sans, service_ports) in LISTENER.items():
+    if name != "render-shared-true" and not succeeded(name):
+        continue
+    gateway, pod, service, policy = gateway_parts(name)
+    args = gateway["args"]
+    got = (flag(args, "--port"), [p["containerPort"] for p in gateway["ports"] if p["name"] == "grpc"],
+           (pod.get("securityContext") or {}).get("sysctls"), flag(args, "--server-san"))
+    if got != (["8080"], [8080], None, sans):
+        failures.append(f"{name}: gateway (--port, grpc containerPort, pod sysctls, --server-san) is {got}, "
+                        f"want {(['8080'], [8080], None, sans)}")
+    got = (flag(args, "--tls-cert"), flag(args, "--tls-key"), "--tls-client-ca" in args, "--disable-tls" in args)
+    want = ((["/etc/openshell-tls/server/tls.crt"], ["/etc/openshell-tls/server/tls.key"], False, False)
+            if tls else ([], [], False, True))
+    if got != want:
+        failures.append(f"{name}: gateway TLS (--tls-cert, --tls-key, has --tls-client-ca, has --disable-tls) "
+                        f"is {got}, want {want}")
+    ports = {p["name"]: (p["port"], p["targetPort"]) for p in service["spec"]["ports"]
+             if p["name"] in ("grpc", "http-services")}
+    if ports != {n: (p, "grpc") for n, p in service_ports.items()}:
+        failures.append(f"{name}: the Service's listener ports are {ports}, want {service_ports} -> grpc")
+    allowed = [p["port"] for p in policy["spec"]["ingress"][0]["ports"]] if policy else []
+    if 8080 not in allowed:
+        failures.append(f"{name}: the driver pod's NetworkPolicy admits ports {allowed}, not the gateway's 8080")
+
+# OIDC authorization flags. Upstream defaults the roles to openshell-admin/openshell-user,
+# so authentication-only mode needs both passed empty; without authOnly or roles the
+# chart passes neither and upstream's defaults apply.
+OIDC_FLAGS = {  # render -> (--oidc-roles-claim, --oidc-admin-role, --oidc-user-role)
+    "good-8-ingress": ([], [""], [""]),
+    "good-8-rbac-roles": (["groups"], ["osh-admin"], ["osh-user"]),
+    "good-8-oidc-default-roles": ([], [], []),
+}
+for name, want in OIDC_FLAGS.items():
+    if not succeeded(name):
+        continue
+    args = gateway_parts(name)[0]["args"]
+    got = (flag(args, "--oidc-roles-claim"), flag(args, "--oidc-admin-role"), flag(args, "--oidc-user-role"))
+    if got != want or flag(args, "--oidc-issuer") != ["https://issuer.example"] \
+            or flag(args, "--oidc-audience") != ["osh-client"]:
+        failures.append(f"{name}: gateway OIDC flags (roles claim, admin role, user role) are {got}, want {want}, "
+                        f"with issuer {flag(args, '--oidc-issuer')} and audience {flag(args, '--oidc-audience')}")
+
+# The Istio objects. Routes live in the release namespace, policies on the ingress
+# gateway in its own namespace, named for the release namespace so releases never collide.
+# The ingress gateway checks no token: the OpenShell gateway is the only authenticator, as
+# upstream intends (8b says why). The policies are source-address fences. Their action
+# follows the gateway: DENY (default) for a gateway that lets everything through, where an
+# ALLOW policy would make it deny every other application's hosts; ALLOW for a gateway that
+# already allowlists. The CLI host gets a policy only where there is something to state:
+# allowedCidrs, or ALLOW, which must admit the host. Service hosts are matched per workspace
+# ("<workspace>--*"), never by the domain's wildcard, which would cover the CLI host and
+# other applications.
+INGRESS_KINDS = ("VirtualService", "DestinationRule", "RequestAuthentication", "AuthorizationPolicy")
+SELECTOR = {"matchLabels": {"istio": "ingressgateway"}}
+CIDRS = ["203.0.113.0/24", "2001:db8::/32"]
+
+def service_host(workspaces):
+    return (r"^(" + "|".join(workspaces) + r")--[a-z0-9]+(-[a-z0-9]+)*(--[a-z0-9]+(-[a-z0-9]+)*)?"
+            r"\.example\.org(:[0-9]+)?$")
+
+def ingress_objects(name):
+    return {(d["kind"], d["metadata"]["namespace"], d["metadata"]["name"]): d["spec"]
+            for d in docs(work / f"{name}.yaml") if d.get("kind") in INGRESS_KINDS}
+
+def route(service, port, match=None):
+    # No timeout field: Istio's default is no timeout, which the streaming RPCs need, and its
+    # CRD validation rejects an explicit `0s` (live run on Kyma: "must be ... greater than 1ms").
+    rule = {"route": [{"destination": {"host": service, "port": {"number": port}}}]}
+    return [dict(match=[{"authority": {"regex": match}}], **rule) if match else rule]
+
+def expected_ingress(release_ns, fullname, host, cidrs, services, action="DENY", workspaces=("default",),
+                     forwarded=False):
+    service = f"{fullname}.{release_ns}.svc.cluster.local"
+    prefix = f"{release_ns}-{fullname}"
+    # By default the address of the connection the ingress gateway accepted (ipBlocks): it is
+    # the client's behind a load balancer that preserves it, and no header can change it. If it
+    # is not the client's, nobody matches and the fence is closed, which shows at once. The
+    # forwarded address (remoteIpBlocks) comes from X-Forwarded-For as far as the mesh trusts
+    # forwarding hops; a mesh that trusts hops nothing in front fills lets any client name an
+    # allowed address there, and the fence is open without a sign of it.
+    blocks = ("remoteIpBlocks" if forwarded else "ipBlocks") if action == "ALLOW" else (
+        "notRemoteIpBlocks" if forwarded else "notIpBlocks")
+    want = {
+        ("VirtualService", release_ns, f"{fullname}-gateway"): {
+            "hosts": [host], "gateways": ["kyma-system/kyma-gateway"], "http": route(service, 8080)},
+        # The ingress gateway re-encrypts to the gateway pod and verifies its certificate
+        # against the chart CA and the Service name (upstream's backendTLSPolicy, for Istio).
+        # exportTo keeps the rule from sandboxes with an Istio sidecar, which speak TLS themselves.
+        ("DestinationRule", release_ns, f"{fullname}-gateway-tls"): {
+            "host": service, "exportTo": ["istio-system"],
+            "trafficPolicy": {"tls": {"mode": "SIMPLE", "credentialName": f"{prefix}-gateway-ca",
+                                      "sni": service, "subjectAltNames": [service]}}},
+    }
+    if cidrs or action == "ALLOW":
+        # With and without a port: Istio matches hosts against the authority as sent.
+        rule = {"to": [{"operation": {"hosts": [host, host + ":*"]}}]}
+        if cidrs:
+            rule["from"] = [{"source": {blocks: cidrs}}]
+        want[("AuthorizationPolicy", "istio-system", f"{prefix}-openshell-cli")] = {
+            "selector": SELECTOR, "action": action, "rules": [rule]}
+    if services:
+        want[("VirtualService", release_ns, f"{fullname}-sandbox-services")] = {
+            "hosts": ["*.example.org"], "gateways": ["kyma-system/kyma-gateway"],
+            "http": route(service, 80, service_host(workspaces))}
+        want[("AuthorizationPolicy", "istio-system", f"{prefix}-openshell-services")] = {
+            "selector": SELECTOR, "action": action,
+            "rules": [{"from": [{"source": {blocks: cidrs}}],
+                       "to": [{"operation": {"hosts": [w + "--*" for w in workspaces]}}]}]}
+    return want
+
+T = ("default", "t-openshell-driver-kyma")   # helm template's namespace and the fullname of release t
+INGRESS_OBJECTS = {
+    # DENY without allowedCidrs: nothing to deny, so no policy for the CLI host.
+    "good-8-ingress": expected_ingress(*T, "openshell.example.org", None, False),
+    "good-8-services": expected_ingress(*T, "openshell.example.org", CIDRS, True),
+    "good-8-host": expected_ingress(*T, "osh.example.org", None, False),
+    "good-8-long-names": expected_ingress("a-rather-long-release-namespace-name", "prod-sandboxes-openshell-driver-kyma",
+                                          "openshell.example.org", CIDRS, True),
+    # ALLOW without allowedCidrs: the rule has no source, it only admits the host.
+    "good-8-allow": expected_ingress(*T, "openshell.example.org", None, False, action="ALLOW"),
+    "good-8-allow-services": expected_ingress(*T, "openshell.example.org", CIDRS, True, action="ALLOW",
+                                              workspaces=("default", "team-a")),
+    "good-8-forwarded": expected_ingress(*T, "openshell.example.org", CIDRS, True, forwarded=True),
+    "good-8-allow-forwarded": expected_ingress(*T, "openshell.example.org", CIDRS, True, action="ALLOW",
+                                               forwarded=True),
+}
+for name, want in INGRESS_OBJECTS.items():
+    if not succeeded(name):
+        continue
+    got = ingress_objects(name)
+    for key in sorted(set(got) | set(want)):
+        if got.get(key) != want.get(key):
+            failures.append(f"{name}: {'/'.join(key)} is {got.get(key)}, want {want.get(key)}")
+# The chart CA in the ingress gateway's namespace. Istio reads a DestinationRule's
+# credentialName from a Secret next to the gateway workload, the CA under ca.crt. The
+# chart renders that Secret without data, so Helm never overwrites what the Job writes:
+# the PKI hook creates the CA, which does not exist when the chart is rendered. The Job
+# sees only the CA certificate of the server TLS Secret, never its key, and may read and
+# patch that one Secret in the ingress gateway's namespace, nothing else there.
+CA_HOOK_IMAGE = (((yaml.safe_load(values) or {}).get("gatewayIngress") or {}).get("caHook") or {}).get("image") or ""
+if not re.fullmatch(r"[^\s@]+@sha256:[0-9a-f]{64}", CA_HOOK_IMAGE):
+    failures.append(f"gatewayIngress.caHook.image {CA_HOOK_IMAGE!r} is not pinned by digest")
+
+def check_ca(name, release_ns, fullname, server_secret=None):
+    documents = docs(work / f"{name}.yaml")
+    prefix = f"{release_ns}-{fullname}"
+    secret_name, hook = f"{prefix}-gateway-ca", f"{fullname}-gateway-ca-hook"
+
+    def one(kind, namespace, obj_name):
+        found = [d for d in documents
+                 if (d.get("kind"), d["metadata"].get("namespace"), d["metadata"]["name"]) == (kind, namespace, obj_name)]
+        if len(found) != 1:
+            failures.append(f"{name}: {len(found)} {kind} {namespace}/{obj_name} rendered, want 1")
+        return found[0] if found else None
+
+    secret = one("Secret", "istio-system", secret_name)
+    if secret and (secret.get("type") != "Opaque" or secret.get("data") or secret.get("stringData")
+                   or "helm.sh/hook" in (secret["metadata"].get("annotations") or {})):
+        failures.append(f"{name}: the CA Secret must be an Opaque Secret of the release without data "
+                        f"(the Job writes ca.crt), not a hook: {secret}")
+    role = one("Role", "istio-system", f"{prefix}-gateway-ca-hook")
+    want_rules = [{"apiGroups": [""], "resources": ["secrets"], "resourceNames": [secret_name],
+                   "verbs": ["get", "patch"]}]
+    if role and role.get("rules") != want_rules:
+        failures.append(f"{name}: the CA hook's Role grants {role.get('rules')}, want {want_rules}")
+    binding = one("RoleBinding", "istio-system", f"{prefix}-gateway-ca-hook")
+    if binding and (binding["roleRef"] != {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role",
+                                           "name": f"{prefix}-gateway-ca-hook"}
+                    or binding["subjects"] != [{"kind": "ServiceAccount", "name": hook, "namespace": release_ns}]):
+        failures.append(f"{name}: the CA hook's RoleBinding is {binding['roleRef']} -> {binding['subjects']}")
+    account = one("ServiceAccount", release_ns, hook)
+    job = one("Job", release_ns, hook)
+    for d in (account, role, binding, job):
+        hooks = ((d or {}).get("metadata", {}).get("annotations") or {}).get("helm.sh/hook")
+        # post-rollback too: a rollback to a revision with remote access from one without
+        # recreates the Secret empty, and only this Job fills it.
+        if d and hooks != "post-install,post-upgrade,post-rollback":
+            failures.append(f"{name}: {d['kind']} {d['metadata']['name']} has helm.sh/hook {hooks!r}, "
+                            "want post-install,post-upgrade,post-rollback")
+    if not job:
+        return
+    pod = job["spec"]["template"]["spec"]
+    container = pod["containers"][0]
+    env = {e["name"]: e.get("value") for e in container.get("env", [])}
+    script = container["command"][-1]
+    want_ca = {"name": "ca", "secret": {"secretName": server_secret or f"{fullname}-server-tls",
+                                        "items": [{"key": "ca.crt", "path": "ca.crt"}]}}
+    if [v for v in pod.get("volumes", []) if "secret" in v] != [want_ca]:
+        failures.append(f"{name}: the CA hook mounts {pod.get('volumes')}; of Secrets it must see only ca.crt "
+                        "of the server TLS Secret, never its key")
+    if (pod.get("serviceAccountName") != hook or container.get("image") != CA_HOOK_IMAGE
+            or (env.get("INGRESS_NAMESPACE"), env.get("CA_SECRET")) != ("istio-system", secret_name)
+            or '-n "${INGRESS_NAMESPACE}" patch secret "${CA_SECRET}"' not in script or "/pki/ca.crt" not in script):
+        failures.append(f"{name}: the CA hook Job does not patch {secret_name} in istio-system from /pki/ca.crt "
+                        f"with the pinned image: env {env}, image {container.get('image')!r}")
+    labels = job["spec"]["template"]["metadata"]["labels"]
+    if labels.get("app.kubernetes.io/name") == "openshell-driver-kyma" or labels.get("sidecar.istio.io/inject") != "false":
+        failures.append(f"{name}: the CA hook pod's labels are {labels}: with the driver pod's name label its "
+                        "NetworkPolicy would select the hook, and sidecar injection must be off")
+    pod_security, security = pod.get("securityContext") or {}, container.get("securityContext") or {}
+    if (pod_security.get("runAsNonRoot") is not True or security.get("allowPrivilegeEscalation") is not False
+            or security.get("readOnlyRootFilesystem") is not True
+            or (security.get("capabilities") or {}).get("drop") != ["ALL"]):
+        failures.append(f"{name}: the CA hook's security context is {pod_security} / {security}")
+
+for name, (ns, fullname) in (("good-8-ingress", T), ("good-8-long-names", (
+        "a-rather-long-release-namespace-name", "prod-sandboxes-openshell-driver-kyma"))):
+    if succeeded(name):
+        check_ca(name, ns, fullname)
+if rendered("good-8-pki-names") is not None:
+    check_ca("good-8-pki-names", *T, server_secret="own-server-tls")
+
+# The PKI hook mints the gateway's server certificate for the names clients verify it
+# under: this release's Service (sandboxes, the provider hook, the ingress gateway) and
+# loopback (a port-forward). Upstream's own defaults name a release called "openshell",
+# so without these no client in the cluster could verify a gateway that serves TLS.
+def pki_sans(name):
+    job = next(d for d in docs(work / f"{name}.yaml") if d.get("kind") == "Job"
+               and d["metadata"]["name"].endswith("-jwt-pki-hook"))
+    return [a.split("=", 1)[1] for a in job["spec"]["template"]["spec"]["containers"][0]["args"]
+            if a.startswith("--server-san=")]
+
+for name, (ns, fullname) in (("render-shared-true", T), ("good-8-long-names", (
+        "a-rather-long-release-namespace-name", "prod-sandboxes-openshell-driver-kyma"))):
+    if name != "render-shared-true" and not succeeded(name):
+        continue
+    want = [fullname, f"{fullname}.{ns}", f"{fullname}.{ns}.svc", f"{fullname}.{ns}.svc.cluster.local",
+            "localhost", "127.0.0.1"]
+    if pki_sans(name) != want:
+        failures.append(f"{name}: the PKI hook's --server-san are {pki_sans(name)}, want {want}")
+# Nothing of it without gatewayIngress: not by default, and not with OIDC alone.
+for name in ("render-shared-true", "good-8-oidc-default-roles"):
+    stray = sorted("/".join(k) for k in ingress_objects(name)) + sorted(
+        f"{d['kind']}/istio-system/{d['metadata']['name']}" for d in docs(work / f"{name}.yaml")
+        if d["metadata"].get("namespace") == "istio-system")
+    if stray:
+        failures.append(f"{name}: gatewayIngress is off, but the chart rendered {stray}")
+# The service-host pattern admits exactly <workspace>--<sandbox>[--<service>].<domain> of a
+# listed workspace; nothing in any policy or route may be the domain's wildcard.
+for workspaces, cases in (
+        (("default",), (("default--web.example.org", True), ("default--my-app--admin.example.org:443", True),
+                        ("team-a--web.example.org", False), ("openshell.example.org", False),
+                        ("default--web.example.org.evil.test", False), ("default--web-example.org", False),
+                        ("default--a--b--c.example.org", False), ("xdefault--web.example.org", False),
+                        ("default--.example.org", False))),
+        (("default", "team-a"), (("team-a--web.example.org", True), ("team--web.example.org", False),
+                                 ("a--web.example.org", False)))):
+    pattern = re.compile(service_host(workspaces))
+    for host, want in cases:
+        if bool(pattern.fullmatch(host)) != want:
+            failures.append(f"with workspaces {workspaces} the service host pattern "
+                            f"{'rejects' if want else 'accepts'} {host!r}")
+
+# 8b. The cluster's ingress gateway is shared with every other application behind it, so
+# nothing the chart renders may apply to it as a whole, in any render of this script.
+# - No RequestAuthentication. It has no host scope: on the ingress gateway it makes Envoy
+#   answer 401 to every Bearer token it cannot validate, on every host. In a live run that
+#   broke another application's login and its API keys.
+# - Every AuthorizationPolicy selects a workload, and every rule names hosts, none of them
+#   by the domain's wildcard.
+# - Its namespace gets nothing else but the chart CA's Secret and the Role and RoleBinding
+#   that let one Job write it (check_ca above holds them to that one Secret).
+if re.search(r"^kind:\s*RequestAuthentication", templates, re.M):
+    failures.append("a template renders a RequestAuthentication; the gateway validates tokens itself")
+if "jwksUri" in ((yaml.safe_load(values) or {}).get("gateway") or {}).get("oidc", {}):
+    failures.append("values.yaml still has gateway.oidc.jwksUri, which only fed the removed RequestAuthentication")
+for path in sorted(work.glob("*.yaml")):
+    rc = work / f"{path.stem}.rc"
+    if rc.exists() and rc.read_text() != "0":
+        continue
+    for d in docs(path):
+        where = f"{path.stem}: {d.get('kind')} {d['metadata'].get('name')}"
+        if d.get("kind") == "RequestAuthentication":
+            failures.append(f"{where}: a RequestAuthentication applies to every host of the workload it selects")
+        if d["metadata"].get("namespace") == "istio-system" and d.get("kind") != "AuthorizationPolicy":
+            suffix = {"Secret": "-gateway-ca", "Role": "-gateway-ca-hook", "RoleBinding": "-gateway-ca-hook"}
+            if not d["metadata"]["name"].endswith(suffix.get(d.get("kind"), "/")):
+                failures.append(f"{where}: rendered into the ingress gateway's namespace, which gets only this "
+                                "release's AuthorizationPolicies, its CA Secret and the CA hook's Role and RoleBinding")
+        if d.get("kind") != "AuthorizationPolicy":
+            continue
+        if not (d["spec"].get("selector") or {}).get("matchLabels"):
+            failures.append(f"{where}: no workload selector")
+        for rule in d["spec"].get("rules") or [{}]:
+            hosts = [h for t in rule.get("to") or [] for h in (t.get("operation") or {}).get("hosts") or []]
+            if not hosts or any(h.startswith("*") for h in hosts):
+                failures.append(f"{where}: a rule matches hosts {hosts}; every rule must name this release's "
+                                "hosts, and a suffix wildcard covers other applications")
+
+# 8c. The refusal names every server that is not HTTP on this ingress gateway, and no other.
+if (work / "bad-8c-deny-tcp.err").exists():
+    refusal = (work / "bad-8c-deny-tcp.err").read_text()
+    for server, named in (("apps/db-gateway port 5432 (TCP)", True),
+                          ("apps/passthrough port 443 (HTTPS, PASSTHROUGH)", True),
+                          ("kyma-gateway", False), ("eastwest", False)):
+        if (server in refusal) != named:
+            failures.append(f"bad-8c-deny-tcp: the refusal {'does not name' if named else 'names'} {server}: "
+                            + first_line(refusal))
+for name in ("good-8c-deny-http", "good-8c-allow-tcp", "good-8c-deny-no-cidrs"):
+    rendered(name)
+
+# The provider hook under OIDC: it registers the gateway once with the client-credentials
+# grant and then addresses it by name. --gateway-endpoint bypasses the registered gateway
+# and its token, so it must not appear; the client secret reaches the CLI only through
+# its environment, from the operator's Secret.
+def hook_of(name):
+    job = next(d for d in docs(work / f"{name}.yaml") if d.get("kind") == "Job"
+               and d["metadata"]["name"].endswith("-inference-provider-hook"))
+    container = job["spec"]["template"]["spec"]["containers"][0]
+    return container.get("env", []), container["command"][-1]
+
+if rendered("good-8-inference-oidc") is not None:
+    env, script = hook_of("good-8-inference-oidc")
+    literal = {e["name"]: e.get("value") for e in env}
+    for key, want in (("OPENSHELL_NO_BROWSER", "1"), ("OIDC_ISSUER", "https://issuer.example"),
+                      ("OIDC_CLIENT_ID", "osh-client"), ("OIDC_AUDIENCE", "osh-client")):
+        if literal.get(key) != want:
+            failures.append(f"good-8-inference-oidc: hook env {key}={literal.get(key)!r}, want {want!r}")
+    secret = [e for e in env if e["name"] == "OPENSHELL_OIDC_CLIENT_SECRET"]
+    ref = (secret[0].get("valueFrom") or {}).get("secretKeyRef") if len(secret) == 1 else None
+    if len(secret) != 1 or "value" in secret[0] or ref != {"name": "oidc-client", "key": "client-secret"}:
+        failures.append("good-8-inference-oidc: OPENSHELL_OIDC_CLIENT_SECRET must be exactly one secretKeyRef "
+                        f"to gateway.oidc.clientCredentialsSecret with no literal value: {secret}")
+    if re.search(r"\$\{?OPENSHELL_OIDC_CLIENT_SECRET\b", script):
+        failures.append("good-8-inference-oidc: the hook script expands OPENSHELL_OIDC_CLIENT_SECRET; "
+                        "the CLI must read it from its own environment")
+    add = re.search(r'openshell gateway add "\$\{GATEWAY_URL\}" --name in-cluster(?:[^\n]*\\\n)*[^\n]*', script)
+    if not add or any(f not in add.group(0) for f in
+                      ('--oidc-issuer "${OIDC_ISSUER}"', '--oidc-client-id "${OIDC_CLIENT_ID}"',
+                       '--oidc-audience "${OIDC_AUDIENCE}"')):
+        failures.append("good-8-inference-oidc: the hook does not register the gateway with "
+                        "`openshell gateway add ... --oidc-issuer --oidc-client-id --oidc-audience`")
+    if "--gateway-endpoint" in script or "openshell --gateway in-cluster" not in script:
+        failures.append("good-8-inference-oidc: under OIDC the hook must address the registered gateway "
+                        "(--gateway in-cluster), never --gateway-endpoint, which sends no token")
+# The grant's client is gateway.oidc.clientCredentialsSecret.clientId when set, else the CLI's.
+for name, want in (("good-8-inference-oidc", "osh-client"), ("good-8-inference-oidc-hook-client", "osh-hook"),
+                   ("good-8-inference-oidc-only-hook-client", "osh-hook")):
+    if name == "good-8-inference-oidc" and not succeeded(name):
+        continue
+    if name != "good-8-inference-oidc" and rendered(name) is None:
+        continue
+    got = {e["name"]: e.get("value") for e in hook_of(name)[0]}.get("OIDC_CLIENT_ID")
+    if got != want:
+        failures.append(f"{name}: the hook logs in as client {got!r}, want {want!r}")
+# Against a gateway that serves TLS the hook dials https:// and trusts the chart CA: it
+# mounts only ca.crt of the client TLS Secret (it presents no client certificate) and puts
+# it where upstream's CLI reads a registered gateway's CA, once `gateway add` has registered
+# the gateway. The health port stays plain HTTP. Without TLS none of it is rendered.
+CA_DIR = 'ca_dir="${XDG_CONFIG_HOME:-${HOME}/.config}/openshell/gateways/in-cluster/mtls"'
+CA_COPY = 'cp /pki/ca.crt "${ca_dir}/ca.crt"'
+for name, tls in (("good-8-inference-oidc-tls", True), ("good-8-inference-oidc", False)):
+    if rendered(name) is None:
+        continue
+    job = next(d for d in docs(work / f"{name}.yaml") if d.get("kind") == "Job"
+               and d["metadata"]["name"].endswith("-inference-provider-hook"))
+    pod = job["spec"]["template"]["spec"]
+    env, script = hook_of(name)
+    urls = {e["name"]: e.get("value") or "" for e in env}
+    volume = [v for v in pod.get("volumes", []) if v.get("name") == "gateway-ca"]
+    mount = [m for m in pod["containers"][0].get("volumeMounts", []) if m.get("name") == "gateway-ca"]
+    if tls:
+        ok = (urls.get("GATEWAY_URL", "").startswith("https://t-openshell-driver-kyma.")
+              and volume == [{"name": "gateway-ca", "secret": {"secretName": "t-openshell-driver-kyma-client-tls",
+                                                              "items": [{"key": "ca.crt", "path": "ca.crt"}]}}]
+              and mount == [{"name": "gateway-ca", "mountPath": "/pki", "readOnly": True}]
+              and CA_DIR in script and CA_COPY in script
+              and script.index("openshell gateway add") < script.index(CA_COPY) < script.index("osh() {"))
+    else:
+        ok = (urls.get("GATEWAY_URL", "").startswith("http://t-openshell-driver-kyma.")
+              and not volume and not mount and "/pki" not in script)
+    if not ok or not urls.get("GATEWAY_HEALTH_URL", "").startswith("http://"):
+        failures.append(f"{name}: with gateway TLS {'on' if tls else 'off'} the hook has GATEWAY_URL "
+                        f"{urls.get('GATEWAY_URL')!r}, GATEWAY_HEALTH_URL {urls.get('GATEWAY_HEALTH_URL')!r}, "
+                        f"CA volume {volume}, mount {mount}, CA copy in script: {CA_COPY in script}")
+# Without OIDC nothing changes: no registration, no OIDC environment.
+env, script = hook_of("rbac-inference")
+if "gateway add" in script or '--gateway-endpoint "${GATEWAY_URL}"' not in script or any(
+        e["name"].startswith(("OPENSHELL_OIDC", "OIDC_")) or e["name"] == "OPENSHELL_NO_BROWSER" for e in env):
+    failures.append("rbac-inference: without OIDC the hook must dial --gateway-endpoint and carry no OIDC settings")
 
 if failures:
     print("CHART_RENDER_FAIL:")

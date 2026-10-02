@@ -28,10 +28,6 @@ pub trait KymaHooks: Send + Sync + 'static {
     /// Edits the sandbox before upstream sees it. Must not fail.
     fn enrich(&self, sandbox: &mut DriverSandbox);
 
-    /// Runs after upstream created the sandbox, off the request path. It cannot
-    /// fail the create; implementations report their own failures.
-    async fn after_create(&self, sandbox: DriverSandbox);
-
     /// Runs after upstream ensured a workspace, on `EnsureWorkspace` and, when
     /// `prepares_workspace_before_create`, on `CreateSandbox`. An error fails
     /// that RPC so the gateway retries.
@@ -56,7 +52,6 @@ pub struct NoHooks;
 #[tonic::async_trait]
 impl KymaHooks for NoHooks {
     fn enrich(&self, _sandbox: &mut DriverSandbox) {}
-    async fn after_create(&self, _sandbox: DriverSandbox) {}
     async fn after_ensure_workspace(&self, _workspace: &str) -> Result<(), Status> {
         Ok(())
     }
@@ -152,15 +147,7 @@ impl<S: ComputeDriver> ComputeDriver for KymaComputeDriver<S> {
                 self.hooks.after_ensure_workspace(&workspace).await?;
             }
         }
-        let created = request.get_ref().sandbox.clone();
-        let response = self.inner.create_sandbox(request).await?;
-        if let Some(sandbox) = created {
-            // Off the request path: exposure must never delay or fail a create
-            // that upstream already completed.
-            let hooks = Arc::clone(&self.hooks);
-            tokio::spawn(async move { hooks.after_create(sandbox).await });
-        }
-        Ok(response)
+        self.inner.create_sandbox(request).await
     }
 
     async fn stop_sandbox(
@@ -214,16 +201,13 @@ mod tests {
     use super::*;
     use std::pin::Pin;
     use std::sync::Mutex;
-    use std::time::Duration;
 
     use futures::Stream;
     use openshell_core::proto::compute::v1::WatchSandboxesEvent;
     use openshell_driver_kubernetes::{KubernetesComputeConfig, WorkspaceMode};
     use serde_json::json;
-    use tokio::sync::mpsc;
 
     use crate::enrich::EnrichConfig;
-    use crate::exposure::{ExposureConfig, ExposureReconciler};
     use crate::hooks::KymaHookSet;
     use crate::namespaces::NamespaceLabeler;
     use crate::test_support::{mock_client, Recorded};
@@ -250,7 +234,6 @@ mod tests {
             if let Some(log) = &self.kube_log {
                 log.lock().unwrap().push(Recorded {
                     line,
-                    query: String::new(),
                     body: String::new(),
                 });
             }
@@ -415,14 +398,13 @@ mod tests {
         }
     }
 
-    /// Hooks that label the sandbox on enrich, report after_create through a
-    /// channel, record each workspace after_ensure_workspace receives, and
+    /// Hooks that label the sandbox on enrich, record each workspace
+    /// after_ensure_workspace receives, and
     /// optionally fail after_ensure_workspace. `preparing` hooks also ask for
     /// the workspace to be prepared before create and log
     /// `hook_after_ensure_workspace` into the fake inner's call log, so tests
     /// can assert the order across the inner service and the hook.
     struct RecordingHooks {
-        created: mpsc::UnboundedSender<String>,
         ensured: Mutex<Vec<String>>,
         fail_ensure: bool,
         prepares: bool,
@@ -430,24 +412,18 @@ mod tests {
     }
 
     impl RecordingHooks {
-        fn new(fail_ensure: bool) -> (Arc<Self>, mpsc::UnboundedReceiver<String>) {
-            let (created, rx) = mpsc::unbounded_channel();
-            let hooks = Self {
-                created,
+        fn new(fail_ensure: bool) -> Arc<Self> {
+            Arc::new(Self {
                 ensured: Mutex::new(Vec::new()),
                 fail_ensure,
                 prepares: false,
                 call_log: None,
-            };
-            (Arc::new(hooks), rx)
+            })
         }
 
         /// Hooks that prepare the workspace before create, logging into `state`.
         fn preparing(state: &Arc<FakeState>, fail_ensure: bool) -> Arc<Self> {
-            // after_create's receiver is not needed: a closed channel is ignored.
-            let (created, _rx) = mpsc::unbounded_channel();
             Arc::new(Self {
-                created,
                 ensured: Mutex::new(Vec::new()),
                 fail_ensure,
                 prepares: true,
@@ -466,9 +442,6 @@ mod tests {
                 .get_or_insert_with(Default::default)
                 .labels
                 .insert("enriched".to_string(), "yes".to_string());
-        }
-        async fn after_create(&self, sandbox: DriverSandbox) {
-            let _ = self.created.send(sandbox.id);
         }
         async fn after_ensure_workspace(&self, workspace: &str) -> Result<(), Status> {
             self.ensured.lock().unwrap().push(workspace.to_string());
@@ -633,7 +606,7 @@ mod tests {
     #[tokio::test]
     async fn create_enriches_before_upstream_sees_the_request() {
         let (inner, state) = FakeInner::new(FakeState::default());
-        let (hooks, _rx) = RecordingHooks::new(false);
+        let hooks = RecordingHooks::new(false);
         let driver = KymaComputeDriver::new(inner, hooks, namespaces(&state));
 
         driver.create_sandbox(create_request("sb-1")).await.unwrap();
@@ -649,46 +622,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn after_create_runs_after_a_successful_create() {
-        let (inner, state) = FakeInner::new(FakeState::default());
-        let (hooks, mut rx) = RecordingHooks::new(false);
-        let driver = KymaComputeDriver::new(inner, hooks, namespaces(&state));
-
-        driver.create_sandbox(create_request("sb-7")).await.unwrap();
-
-        let id = tokio::time::timeout(Duration::from_secs(2), rx.recv())
-            .await
-            .expect("after_create ran")
-            .expect("channel open");
-        assert_eq!(id, "sb-7");
-    }
-
-    #[tokio::test]
-    async fn after_create_is_skipped_when_upstream_rejects_the_create() {
-        let (inner, state) = FakeInner::new(FakeState {
-            fail_create: true,
-            ..Default::default()
-        });
-        let (hooks, mut rx) = RecordingHooks::new(false);
-        let driver = KymaComputeDriver::new(inner, hooks, namespaces(&state));
-
-        let err = driver
-            .create_sandbox(create_request("sb-1"))
-            .await
-            .unwrap_err();
-        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
-        assert!(
-            tokio::time::timeout(Duration::from_millis(200), rx.recv())
-                .await
-                .is_err(),
-            "after_create must not run when upstream rejected the create"
-        );
-    }
-
-    #[tokio::test]
     async fn ensure_workspace_hook_failure_fails_the_rpc() {
         let (inner, state) = FakeInner::new(FakeState::default());
-        let (hooks, _rx) = RecordingHooks::new(true);
+        let hooks = RecordingHooks::new(true);
         let driver = KymaComputeDriver::new(inner, hooks, namespaces(&state));
 
         let err = driver
@@ -707,7 +643,7 @@ mod tests {
             fail_ensure: true,
             ..Default::default()
         });
-        let (hooks, _rx) = RecordingHooks::new(false);
+        let hooks = RecordingHooks::new(false);
         let hooks_probe = Arc::clone(&hooks);
         let driver = KymaComputeDriver::new(inner, hooks, namespaces(&state));
 
@@ -724,7 +660,7 @@ mod tests {
     #[tokio::test]
     async fn after_ensure_workspace_receives_the_requested_workspace() {
         let (inner, state) = FakeInner::new(FakeState::default());
-        let (hooks, _rx) = RecordingHooks::new(false);
+        let hooks = RecordingHooks::new(false);
         let hooks_probe = Arc::clone(&hooks);
         let driver = KymaComputeDriver::new(inner, hooks, namespaces(&state));
 
@@ -808,7 +744,7 @@ mod tests {
     #[tokio::test]
     async fn create_makes_no_ensure_call_unless_the_hooks_ask_for_one() {
         let (inner, state) = FakeInner::new(FakeState::default());
-        let (hooks, _rx) = RecordingHooks::new(false);
+        let hooks = RecordingHooks::new(false);
         let hooks_probe = Arc::clone(&hooks);
         let driver = KymaComputeDriver::new(inner, hooks, namespaces(&state));
 
@@ -839,26 +775,11 @@ mod tests {
     }
 
     // The wrapper with the production hook set over a fake API server, in
-    // Managed mode with a PSA level and exposure: the namespace is ensured and
-    // labelled before upstream sees the create, and the sandbox is exposed
-    // after it. Exposure is detached, so the test waits for its last request.
+    // Managed mode with a PSA level: the namespace is ensured and labelled
+    // before upstream sees the create.
     #[tokio::test]
     async fn managed_create_composes_with_the_production_hooks() {
-        let (exposed_tx, mut exposed) = mpsc::unbounded_channel();
-        let (client, log) = mock_client(move |line| {
-            if line.starts_with("GET ") && line.ends_with("/sandboxes") {
-                let list = json!({
-                    "apiVersion": "agents.x-k8s.io/v1beta1",
-                    "kind": "SandboxList",
-                    "metadata": {},
-                    "items": [{
-                        "apiVersion": "agents.x-k8s.io/v1beta1",
-                        "kind": "Sandbox",
-                        "metadata": {"name": "sb", "namespace": "openshell-gw-team-a", "uid": "cr-uid"}
-                    }]
-                });
-                return (200, list.to_string());
-            }
+        let (client, log) = mock_client(|line| {
             if line == "PATCH /api/v1/namespaces/openshell-gw-team-a" {
                 let namespace = json!({
                     "apiVersion": "v1",
@@ -866,9 +787,6 @@ mod tests {
                     "metadata": {"name": "openshell-gw-team-a"}
                 });
                 return (200, namespace.to_string());
-            }
-            if line.contains("/apirules/") {
-                let _ = exposed_tx.send(());
             }
             (
                 200,
@@ -881,18 +799,8 @@ mod tests {
             gateway_id: "gw".to_string(),
             ..KubernetesComputeConfig::default()
         };
-        let exposure = ExposureReconciler::new(
-            client.clone(),
-            ExposureConfig {
-                cluster_domain: "example.org".to_string(),
-                ingress_namespace: "istio-system".to_string(),
-                search_namespace: None,
-                gateway_id: "gw".to_string(),
-            },
-        );
         let hooks = KymaHookSet::new(
             EnrichConfig::default(),
-            Some(exposure),
             NamespaceLabeler::new(client, config, "baseline".to_string()),
         );
         let (inner, state) = FakeInner::new(FakeState {
@@ -905,10 +813,6 @@ mod tests {
             .create_sandbox(create_request_in("sb-1", "team-a"))
             .await
             .unwrap();
-        tokio::time::timeout(Duration::from_secs(5), exposed.recv())
-            .await
-            .expect("the sandbox was exposed")
-            .expect("channel open");
 
         let lines: Vec<String> = log.lock().unwrap().iter().map(|r| r.line.clone()).collect();
         assert_eq!(
@@ -917,10 +821,6 @@ mod tests {
                 "ENSURE team-a",
                 "PATCH /api/v1/namespaces/openshell-gw-team-a",
                 "FORWARD create_sandbox",
-                "GET /apis/agents.x-k8s.io/v1beta1/sandboxes",
-                "PATCH /api/v1/namespaces/openshell-gw-team-a/services/sb-svc",
-                "PATCH /apis/networking.k8s.io/v1/namespaces/openshell-gw-team-a/networkpolicies/sb-expose",
-                "PATCH /apis/gateway.kyma-project.io/v2/namespaces/openshell-gw-team-a/apirules/sb",
             ]
         );
     }

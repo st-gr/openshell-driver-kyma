@@ -1,6 +1,6 @@
 {{/* Pre-flight guards for inferenceProvider.
 
-Mirrors the gateway-apirule.yaml `{{- fail -}}` style: when an opt-in
+Uses the chart's `{{- fail -}}` style: when an opt-in
 block is enabled but missing a required field, refuse to render with an
 actionable message instead of silently producing broken manifests.
 
@@ -64,17 +64,22 @@ never answers and fails the install. */ -}}
 {{- /* With an OIDC issuer the gateway runs allow_unauthenticated_users = false
 (gateway-config.yaml), and upstream then answers a call without a bearer token
 with Unauthenticated (openshell-server src/multiplex.rs AuthGrpcRouter at the
-pinned tag). The hook's CLI calls carry no token, so every one fails and so does
-the install. */ -}}
+pinned tag). The hook therefore authenticates with the client-credentials grant
+(inference-provider-hook.yaml), which needs the client and its secret. */ -}}
 {{- if .Values.gateway.oidc.issuer -}}
-{{- fail "inferenceProvider.enabled=true cannot be combined with gateway.oidc.issuer: the provider hook calls the gateway without a token, and a gateway with OIDC refuses unauthenticated calls. Leave inferenceProvider disabled and register the profile and provider from an authenticated CLI session (docs/production-deployment.md)." -}}
+{{- if not (or .Values.gateway.oidc.clientCredentialsSecret.clientId .Values.gateway.oidc.clientId) -}}
+{{- fail "inferenceProvider.enabled=true with gateway.oidc.issuer requires gateway.oidc.clientId, or gateway.oidc.clientCredentialsSecret.clientId when the provider uses a separate confidential client: the provider hook authenticates to the gateway with that client's client-credentials grant." -}}
 {{- end -}}
-{{- /* The hook dials the gateway at http:// (GATEWAY_URL and GATEWAY_HEALTH_URL in
-inference-provider-hook.yaml, whatever gateway.tls.enabled says) and mounts no
-client certificate, so against a gateway that terminates TLS every call fails
-and so does the install. */ -}}
-{{- if .Values.gateway.tls.enabled -}}
-{{- fail "inferenceProvider.enabled=true cannot be combined with gateway.tls.enabled=true: the provider hook always dials the gateway over http:// and presents no client certificate, so it cannot reach a gateway that terminates TLS. Set inferenceProvider.enabled=false and register the profile and provider from a CLI session that trusts the gateway's CA (docs/production-deployment.md), or set gateway.tls.enabled=false." -}}
+{{- if not (and .Values.gateway.oidc.clientCredentialsSecret.name .Values.gateway.oidc.clientCredentialsSecret.key) -}}
+{{- fail "inferenceProvider.enabled=true with gateway.oidc.issuer requires gateway.oidc.clientCredentialsSecret.name (and .key): a Secret you manage in .Release.Namespace holding the OIDC client secret, which the provider hook exchanges for a token. Without one, leave inferenceProvider disabled and register the profile and provider from an authenticated CLI session (docs/production-deployment.md)." -}}
+{{- end -}}
+{{- end -}}
+{{- /* Against a gateway that serves TLS the hook dials https:// and trusts the
+chart CA only on its OIDC path, where it registers the gateway and the CLI reads
+that gateway's CA (inference-provider-hook.yaml). Without OIDC it has no such
+path: every call would fail, and so would the install. */ -}}
+{{- if and .Values.gateway.tls.enabled (not .Values.gateway.oidc.issuer) -}}
+{{- fail "inferenceProvider.enabled=true with gateway.tls.enabled=true requires gateway.oidc.issuer: the provider hook reaches a gateway that serves TLS only as a registered OIDC gateway. Set gateway.oidc (the hook then logs in with the client-credentials grant and trusts the chart CA), or set inferenceProvider.enabled=false and register the profile and provider from a CLI session that trusts the gateway's CA (docs/production-deployment.md), or set gateway.tls.enabled=false." -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

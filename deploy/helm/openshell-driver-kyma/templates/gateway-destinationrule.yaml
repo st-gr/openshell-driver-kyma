@@ -1,0 +1,30 @@
+{{- if .Values.gatewayIngress.enabled -}}
+{{- $service := printf "%s.%s.svc.cluster.local" (include "openshell-driver-kyma.fullname" .) .Release.Namespace -}}
+# TLS from the cluster's ingress gateway to the gateway pod, which serves TLS itself
+# (gateway.tls.enabled): the ingress gateway terminates the client's TLS, re-encrypts,
+# and verifies the pod's certificate against the chart CA and the Service name. It is
+# upstream's grpcRoute.backendTLSPolicy written for Istio.
+#
+# exportTo limits it to the ingress gateway's namespace. A sandbox with an Istio
+# sidecar dials the same Service and speaks TLS itself; this rule must not reach it.
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: {{ include "openshell-driver-kyma.fullname" . }}-gateway-tls
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+spec:
+  host: {{ $service }}
+  exportTo:
+    - {{ .Values.gatewayIngress.ingressNamespace | quote }}
+  trafficPolicy:
+    tls:
+      mode: SIMPLE
+      # A Secret in the ingress gateway's namespace with the CA under ca.crt
+      # (gateway-ingress-ca.yaml).
+      credentialName: {{ include "openshell-driver-kyma.gatewayIngressCaSecretName" . }}
+      sni: {{ $service }}
+      subjectAltNames:
+        - {{ $service }}
+{{- end }}
