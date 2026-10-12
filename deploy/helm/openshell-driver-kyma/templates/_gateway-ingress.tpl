@@ -148,8 +148,22 @@ certificate, because the proxy has none to present. */ -}}
 {{- fail (printf "gatewayIngress.host %q must be one label under gatewayIngress.domain (<label>.%s) without \"--\": the Kyma gateway serves *.%s, and names with \"--\" are sandbox service hosts." $host $in.domain $in.domain) -}}
 {{- end -}}
 {{- range $in.allowedCidrs -}}
-{{- if not (regexMatch "^(([0-9]{1,3}\\.){3}[0-9]{1,3}(/[0-9]{1,2})?|[0-9a-fA-F:]*:[0-9a-fA-F:]*(/[0-9]{1,3})?)$" (toString .)) -}}
-{{- fail (printf "gatewayIngress.allowedCidrs entry %q is not an IP address or CIDR block (for example 203.0.113.0/24)." (toString .)) -}}
+{{- $entry := toString . -}}
+{{- $bad := not (regexMatch "^(([0-9]{1,3}\\.){3}[0-9]{1,3}(/[0-9]{1,2})?|[0-9a-fA-F:]*:[0-9a-fA-F:]*(/[0-9]{1,3})?)$" $entry) -}}
+{{- /* The shape alone admits 999.1.1.1/99, which Istio rejects only when the policy is
+applied: check the octets (0-255) and the prefix (0-32 for IPv4, 0-128 for IPv6). */ -}}
+{{- if not $bad -}}
+{{- $parts := splitList "/" $entry -}}
+{{- $v6 := contains ":" $entry -}}
+{{- if not $v6 -}}
+{{- range splitList "." (first $parts) -}}
+{{- if gt (atoi .) 255 -}}{{- $bad = true -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if and (eq (len $parts) 2) (gt (atoi (last $parts)) (ternary 128 32 $v6)) -}}{{- $bad = true -}}{{- end -}}
+{{- end -}}
+{{- if $bad -}}
+{{- fail (printf "gatewayIngress.allowedCidrs entry %q is not an IP address or CIDR block (for example 203.0.113.0/24)." $entry) -}}
 {{- end -}}
 {{- end -}}
 {{- /* A DENY rule is matched by host only on HTTP servers. For a TCP or TLS-passthrough

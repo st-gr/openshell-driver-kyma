@@ -144,6 +144,7 @@ _helpers.tpl:256-262 at the pinned tag). Empty lets upstream decide.
 {{- if .Values.driver.gatewayEndpoint -}}
 {{- .Values.driver.gatewayEndpoint -}}
 {{- else if .Values.gateway.enabled -}}
+{{- include "openshell-driver-kyma.gatewayTlsGuards" . -}}
 {{- $scheme := ternary "https" "http" (default false .Values.gateway.tls.enabled) -}}
 {{- printf "%s://%s.%s.svc.cluster.local:%v" $scheme (include "openshell-driver-kyma.fullname" .) .Release.Namespace .Values.gateway.grpcPort -}}
 {{- end -}}

@@ -380,6 +380,16 @@ probe_try good-8c-deny-no-cidrs '' --set-json "probeGateways=[$gateways_http,$ga
 try bad-8-services-no-cidrs 'gatewayIngress.allowedCidrs' t "${ingress_common[@]}" \
 	--set gatewayIngress.serviceHosts.enabled=true
 try bad-8-cidr 'office' t "${ingress_common[@]}" --set-json 'gatewayIngress.allowedCidrs=["office"]'
+# Shapes that look like addresses but are out of range: Istio would reject the policy at
+# apply time, after part of the release is installed.
+try bad-8-cidr-octet '999.1.1.1/24' t "${ingress_common[@]}" --set-json 'gatewayIngress.allowedCidrs=["999.1.1.1/24"]'
+try bad-8-cidr-prefix '203.0.113.0/33' t "${ingress_common[@]}" --set-json 'gatewayIngress.allowedCidrs=["203.0.113.0/33"]'
+try bad-8-cidr-v6-prefix '2001:db8::/129' t "${ingress_common[@]}" --set-json 'gatewayIngress.allowedCidrs=["2001:db8::/129"]'
+try good-8-cidr-edges '' t "${ingress_common[@]}" --set-json 'gatewayIngress.allowedCidrs=["0.0.0.0/0","255.255.255.255","10.0.0.0/8","::/0","2001:db8::1"]'
+# A boolean given as a string is truthy in a template: the chart says so instead of
+# failing later with Helm's own type error.
+try bad-3h-tls-string 'gateway.tls.enabled must be a boolean' t --set-string gateway.tls.enabled=false
+try bad-3h-client-ca-string 'gateway.tls.clientCa.enabled must be a boolean' t --set-string gateway.tls.clientCa.enabled=false
 try bad-8-services-port-80 'gateway.grpcPort=80' t "${ingress_common[@]}" "${ingress_services[@]}" \
 	--set gateway.grpcPort=80
 try bad-8-one-role 'must be set together' t --set gateway.oidc.issuer=https://issuer.example \
@@ -1140,7 +1150,7 @@ if userinfo_err.exists() and "secretpw" in userinfo_err.read_text():
 
 # 8. Remote access. The refused values are the bad-8-* cases (checked with the other
 # bad-* cases above); these renders must succeed, and the removed APIRule is gone.
-INGRESS_RENDERS = ("good-8-ingress", "good-8-services", "good-8-host",
+INGRESS_RENDERS = ("good-8-ingress", "good-8-services", "good-8-host", "good-8-cidr-edges",
                    "good-8-long-names", "good-8-rbac-roles", "good-8-oidc-default-roles",
                    "good-8-allow", "good-8-allow-services", "good-8-forwarded", "good-8-allow-forwarded")
 for name in INGRESS_RENDERS:
@@ -1467,8 +1477,12 @@ for path in sorted(work.glob("*.yaml")):
         if not (d["spec"].get("selector") or {}).get("matchLabels"):
             failures.append(f"{where}: no workload selector")
         for rule in d["spec"].get("rules") or [{}]:
-            hosts = [h for t in rule.get("to") or [] for h in (t.get("operation") or {}).get("hosts") or []]
-            if not hosts or any(h.startswith("*") for h in hosts):
+            entries = rule.get("to") or [{}]
+            hosts = [h for t in entries for h in (t.get("operation") or {}).get("hosts") or []]
+            # Every `to` entry needs hosts: the entries OR, so one without hosts would match
+            # every host of the ingress gateway.
+            if not hosts or any(not (t.get("operation") or {}).get("hosts") for t in entries) \
+                    or any(h.startswith("*") for h in hosts):
                 failures.append(f"{where}: a rule matches hosts {hosts}; every rule must name this release's "
                                 "hosts, and a suffix wildcard covers other applications")
 
