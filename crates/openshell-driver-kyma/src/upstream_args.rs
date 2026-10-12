@@ -120,13 +120,13 @@ pub struct UpstreamArgs {
     #[arg(long, env = "OPENSHELL_HOST_GATEWAY_IP")]
     pub host_gateway_ip: Option<String>,
 
-    #[arg(long, env = "OPENSHELL_SANDBOX_RUNTIME_IMAGE")]
+    #[arg(long, env = openshell_core::config::SANDBOX_RUNTIME_IMAGE_ENV)]
     pub sandbox_runtime_image: Option<String>,
 
     #[arg(long, env = "OPENSHELL_SANDBOX_RUNTIME_IMAGE_PULL_POLICY")]
     pub sandbox_runtime_image_pull_policy: Option<KubernetesImagePullPolicy>,
 
-    #[arg(long, env = "OPENSHELL_SUPERVISOR_IMAGE")]
+    #[arg(long, env = openshell_core::config::SUPERVISOR_IMAGE_ENV)]
     pub supervisor_image: Option<String>,
 
     #[arg(long, env = "OPENSHELL_SUPERVISOR_IMAGE_PULL_POLICY")]
@@ -251,6 +251,7 @@ pub fn compute_config(
         proxy_connect_by_hostname: args.proxy_connect_by_hostname.then_some(true),
         proxy_ca_bundle: args.proxy_ca_bundle,
         grpc_endpoint: args.grpc_endpoint.unwrap_or_default(),
+        supervisor_otlp_endpoint: args.otlp_endpoint.clone(),
         ssh_socket_path: args.sandbox_ssh_socket_path,
         client_tls_secret_name: args.client_tls_secret_name.unwrap_or_default(),
         host_gateway_ip: args.host_gateway_ip.unwrap_or_default(),
@@ -330,6 +331,8 @@ mod tests {
             "registry.example/sandbox@sha256:bbbb",
             "--sa-token-ttl-secs",
             "7200",
+            "--otlp-endpoint",
+            "http://collector.example:4317",
         ]);
         let config = compute_config(args, BTreeMap::new());
         assert_eq!(config.namespace, "sandboxes");
@@ -342,6 +345,11 @@ mod tests {
             "registry.example/sandbox@sha256:bbbb"
         );
         assert_eq!(config.sa_token_ttl_secs, 7200);
+        // v0.1.3: the gateway's OTLP endpoint is also handed to supervisor pods.
+        assert_eq!(
+            config.supervisor_otlp_endpoint.as_deref(),
+            Some("http://collector.example:4317")
+        );
     }
 
     #[test]

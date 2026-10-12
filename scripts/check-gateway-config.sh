@@ -32,7 +32,7 @@ render() {
     --set gateway.enabled=true \
     --set gateway.sandboxJwt.enabled=true \
     --set gatewayService.enabled=true \
-    --show-only "$1"
+    --show-only "$@"
 }
 
 render templates/gateway-config.yaml > "$WORK/rendered.yaml"
@@ -119,35 +119,56 @@ check_args rbac-roles \
   --set gateway.oidc.adminRole=osh-admin \
   --set gateway.oidc.userRole=osh-user
 
-rc=0
-out="$(docker run --rm -v "$WORK/gateway.toml:/etc/openshell/gateway.toml:ro" \
-  --entrypoint openshell-gateway "$IMAGE" \
-  --config /etc/openshell/gateway.toml --compute-driver kyma \
-  --compute-driver-socket /run/openshell/driver.sock 2>&1)" || rc=$?
+# check_config LABEL TOML: run the gateway with that config. Config parsing happens before
+# anything else, so a schema error is told apart from the runtime failure that follows
+# outside Kubernetes. Prints GATEWAY_CONFIG_ACCEPTED (LABEL) or exits non-zero.
+check_config() {
+  local label=$1 toml=$2 rc=0 out
+  out="$(docker run --rm -v "$toml:/etc/openshell/gateway.toml:ro" \
+    --entrypoint openshell-gateway "$IMAGE" \
+    --config /etc/openshell/gateway.toml --compute-driver kyma \
+    --compute-driver-socket /run/openshell/driver.sock 2>&1)" || rc=$?
 
-# 125/126/127 are docker's own failures (daemon, exec, command not found),
-# not the gateway's exit status.
-if [ "$rc" -ge 125 ] && [ "$rc" -le 127 ]; then
-  echo "ERROR: docker run failed at docker level (status $rc); the config was not tested" >&2
-  head -20 <<<"$out" >&2
+  # 125/126/127 are docker's own failures (daemon, exec, command not found),
+  # not the gateway's exit status.
+  if [ "$rc" -ge 125 ] && [ "$rc" -le 127 ]; then
+    echo "ERROR: docker run failed at docker level (status $rc); the config ($label) was not tested" >&2
+    head -20 <<<"$out" >&2
+    exit 1
+  fi
+
+  if grep -qiE "failed to parse gateway config|unsupported gateway config version|unknown field|ocsf_log" <<<"$out"; then
+    echo "GATEWAY_CONFIG_REJECTED ($label)"
+    head -20 <<<"$out"
+    exit 1
+  fi
+
+  # Positive evidence: the gateway got past config parsing and failed on
+  # something unrelated to config (running outside Kubernetes).
+  if grep -q "failed to create /.local/state/openshell/gateway" <<<"$out"; then
+    echo "--- gateway output ($label: config accepted; failure below is runtime) ---"
+    head -5 <<<"$out"
+    echo "GATEWAY_CONFIG_ACCEPTED ($label)"
+    return 0
+  fi
+
+  echo "ERROR: could not determine whether the config ($label) was accepted (exit $rc); output:" >&2
+  head -40 <<<"$out" >&2
   exit 1
-fi
+}
+check_config defaults "$WORK/gateway.toml"
 
-if grep -qiE "failed to parse gateway config|unsupported gateway config version|unknown field" <<<"$out"; then
-  echo "GATEWAY_CONFIG_REJECTED"
-  head -20 <<<"$out"
-  exit 1
-fi
-
-# Positive evidence: the gateway got past config parsing and failed on
-# something unrelated to config (running outside Kubernetes).
-if grep -q "failed to create /.local/state/openshell/gateway" <<<"$out"; then
-  echo "--- gateway output (config accepted; failure below is runtime) ---"
-  head -20 <<<"$out"
-  echo "GATEWAY_CONFIG_ACCEPTED"
-  exit 0
-fi
-
-echo "ERROR: could not determine whether the config was accepted (exit $rc); output:" >&2
-head -40 <<<"$out" >&2
-exit 1
+# The gateway's OCSF audit log (gateway.ocsfLog), both rotation modes.
+for variant in daily never; do
+  render templates/gateway-config.yaml --set gateway.ocsfLog.enabled=true \
+    --set "gateway.ocsfLog.rotation=$variant" --set gateway.ocsfLog.schemaVersion=1.3 > "$WORK/rendered-ocsf.yaml"
+  python3 - "$WORK/rendered-ocsf.yaml" "$WORK/gateway-ocsf-$variant.toml" <<'PY'
+import sys, yaml
+doc = yaml.safe_load(open(sys.argv[1]))
+open(sys.argv[2], "w").write(doc["data"]["gateway.toml"])
+PY
+  grep -q '^\[openshell.gateway.ocsf_log\]' "$WORK/gateway-ocsf-$variant.toml" \
+    || { echo "ERROR: the OCSF render has no [openshell.gateway.ocsf_log] table; nothing to test" >&2; exit 1; }
+  check_config "ocsf-$variant" "$WORK/gateway-ocsf-$variant.toml"
+done
+echo "GATEWAY_CONFIG_ACCEPTED"

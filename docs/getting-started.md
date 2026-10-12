@@ -130,7 +130,7 @@ The last line proves the gateway is talking to the driver over the shared
 Unix socket. If it is missing, check the driver container's logs.
 
 Reach the gateway from your laptop, create a sandbox, get a shell in it
-(install the v0.1.2 CLI first, see [install-cli.md](install-cli.md)):
+(install the v0.1.3 CLI first, see [install-cli.md](install-cli.md)):
 
 ```bash
 kubectl -n "$NS" port-forward svc/ods-openshell-driver-kyma 8080:8080 &
@@ -142,7 +142,7 @@ openshell --gateway-endpoint http://localhost:8080 sandbox create \
   --name hello --detach
 
 openshell --gateway-endpoint http://localhost:8080 sandbox connect hello
-#   ...an interactive shell inside the sandbox. Detach with Ctrl-P Ctrl-Q to
+#   ...an interactive shell inside the sandbox. Detach with Ctrl-D or Ctrl-P Ctrl-Q to
 #   keep the sandbox running; `exit` ends its main process, after which the
 #   sandbox shows `Completed` and cannot be connected to again.
 
@@ -160,7 +160,7 @@ Two things that look like "the sandbox is unreachable" but are not:
   and takes no input; create it without a command (login shell) if you want
   `connect`, and use `sandbox exec` for one-off commands. Typing `exit` in a
   connected login shell ends the sandbox (`Completed`); detach with
-  Ctrl-P Ctrl-Q instead.
+  Ctrl-D or Ctrl-P Ctrl-Q instead.
 - Do not create sandboxes from
   `ghcr.io/nvidia/openshell-community/sandboxes/base:latest`: that image
   embeds a sandbox policy the v0.1.2 supervisor rejects ("Image policy is
@@ -262,6 +262,11 @@ curl --resolve default--web.openshell.localhost:8080:127.0.0.1 \
 `openshell service expose web 8080 admin` adds a named endpoint at
 `http://default--web--admin.openshell.localhost:8080/`, and
 `openshell service list web` shows them. Verified live on v0.9.0.
+
+The gateway removes a request's `Authorization` header before it reaches the
+service. A service that checks Bearer tokens itself needs
+`--authorization-mode bearer-passthrough` on `service expose` (CLI v0.1.3 or
+later).
 
 ### Two operational notes
 
