@@ -6,21 +6,21 @@ crash-loop once the driver starts.
 
 Every rule below is one of upstream's startup refusals in
 KubernetesComputeConfig::validate_workspace_mode (openshell-driver-kubernetes
-src/config.rs, v0.1.2), so a value upstream would refuse fails `helm template`
+src/config.rs, v0.1.3), so a value upstream would refuse fails `helm template`
 instead of crash-looping the pod:
-  managed   config.rs:661   gateway id is a DNS-1123 label
-            config.rs:671   "openshell-<id>-" plus a 19-character workspace
+  managed   config.rs:669   gateway id is a DNS-1123 label
+            config.rs:679   "openshell-<id>-" plus a 19-character workspace
                             name fits 63 characters, so the id is at most 33
-            config.rs:682   managed SSH ingress needs a gateway namespace
+            config.rs:690   managed SSH ingress needs a gateway namespace
                             and a gateway pod selector (checked on the
                             effective values, openshell-driver-kyma.
                             managedSshIngress: with the in-pod gateway both
                             default to its own pod)
-  operator  config.rs:697   exactly one of the namespace label or file...
-            config.rs:703   ...not both
+  operator  config.rs:705   exactly one of the namespace label or file...
+            config.rs:711   ...not both
 Not mirrored because no chart value can reach them: an empty gateway id
-(config.rs:658, the id defaults to the release fullname) and an empty operator
-label or file (config.rs:709-717, an empty value is simply not passed).
+(config.rs:666, the id defaults to the release fullname) and an empty operator
+label or file (config.rs:717-725, an empty value is simply not passed).
 
 Called via `{{ include "openshell-driver-kyma.workspaceGuards" . }}` from
 deployment.yaml. */}}

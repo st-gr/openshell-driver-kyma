@@ -884,7 +884,7 @@ def effective_rules(documents, where):
 
 SANDBOX_VERBS = ["create", "delete", "get", "list", "patch", "update", "watch"]
 # Blocks of (apiGroup, resource, verbs[, resourceNames]) rows. Upstream's come from
-# the v0.1.2 templates of deploy/helm/openshell (role.yaml for shared mode, whose
+# the v0.1.3 templates of deploy/helm/openshell (role.yaml for shared mode, whose
 # Role holds the namespaced rights; clusterrole.yaml for the cluster-wide rights of
 # every mode and the namespaced rights of the other modes); the line numbers refer to those.
 PVC_GET = [("", "persistentvolumeclaims", ["get"])]           # role.yaml:13-18, clusterrole.yaml:18-22; with allowDriverConfig

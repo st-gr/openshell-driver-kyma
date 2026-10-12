@@ -13,7 +13,7 @@
 # api.anthropic.com. The credential is bound to that host and port: the
 # supervisor resolves it only for requests to them. `binaries` gates which
 # processes may reach the endpoint when the profile contributes policy to a
-# sandbox; upstream v0.1.2 does not yet restrict the credential by calling
+# sandbox; upstream v0.1.3 does not yet restrict the credential by calling
 # binary, so treat the endpoint as the scope. The baseUrl path is not part of
 # the binding: the endpoint sets no `path:`, so the credential applies to every
 # path on that host and port.

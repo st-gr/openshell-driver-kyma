@@ -4,6 +4,29 @@ All notable changes to openshell-driver-kyma are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.10.1] — 2026-10-12
+
+### Changed
+
+- Moved to upstream OpenShell v0.1.3 (crates, chart `upstream.version`, and the
+  gateway, supervisor and sandbox-runtime image digests).
+- Upstream's driver gained `KubernetesComputeConfig.supervisor_otlp_endpoint`
+  (set from the gateway's `--otlp-endpoint`, so supervisor pods export to the
+  same collector) and reads the supervisor and sandbox-runtime image options from
+  `openshell_core::config::{SUPERVISOR_IMAGE_ENV, SANDBOX_RUNTIME_IMAGE_ENV}`
+  (same environment variable names). Both are mirrored in `upstream_args.rs`.
+
+### Did not break us
+
+- Upstream's chart changes (`rbac.create`/`rbac.clusterScoped`, `gatewayConfig`
+  TOML rendering, HPA, replica routing, OCSF log, `sandboxUid`/`sandboxGid`
+  values) restructure its gateway chart; the Role/ClusterRole rules, the
+  workspace-secret-source Role, the SSH NetworkPolicy and
+  `validate_workspace_mode` are semantically unchanged, so this chart's RBAC and
+  guards are unchanged (only upstream line references moved).
+- The rest of upstream's `main.rs` is unchanged (`UPSTREAM_MAIN_DRIFT` did not
+  fire); the new `ANNOTATION_SCC_MCS` constant needed no wrapper change.
+
 ## [0.10.0] — 2026-10-01
 
 **UPGRADE NOTE: `gatewayApirule` is removed.** Move to `gatewayIngress` (table

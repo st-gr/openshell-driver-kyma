@@ -14,7 +14,7 @@
 #                                       and requires the driver to
 #                                       acknowledge. The gateway no longer
 #                                       has a K8s SA authenticator (removed
-#                                       in v0.1.2); the driver performs the
+#                                       in v0.1.3); the driver performs the
 #                                       TokenReview itself.
 #
 # CLI flags on the gateway container still override these values, so the

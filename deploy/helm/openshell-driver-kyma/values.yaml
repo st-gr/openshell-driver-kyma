@@ -4,7 +4,7 @@
 # Sandbox provisioning namespace. The driver creates Sandbox CRs here.
 # Cluster-admin should label this namespace
 # `pod-security.kubernetes.io/enforce: privileged`, the level the chart's CI
-# runs at. Upstream v0.1.2's sandbox pods request no privileges (non-root, all
+# runs at. Upstream v0.1.3's sandbox pods request no privileges (non-root, all
 # capabilities dropped, RuntimeDefault seccomp), so a stricter level may admit
 # them, but only `privileged` is verified here. The provider hook runs as
 # root, which `restricted` refuses.
@@ -66,11 +66,11 @@ driver:
   # starting with `sha256:` and the helper emits `<repo>@sha256:<digest>`
   # automatically.
   #
-  # This digest is supervisor v0.1.2, version-matched to gateway.image
+  # This digest is supervisor v0.1.3, version-matched to gateway.image
   # below. It tracked `:latest` until chart 0.3.0 — that tag moved twice
   # in one week, so sandboxes were silently picking up new privileged
   # binaries. Re-pin both together when bumping upstream.
-  supervisorImage: ghcr.io/nvidia/openshell/supervisor@sha256:d7b5264bb6bc56f4796e6fa3617b8e4a8d785be0b7293542efd8cc250b0fb67a
+  supervisorImage: ghcr.io/nvidia/openshell/supervisor@sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4
   # The gateway endpoint sandboxes dial (OPENSHELL_GRPC_ENDPOINT). Empty
   # defaults to this release's Service when gateway.enabled is true, https://
   # when gateway.tls.enabled and http:// otherwise, as upstream's chart derives
@@ -169,7 +169,7 @@ driver:
   # Sandbox runtime (isolation backend) image, digest-pinned. Upstream's
   # compiled-in default depends on build variables a git-dependency build does
   # not set, so the chart always passes it.
-  sandboxRuntimeImage: ghcr.io/nvidia/openshell/sandbox@sha256:bf4797b6c511f2d8ba02955dbba4bf76c1f0dd6d83531420c5408d5f1fb9d72f
+  sandboxRuntimeImage: ghcr.io/nvidia/openshell/sandbox@sha256:2658534bfb3f1ebba4bb7792e9e875a0972edbe7ae5f58d807ae22c46844a2ac
   sandboxRuntimeImagePullPolicy: ""
   supervisorImagePullPolicy: ""
   # Default sandbox image when a create request names none
@@ -184,7 +184,7 @@ driver:
   sandboxSshSocketPath: ""
   bindAddress: ""
   # OTLP/gRPC trace collector (OPENSHELL_OTLP_ENDPOINT), e.g.
-  # http://collector.observability:4317. Plain http:// (upstream v0.1.2 builds
+  # http://collector.observability:4317. Plain http:// (upstream v0.1.3 builds
   # its exporter without TLS). With networkPolicy.enabled the driver pod may
   # then reach that port (80 when none is given), on any address.
   otlpEndpoint: ""
@@ -247,7 +247,7 @@ driver:
 # The upstream NVIDIA/OpenShell release this chart's driver links. Must equal
 # the tag in the workspace Cargo.toml (scripts/check-chart-render.sh).
 upstream:
-  version: v0.1.2
+  version: v0.1.3
 
 networkPolicy:
   # NetworkPolicies the chart renders:
@@ -346,7 +346,7 @@ podLabels: {}
 gateway:
   enabled: false
   image:
-    # Pinned by digest to the gateway image upstream published for `v0.1.2`,
+    # Pinned by digest to the gateway image upstream published for `v0.1.3`,
     # the same release as `upstream.version`, the Cargo.toml tag, the
     # supervisor and sandbox runtime images above, and the `openshell` CLI the
     # provider hook downloads. Re-pin them together when `upstream.version`
@@ -354,7 +354,7 @@ gateway:
     # shape changed. Resolve a digest with `docker buildx imagetools inspect`
     # on https://github.com/NVIDIA/OpenShell/pkgs/container/openshell%2Fgateway
     repository: ghcr.io/nvidia/openshell/gateway
-    tag: "sha256:2fe4dad9118e14ab80a8258b545ea6e6cd74c3469e24ad4e6610f964d98913a2"
+    tag: "sha256:ea14aa4db0980fab4769fb6b5509ac42ae3dc8495e645b1ba1fe1ada49892fa6"
     pullPolicy: IfNotPresent
   grpcPort: 8080
   metricsPort: 9091
@@ -590,7 +590,7 @@ inferenceProvider:
   profileId: ""
   # Executable paths for the profile's `binaries` list: the processes that may reach
   # the inference endpoint through the sandbox supervisor. The API key itself is
-  # bound to the endpoint's host and port (upstream v0.1.2 does not yet restrict
+  # bound to the endpoint's host and port (upstream v0.1.3 does not yet restrict
   # it by calling binary); the path of `baseUrl` is not part of that binding.
   # claude-code runs under node, so node must be listed; add the interpreter of
   # any other SDK your sandbox image uses. Must not be empty.
