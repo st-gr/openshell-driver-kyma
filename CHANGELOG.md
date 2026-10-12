@@ -4,7 +4,7 @@ All notable changes to openshell-driver-kyma are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
-## [0.10.2] — unreleased
+## [0.10.2] — 2026-10-12
 
 Findings deferred from the 0.10.0 review (issue #82).
 
