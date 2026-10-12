@@ -226,8 +226,8 @@ How the routing works (per
   that endpoint.
 - The key is bound to the endpoint's host and port (the path of `baseUrl` is
   not part of the binding). `binaries` gates which processes may reach the
-  endpoint; upstream v0.1.2 does not yet restrict the key by calling
-  binary, so treat the endpoint as the scope.
+  endpoint; upstream v0.1.3 still resolves a static key like this one by
+  endpoint, not by calling binary, so treat the endpoint as the scope.
 - An in-cluster upstream needs no NetworkPolicy from this chart. Upstream
   gives each supervisor pod its own egress policy (allow-all) and gives
   workload pods none. There is no `gatewayUpstreamEgress` value any more.
