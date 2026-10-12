@@ -56,7 +56,6 @@ driver:
   sandboxGid: 1000740001
   sandboxStorageSize: 5Gi
   sandboxStorageClass: example-class
-  istioInjectSandboxes: true
   disableClaudeTelemetry: true
   workspacePsaLevel: baseline
   healthPort: 9191

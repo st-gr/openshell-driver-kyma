@@ -558,11 +558,10 @@ Sandbox pods themselves are never published.
   grant the driver `create` and `delete` on Secrets in each operator namespace.
   Upstream ships that Role in its separate `openshell-workspace` chart; this
   chart does not.
-- **Gateway TLS with Istio-injected sandboxes** (`gateway.tls.enabled`, which
-  `gatewayIngress` requires, together with `driver.istioInjectSandboxes`): not
-  verified. A sandbox's sidecar may treat the gateway Service's `grpc` port as
-  plaintext HTTP/2 and break the supervisor's TLS connection to the gateway.
-  Create a sandbox on your cluster before you rely on the combination.
+- **No Istio sidecars in sandbox workloads.** Upstream refuses a workload pod
+  that receives a projected ServiceAccount token, which a sidecar brings, so
+  sandbox workloads always carry `sidecar.istio.io/inject: "false"`
+  ([`istio-considerations.md`](istio-considerations.md)).
 - **Managed mode**: the gateway id (default: the release fullname) must be at
   most 33 characters; a longer release name must set
   `gateway.sandboxJwt.gatewayId`.

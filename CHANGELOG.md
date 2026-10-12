@@ -22,6 +22,16 @@ Findings deferred from the 0.10.0 review (issue #82).
   `gatewayIngress.caHook.image` is removed (an old values file that sets it is
   ignored). The ConfigMap is created by a hook, so `helm uninstall` leaves it.
 
+### Removed
+
+- **`driver.istioInjectSandboxes` / `--kyma-istio-inject-sandboxes`.** With
+  upstream v0.1.3 it made every sandbox creation fail: upstream refuses a
+  workload pod that receives a projected ServiceAccount token ("admitted
+  workload Pod does not preserve capability-free isolation"), and an Istio
+  sidecar brings one (seen live on Kyma). Sandbox workloads now always carry
+  `sidecar.istio.io/inject: "false"`. A values file that still sets the option
+  to `true` fails the render with an explanation; the driver refuses the flag.
+
 ### Fixed
 
 - `gatewayIngress.allowedCidrs` entries with an octet over 255 or a prefix over

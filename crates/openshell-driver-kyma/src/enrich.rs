@@ -12,7 +12,9 @@
 use openshell_core::proto::compute::v1::DriverSandbox;
 
 /// Istio must not inject a sidecar into sandbox workloads: upstream's workload
-/// fence gives them no egress, and the sidecar would sit outside the boundary.
+/// fence gives them no egress, the sidecar would sit outside the boundary, and
+/// upstream (v0.1.3) refuses a workload pod that receives a projected
+/// ServiceAccount token, which the sidecar brings. Workload pods always get "false".
 pub const ISTIO_INJECT_LABEL: &str = "sidecar.istio.io/inject";
 pub const KAGENTI_TYPE_LABEL: &str = "kagenti.io/type";
 pub const KAGENTI_TYPE_VALUE: &str = "agent";
@@ -21,8 +23,6 @@ pub const CLAUDE_TELEMETRY_ENV: &str = "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
 /// What hook 1 adds to every sandbox.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EnrichConfig {
-    /// Value of the `sidecar.istio.io/inject` label.
-    pub istio_inject: bool,
     /// Environment added to the sandbox template.
     pub environment: Vec<(String, String)>,
 }
@@ -38,7 +38,7 @@ pub fn enrich(sandbox: &mut DriverSandbox, config: &EnrichConfig) {
     template
         .labels
         .entry(ISTIO_INJECT_LABEL.to_string())
-        .or_insert_with(|| config.istio_inject.to_string());
+        .or_insert_with(|| "false".to_string());
     template
         .labels
         .entry(KAGENTI_TYPE_LABEL.to_string())
@@ -58,7 +58,6 @@ mod tests {
 
     fn config() -> EnrichConfig {
         EnrichConfig {
-            istio_inject: false,
             environment: vec![(
                 "ANTHROPIC_BASE_URL".to_string(),
                 "http://proxy:8080".to_string(),
@@ -80,20 +79,6 @@ mod tests {
             template.environment["ANTHROPIC_BASE_URL"],
             "http://proxy:8080"
         );
-    }
-
-    #[test]
-    fn istio_injection_can_be_requested() {
-        let mut sandbox = DriverSandbox::default();
-        enrich(
-            &mut sandbox,
-            &EnrichConfig {
-                istio_inject: true,
-                environment: vec![],
-            },
-        );
-        let template = sandbox.spec.unwrap().template.unwrap();
-        assert_eq!(template.labels[ISTIO_INJECT_LABEL], "true");
     }
 
     // Review Focus 1.

@@ -91,7 +91,6 @@ driver:
   # when gateway.tls.enabled and http:// otherwise, as upstream's chart derives
   # it from its disableTls; without the gateway it is left to upstream.
   gatewayEndpoint: ""
-  istioInjectSandboxes: false
   # When true, the driver adds `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`
   # to every sandbox's environment (an explicit sandboxEnv entry for the same
   # key wins). Pair with an in-cluster LLM gateway that

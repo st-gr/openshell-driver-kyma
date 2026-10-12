@@ -429,6 +429,10 @@ try bad-8-selector-empty 'gatewayIngress.ingressSelector' t "${ingress_common[@]
 try bad-8-ingress-namespace-empty 'gatewayIngress.ingressNamespace' t "${ingress_common[@]}" \
 	--set gatewayIngress.ingressNamespace=
 try bad-8-istio-gateway-empty 'gatewayIngress.istioGateway' t "${ingress_common[@]}" --set gatewayIngress.istioGateway=
+# Istio sidecars in sandbox workloads: upstream v0.1.3 refuses such a workload pod (it
+# receives a projected ServiceAccount token), so the option is gone and a values file
+# that still sets it fails the render instead of failing every sandbox creation.
+try bad-3-istio-inject 'driver.istioInjectSandboxes was removed' t --set driver.istioInjectSandboxes=true
 # A 0.9.x values file that still enables the removed APIRule must not lose its route silently.
 try bad-8-apirule-leftover 'gatewayApirule' t --set gatewayApirule.enabled=true \
 	--set gatewayApirule.host=openshell.example.org
