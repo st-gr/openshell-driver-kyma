@@ -128,7 +128,7 @@ imagePullSecrets:
 gateway:
   enabled: true
   # The gateway, supervisor and sandbox-runtime images default to digests of
-  # the upstream OpenShell release named by `upstream.version` (v0.1.2). Leave
+  # the upstream OpenShell release named by `upstream.version` (v0.1.3). Leave
   # them alone unless you move that version too: they must match each other
   # and the driver.
 
@@ -457,6 +457,19 @@ openshell status
     -o jsonpath='{.data.ca\.crt}' | base64 --decode \
     > ~/.config/openshell/gateways/kyma-forward/mtls/ca.crt
   ```
+- **Gateway audit log.** `gateway.ocsfLog.enabled: true` makes the gateway
+  write its OCSF audit events as JSONL (upstream v0.1.3). The default path is
+  on the pod's `/tmp` and is lost when the pod restarts; to keep the records,
+  add a volume with `gateway.extraVolumes` and `gateway.extraVolumeMounts` and
+  set `gateway.ocsfLog.path` on it. Rotation is daily with seven files kept,
+  or `rotation: never`.
+- **Installing without cluster-admin rights.** Set
+  `rbac.clusterScoped.create: false` and `crdPreInstallCheck.enabled: false`,
+  and let a cluster admin apply the driver's ClusterRole and ClusterRoleBinding
+  once, rendered with
+  `helm template … --show-only templates/clusterrole.yaml --show-only templates/clusterrolebinding.yaml`.
+  The ServiceAccount does not change, so the binding keeps matching on later
+  upgrades.
 - **Image upgrades.** Resolve the new digest, edit the values overlay,
   `helm upgrade`. The chart's `checksum/values` annotation rolls the
   pod automatically. Pass your values file each time; do not use
@@ -516,7 +529,12 @@ Things to know:
 
 - The gateway does not authenticate a request to a service URL, so these hosts
   are fenced by `gatewayIngress.allowedCidrs` only. Put authentication into the
-  service itself if the address ranges are shared.
+  service itself if the address ranges are shared. By default the gateway
+  removes the caller's `Authorization` header before the request reaches the
+  service; for a service that checks Bearer tokens itself, expose it with
+  `openshell service expose <sandbox> <port> --authorization-mode
+  bearer-passthrough` (CLI v0.1.3 or later), which passes a single
+  `Authorization: Bearer` header through.
 - Service hosts are published per workspace. Routes and policies match
   `<workspace>--*` for the workspaces in `gatewayIngress.serviceHosts.workspaces`
   (default `[default]`), never the whole domain, so no other host under the

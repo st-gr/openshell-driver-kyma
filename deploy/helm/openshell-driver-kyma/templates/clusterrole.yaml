@@ -1,3 +1,8 @@
+{{- $cluster := .Values.rbac.clusterScoped -}}
+{{- if not (kindIs "bool" $cluster.create) -}}
+{{- fail (printf "rbac.clusterScoped.create must be a boolean (true or false), got the %s %q." (kindOf $cluster.create) (toString $cluster.create)) -}}
+{{- end -}}
+{{- if $cluster.create }}
 {{- $mode := .Values.driver.workspaceMode }}
 {{- $ssh := include "openshell-driver-kyma.managedSshIngress" . | fromJson }}
 # Cluster-scoped rights for the driver: upstream's ClusterRole for the same
@@ -8,7 +13,7 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ include "openshell-driver-kyma.fullname" . }}-driver-{{ .Release.Namespace }}
+  name: {{ include "openshell-driver-kyma.clusterRoleName" . }}
   labels:
     {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
 rules:
@@ -92,3 +97,4 @@ rules:
     verbs: ["get", "create", "patch", "update"]
   {{- end }}
   {{- end }}
+{{- end }}

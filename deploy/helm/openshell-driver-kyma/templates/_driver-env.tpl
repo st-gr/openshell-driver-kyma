@@ -183,7 +183,7 @@ Unset (nil or "") gives an empty string, so the variable is omitted and upstream
 resolves the identity itself. A set value must be a whole number in
 [1, 4294967294], upstream's range (openshell-policy MIN_SANDBOX_UID and
 MAX_SANDBOX_UID, checked by validate_sandbox_identity_config in
-openshell-driver-kubernetes src/config.rs:569); anything else fails the render
+openshell-driver-kubernetes src/config.rs:577); anything else fails the render
 naming the key. So 0 is refused instead of silently dropped, and a fraction
 instead of truncated. Digit strings are accepted, other strings are not.
 
