@@ -228,8 +228,8 @@ URL is not part of the binding: `inferenceProvider.baseUrl` when the chart's
 hook registers the provider, `ANTHROPIC_BASE_URL` on the OIDC path above).
 `binaries` in the profile gates which processes may reach the endpoint
 (`inferenceProvider.binaries` with the hook; the profile you import in step 3b
-on the OIDC path); upstream v0.1.2 does not yet restrict the key by calling
-binary, so treat the endpoint as the scope.
+on the OIDC path); upstream v0.1.3 still resolves a static key like this one
+by endpoint, not by calling binary, so treat the endpoint as the scope.
 
 The provider and its profile live in the gateway's DB. That is what
 `gateway.dbPersistence.enabled` provides: without it, every gateway pod

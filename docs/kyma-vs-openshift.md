@@ -174,8 +174,8 @@ and no command that sets a cluster-wide inference route:
   supervisor pod, which substitutes the real key in requests to the profile's
   host and port and dials the upstream.
 - The key is bound to that host and port. `binaries` gates which processes may
-  reach the endpoint; upstream v0.1.2 does not yet restrict the key by calling
-  binary.
+  reach the endpoint; upstream v0.1.3 still resolves a static key like this
+  one by endpoint, not by calling binary.
 
 Chart blocks behind this:
 
