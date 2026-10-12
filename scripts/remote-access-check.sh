@@ -81,7 +81,7 @@ need() {
 	fi
 }
 
-http_code() { curl -s -o /dev/null -m 20 -w '%{http_code}' "$@" || true; }
+http_code() { curl -s -o /dev/null --connect-timeout 5 -m 20 -w '%{http_code}' "$@" || true; }
 
 # A token no issuer of this cluster signed: three base64url parts, like any JWT.
 FOREIGN_JWT=$(python3 -c '
@@ -99,7 +99,7 @@ probe() {
 	local url=$1 code origin=-
 	shift
 	rm -f "$WORK/body"
-	code=$(curl -s -o "$WORK/body" -m 20 -w '%{http_code}' "$@" "$url" || true)
+	code=$(curl -s -o "$WORK/body" --connect-timeout 5 -m 20 -w '%{http_code}' "$@" "$url" || true)
 	if grep -q -E '^(Jwt|Jwks) ' "$WORK/body" 2>/dev/null; then
 		origin=edge-jwt
 	elif grep -q '^RBAC: access denied' "$WORK/body" 2>/dev/null; then
@@ -245,9 +245,15 @@ render() { # [helm template args...]: the chart with the values this script inst
 	helm template "$RELEASE" "$CHART" -n "$NS" "${values_args[@]}" ${extra_values[@]+"${extra_values[@]}"} \
 		"${helm_args[@]}" "$@"
 }
+# The ingress gateway's namespace, as the chart renders it (gatewayIngress.ingressNamespace):
+# the policies, and what may be left after a revert, are looked for there.
+INGRESS_NS=$(render --show-only templates/gateway-ingress-auth.yaml 2>/dev/null \
+	| awk '/^  namespace:/ { print $2; exit }')
+INGRESS_NS=${INGRESS_NS:-istio-system}
 if [[ ${OSH_DRY_RUN:-} == 1 ]]; then
 	render >/dev/null
 	printf '%s\n' ${extra_values[@]+"${extra_values[@]}"} "${helm_args[@]}"
+	printf 'ingress namespace: %s\n' "$INGRESS_NS"
 	exit 0
 fi
 
@@ -276,7 +282,7 @@ if [[ -z $fullname ]]; then
 	finish
 fi
 service="$fullname.$NS.svc.cluster.local"
-ca_secret="$NS-$fullname-gateway-ca"
+ca_configmap="$fullname-gateway-ca"
 # The PKI Secrets, by the names the chart's PKI hook gives them with these values.
 pki_hook=$(render --show-only templates/gateway-jwt-pki-hook.yaml)
 secret_of() { sed -n "s/^ *- --$1-secret-name=//p" <<<"$pki_hook" | head -1; }
@@ -404,23 +410,24 @@ check "VirtualService $fullname-gateway" kubectl -n "$NS" get virtualservice "$f
 check "VirtualService $fullname-sandbox-services" kubectl -n "$NS" get virtualservice "$fullname-sandbox-services" -o name
 check "DestinationRule $fullname-gateway-tls" kubectl -n "$NS" get destinationrule "$fullname-gateway-tls" -o name
 for suffix in cli services; do
-	check "authorizationpolicy $NS-$fullname-openshell-$suffix in istio-system" \
-		kubectl -n istio-system get authorizationpolicy "$NS-$fullname-openshell-$suffix" -o name
+	check "authorizationpolicy $NS-$fullname-openshell-$suffix in $INGRESS_NS" \
+		kubectl -n "$INGRESS_NS" get authorizationpolicy "$NS-$fullname-openshell-$suffix" -o name
 done
-left=$(kubectl -n istio-system get requestauthentication -o name 2>/dev/null | grep -c -- "$NS-$fullname-" || true)
+left=$(kubectl -n "$INGRESS_NS" get requestauthentication -o name 2>/dev/null | grep -c -- "$NS-$fullname-" || true)
 check "no RequestAuthentication of this release on the ingress gateway (found $left)" test "$left" = 0
 args=$(kubectl -n "$NS" get deploy "$fullname" -o jsonpath='{.spec.template.spec.containers[?(@.name=="gateway")].args}')
 check "the gateway serves TLS (--tls-cert, no --disable-tls)" \
 	test "$(grep -c -- '--tls-cert' <<<"$args")$(grep -c -- '--disable-tls' <<<"$args")" = 10
 check "the gateway's certificate names $service" grep -q "DNS:$service" <<<"$(server_certificate)"
-chart_ca=$(kubectl -n "$NS" get secret "$server_secret" -o jsonpath='{.data.ca\.crt}' 2>/dev/null || true)
-ingress_ca=$(kubectl -n istio-system get secret "$ca_secret" -o jsonpath='{.data.ca\.crt}' 2>/dev/null || true)
-check "istio-system/$ca_secret holds the chart CA" test -n "$chart_ca" -a "$chart_ca" = "$ingress_ca"
+# The ingress gateway verifies the gateway pod against the CA ConfigMap the PKI hook writes.
+chart_ca=$(kubectl -n "$NS" get secret "$server_secret" -o jsonpath='{.data.ca\.crt}' 2>/dev/null | base64 --decode 2>/dev/null || true)
+ingress_ca=$(kubectl -n "$NS" get configmap "$ca_configmap" -o jsonpath='{.data.ca\.crt}' 2>/dev/null || true)
+check "ConfigMap $ca_configmap holds the chart CA" test -n "$chart_ca" -a "$chart_ca" = "$ingress_ca"
 
 log "the gateway refuses a call without a token"
 # The ingress gateway checks no token. The gateway answers in gRPC's own terms: HTTP 200
 # with grpc-status 16 (unauthenticated). A 503 here means the ingress gateway cannot reach
-# or verify the gateway pod: see the DestinationRule and the CA Secret above.
+# or verify the gateway pod: see the DestinationRule and the CA ConfigMap above.
 grpc=$(curl -s -m 20 -o /dev/null -D - -X POST -H 'content-type: application/grpc' \
 	"https://$HOST/openshell.v1.OpenShell/ListSandboxes" | tr -d '\r' \
 	| awk -F': ' 'tolower($1) == "grpc-status" { print $2 }' || true)
@@ -494,9 +501,9 @@ if [[ ${OSH_REVERT:-} == 1 ]]; then
 	else
 		fail "helm upgrade back to the values file (kubectl -n $NS get pods)"
 	fi
-	left=$(kubectl -n istio-system get authorizationpolicy,requestauthentication,secret,role,rolebinding -o name 2>/dev/null \
+	left=$(kubectl -n "$INGRESS_NS" get authorizationpolicy,requestauthentication,secret,role,rolebinding -o name 2>/dev/null \
 		| grep -c -- "/$NS-$fullname-" || true)
-	check "nothing of this release is left in istio-system (found $left)" test "$left" = 0
+	check "nothing of this release is left in $INGRESS_NS (found $left)" test "$left" = 0
 fi
 
 if [[ -n ${OSH_NEIGHBOUR_URLS:-} && -n ${baseline:-} ]]; then

@@ -21,9 +21,10 @@ spec:
   trafficPolicy:
     tls:
       mode: SIMPLE
-      # A Secret in the ingress gateway's namespace with the CA under ca.crt
-      # (gateway-ingress-ca.yaml).
-      credentialName: {{ include "openshell-driver-kyma.gatewayIngressCaSecretName" . }}
+      # The chart CA as a ConfigMap in the release namespace (key ca.crt), which the
+      # PKI hook keeps current. Istio reads a configmap:// credential from any
+      # namespace and serves it to any proxy: it holds only a public certificate.
+      credentialName: {{ printf "configmap://%s/%s" .Release.Namespace (include "openshell-driver-kyma.gatewayCaConfigMapName" .) | quote }}
       sni: {{ $service }}
       subjectAltNames:
         - {{ $service }}

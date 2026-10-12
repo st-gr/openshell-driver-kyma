@@ -45,6 +45,13 @@ rules:
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "create"]
+  {{- if .Values.gatewayIngress.enabled }}
+  # The chart CA's public certificate for the ingress gateway (gateway-destinationrule.yaml),
+  # as upstream's chart grants it for its backendTLSPolicy.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "create", "update"]
+  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -129,4 +136,10 @@ spec:
             - --server-san={{ $service }}.{{ .Release.Namespace }}.svc.cluster.local
             - --server-san=localhost
             - --server-san=127.0.0.1
+            {{- if .Values.gatewayIngress.enabled }}
+            # The chart CA's public certificate as a ConfigMap (key ca.crt), which the
+            # ingress gateway verifies the gateway pod against. Upstream's generator
+            # creates it, and updates it whenever the CA changed, on every run.
+            - --backend-ca-configmap-name={{ include "openshell-driver-kyma.gatewayCaConfigMapName" . }}
+            {{- end }}
 {{- end }}

@@ -102,6 +102,30 @@ PY
   echo "GATEWAY_ARGS_ACCEPTED ($label, ${#args[@]} args)"
 }
 check_args defaults
+# The PKI hook runs the same image's generate-certs: its rendered arguments must be known
+# too, with remote access on (it then also writes the CA ConfigMap for the ingress gateway).
+helm template check "$CHART" --set gateway.enabled=true --set gateway.sandboxJwt.enabled=true \
+  --set gatewayService.enabled=true --set gatewayIngress.enabled=true --set gatewayIngress.domain=example.org \
+  --set gateway.tls.enabled=true --set gateway.oidc.issuer=https://issuer.example \
+  --set gateway.oidc.audience=osh-client --set gateway.oidc.clientId=osh-client \
+  --show-only templates/gateway-jwt-pki-hook.yaml > "$WORK/pki-hook.yaml"
+python3 - "$WORK/pki-hook.yaml" > "$WORK/pki-args.txt" <<'PY'
+import sys, yaml
+job = next(d for d in yaml.safe_load_all(open(sys.argv[1])) if d and d.get("kind") == "Job")
+print("\n".join(a.replace("$(POD_NAMESPACE)", "check") for a in job["spec"]["template"]["spec"]["containers"][0]["args"]))
+PY
+grep -q -- '--backend-ca-configmap-name=' "$WORK/pki-args.txt" \
+  || { echo "ERROR: the PKI hook render has no --backend-ca-configmap-name; nothing to test" >&2; exit 1; }
+pki_args=()
+while IFS= read -r line; do pki_args+=("$line"); done < "$WORK/pki-args.txt"
+rc=0
+out="$(docker run --rm --entrypoint openshell-gateway "$IMAGE" "${pki_args[@]}" --help 2>&1)" || rc=$?
+if [ "$rc" -ne 0 ]; then
+  echo "GATEWAY_ARGS_REJECTED (pki-hook, exit $rc)"
+  head -5 <<<"$out"
+  exit 1
+fi
+echo "GATEWAY_ARGS_ACCEPTED (pki-hook, ${#pki_args[@]} args)"
 check_args remote-access \
   --set gatewayIngress.enabled=true \
   --set gatewayIngress.domain=example.org \

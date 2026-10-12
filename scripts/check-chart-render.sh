@@ -333,7 +333,6 @@ try bad-8-host-service-shape 'a--b.example.org' t "${ingress_common[@]}" --set g
 # the ingress gateway has none to present.
 try bad-8-no-tls 'requires gateway.tls.enabled=true' t "${ingress_common[@]}" --set gateway.tls.enabled=false
 try bad-8-client-ca 'gateway.tls.clientCa.enabled' t "${ingress_common[@]}" --set gateway.tls.clientCa.enabled=true
-try bad-8-no-ca-hook-image 'gatewayIngress.caHook.image' t "${ingress_common[@]}" --set gatewayIngress.caHook.image=
 # A server TLS Secret under the operator's own name is the one the CA is copied from.
 try good-8-pki-names '' t "${ingress_common[@]}" --set gateway.sandboxJwt.serverTlsSecretName=own-server-tls
 
@@ -1283,7 +1282,7 @@ def expected_ingress(release_ns, fullname, host, cidrs, services, action="DENY",
         # exportTo keeps the rule from sandboxes with an Istio sidecar, which speak TLS themselves.
         ("DestinationRule", release_ns, f"{fullname}-gateway-tls"): {
             "host": service, "exportTo": ["istio-system"],
-            "trafficPolicy": {"tls": {"mode": "SIMPLE", "credentialName": f"{prefix}-gateway-ca",
+            "trafficPolicy": {"tls": {"mode": "SIMPLE", "credentialName": f"configmap://{release_ns}/{fullname}-gateway-ca",
                                       "sni": service, "subjectAltNames": [service]}}},
     }
     if cidrs or action == "ALLOW":
@@ -1326,84 +1325,40 @@ for name, want in INGRESS_OBJECTS.items():
     for key in sorted(set(got) | set(want)):
         if got.get(key) != want.get(key):
             failures.append(f"{name}: {'/'.join(key)} is {got.get(key)}, want {want.get(key)}")
-# The chart CA in the ingress gateway's namespace. Istio reads a DestinationRule's
-# credentialName from a Secret next to the gateway workload, the CA under ca.crt. The
-# chart renders that Secret without data, so Helm never overwrites what the Job writes:
-# the PKI hook creates the CA, which does not exist when the chart is rendered. The Job
-# sees only the CA certificate of the server TLS Secret, never its key, and may read and
-# patch that one Secret in the ingress gateway's namespace, nothing else there.
-CA_HOOK_IMAGE = (((yaml.safe_load(values) or {}).get("gatewayIngress") or {}).get("caHook") or {}).get("image") or ""
-if not re.fullmatch(r"[^\s@]+@sha256:[0-9a-f]{64}", CA_HOOK_IMAGE):
-    failures.append(f"gatewayIngress.caHook.image {CA_HOOK_IMAGE!r} is not pinned by digest")
-
-def check_ca(name, release_ns, fullname, server_secret=None):
+# The chart CA for the ingress gateway, as a ConfigMap in the release namespace. Istio reads
+# a DestinationRule's `configmap://<namespace>/<name>` credential from any namespace and
+# serves it to any proxy, because it holds only a public certificate (credentials
+# resource.go and cluster_tls.go at Istio 1.30.4); the CA is under ca.crt. Upstream's
+# certificate generator writes and reconciles that ConfigMap on every run of the PKI hook
+# (--backend-ca-configmap-name, certgen.rs at the pinned tag), as upstream's chart does
+# for its backendTLSPolicy. So the ingress gateway's namespace needs no CA Secret and no
+# Job or RBAC of ours.
+def check_ca(name, release_ns, fullname):
     documents = docs(work / f"{name}.yaml")
-    prefix = f"{release_ns}-{fullname}"
-    secret_name, hook = f"{prefix}-gateway-ca", f"{fullname}-gateway-ca-hook"
-
-    def one(kind, namespace, obj_name):
-        found = [d for d in documents
-                 if (d.get("kind"), d["metadata"].get("namespace"), d["metadata"]["name"]) == (kind, namespace, obj_name)]
-        if len(found) != 1:
-            failures.append(f"{name}: {len(found)} {kind} {namespace}/{obj_name} rendered, want 1")
-        return found[0] if found else None
-
-    secret = one("Secret", "istio-system", secret_name)
-    if secret and (secret.get("type") != "Opaque" or secret.get("data") or secret.get("stringData")
-                   or "helm.sh/hook" in (secret["metadata"].get("annotations") or {})):
-        failures.append(f"{name}: the CA Secret must be an Opaque Secret of the release without data "
-                        f"(the Job writes ca.crt), not a hook: {secret}")
-    role = one("Role", "istio-system", f"{prefix}-gateway-ca-hook")
-    want_rules = [{"apiGroups": [""], "resources": ["secrets"], "resourceNames": [secret_name],
-                   "verbs": ["get", "patch"]}]
-    if role and role.get("rules") != want_rules:
-        failures.append(f"{name}: the CA hook's Role grants {role.get('rules')}, want {want_rules}")
-    binding = one("RoleBinding", "istio-system", f"{prefix}-gateway-ca-hook")
-    if binding and (binding["roleRef"] != {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role",
-                                           "name": f"{prefix}-gateway-ca-hook"}
-                    or binding["subjects"] != [{"kind": "ServiceAccount", "name": hook, "namespace": release_ns}]):
-        failures.append(f"{name}: the CA hook's RoleBinding is {binding['roleRef']} -> {binding['subjects']}")
-    account = one("ServiceAccount", release_ns, hook)
-    job = one("Job", release_ns, hook)
-    for d in (account, role, binding, job):
-        hooks = ((d or {}).get("metadata", {}).get("annotations") or {}).get("helm.sh/hook")
-        # post-rollback too: a rollback to a revision with remote access from one without
-        # recreates the Secret empty, and only this Job fills it.
-        if d and hooks != "post-install,post-upgrade,post-rollback":
-            failures.append(f"{name}: {d['kind']} {d['metadata']['name']} has helm.sh/hook {hooks!r}, "
-                            "want post-install,post-upgrade,post-rollback")
-    if not job:
-        return
-    pod = job["spec"]["template"]["spec"]
-    container = pod["containers"][0]
-    env = {e["name"]: e.get("value") for e in container.get("env", [])}
-    script = container["command"][-1]
-    want_ca = {"name": "ca", "secret": {"secretName": server_secret or f"{fullname}-server-tls",
-                                        "items": [{"key": "ca.crt", "path": "ca.crt"}]}}
-    if [v for v in pod.get("volumes", []) if "secret" in v] != [want_ca]:
-        failures.append(f"{name}: the CA hook mounts {pod.get('volumes')}; of Secrets it must see only ca.crt "
-                        "of the server TLS Secret, never its key")
-    if (pod.get("serviceAccountName") != hook or container.get("image") != CA_HOOK_IMAGE
-            or (env.get("INGRESS_NAMESPACE"), env.get("CA_SECRET")) != ("istio-system", secret_name)
-            or '-n "${INGRESS_NAMESPACE}" patch secret "${CA_SECRET}"' not in script or "/pki/ca.crt" not in script):
-        failures.append(f"{name}: the CA hook Job does not patch {secret_name} in istio-system from /pki/ca.crt "
-                        f"with the pinned image: env {env}, image {container.get('image')!r}")
-    labels = job["spec"]["template"]["metadata"]["labels"]
-    if labels.get("app.kubernetes.io/name") == "openshell-driver-kyma" or labels.get("sidecar.istio.io/inject") != "false":
-        failures.append(f"{name}: the CA hook pod's labels are {labels}: with the driver pod's name label its "
-                        "NetworkPolicy would select the hook, and sidecar injection must be off")
-    pod_security, security = pod.get("securityContext") or {}, container.get("securityContext") or {}
-    if (pod_security.get("runAsNonRoot") is not True or security.get("allowPrivilegeEscalation") is not False
-            or security.get("readOnlyRootFilesystem") is not True
-            or (security.get("capabilities") or {}).get("drop") != ["ALL"]):
-        failures.append(f"{name}: the CA hook's security context is {pod_security} / {security}")
+    job = next((d for d in documents if d.get("kind") == "Job" and d["metadata"]["name"].endswith("-jwt-pki-hook")), None)
+    args = job["spec"]["template"]["spec"]["containers"][0]["args"] if job else []
+    if f"--backend-ca-configmap-name={fullname}-gateway-ca" not in args:
+        failures.append(f"{name}: the PKI hook does not write the CA ConfigMap {fullname}-gateway-ca: {args}")
+    role = next((d for d in documents if d.get("kind") == "Role" and d["metadata"]["name"].endswith("-jwt-pki-hook")), None)
+    rules = (role or {}).get("rules") or []
+    if {"apiGroups": [""], "resources": ["configmaps"], "verbs": ["get", "create", "update"]} not in rules:
+        failures.append(f"{name}: the PKI hook's Role cannot get, create and update the CA ConfigMap: {rules}")
+    stray = sorted(f"{d['kind']} {d['metadata']['name']}" for d in documents
+                   if "gateway-ca" in d["metadata"]["name"] and not d["metadata"]["name"].endswith("-jwt-pki-hook"))
+    if stray:
+        failures.append(f"{name}: objects of the removed CA copy hook are still rendered: {stray}")
 
 for name, (ns, fullname) in (("good-8-ingress", T), ("good-8-long-names", (
         "a-rather-long-release-namespace-name", "prod-sandboxes-openshell-driver-kyma"))):
     if succeeded(name):
         check_ca(name, ns, fullname)
 if rendered("good-8-pki-names") is not None:
-    check_ca("good-8-pki-names", *T, server_secret="own-server-tls")
+    check_ca("good-8-pki-names", *T)
+# Without remote access the PKI hook writes no CA ConfigMap and needs no ConfigMap rights.
+default_job = next(d for d in docs(work / "render-shared-true.yaml") if d.get("kind") == "Job"
+                   and d["metadata"]["name"].endswith("-jwt-pki-hook"))
+if any(a.startswith("--backend-ca-configmap-name") for a in default_job["spec"]["template"]["spec"]["containers"][0]["args"]):
+    failures.append("render-shared-true: the PKI hook writes a CA ConfigMap without gatewayIngress")
 
 # The PKI hook mints the gateway's server certificate for the names clients verify it
 # under: this release's Service (sandboxes, the provider hook, the ingress gateway) and
@@ -1453,8 +1408,8 @@ for workspaces, cases in (
 #   broke another application's login and its API keys.
 # - Every AuthorizationPolicy selects a workload, and every rule names hosts, none of them
 #   by the domain's wildcard.
-# - Its namespace gets nothing else but the chart CA's Secret and the Role and RoleBinding
-#   that let one Job write it (check_ca above holds them to that one Secret).
+# - Its namespace gets nothing else: the chart CA reaches the ingress gateway as a ConfigMap
+#   in the release namespace (check_ca above).
 if re.search(r"^kind:\s*RequestAuthentication", templates, re.M):
     failures.append("a template renders a RequestAuthentication; the gateway validates tokens itself")
 if "jwksUri" in ((yaml.safe_load(values) or {}).get("gateway") or {}).get("oidc", {}):
@@ -1468,10 +1423,8 @@ for path in sorted(work.glob("*.yaml")):
         if d.get("kind") == "RequestAuthentication":
             failures.append(f"{where}: a RequestAuthentication applies to every host of the workload it selects")
         if d["metadata"].get("namespace") == "istio-system" and d.get("kind") != "AuthorizationPolicy":
-            suffix = {"Secret": "-gateway-ca", "Role": "-gateway-ca-hook", "RoleBinding": "-gateway-ca-hook"}
-            if not d["metadata"]["name"].endswith(suffix.get(d.get("kind"), "/")):
-                failures.append(f"{where}: rendered into the ingress gateway's namespace, which gets only this "
-                                "release's AuthorizationPolicies, its CA Secret and the CA hook's Role and RoleBinding")
+            failures.append(f"{where}: rendered into the ingress gateway's namespace, which gets only this "
+                            "release's AuthorizationPolicies")
         if d.get("kind") != "AuthorizationPolicy":
             continue
         if not (d["spec"].get("selector") or {}).get("matchLabels"):
