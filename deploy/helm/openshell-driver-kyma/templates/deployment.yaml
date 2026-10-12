@@ -257,6 +257,9 @@ spec:
               mountPath: /etc/openshell-tls/server
               readOnly: true
             {{- end }}
+            {{- with .Values.gateway.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
         {{- end }}
       volumes:
         - name: socket-dir
@@ -297,6 +300,9 @@ spec:
           secret:
             secretName: {{ include "openshell-driver-kyma.serverTlsSecretName" . }}
             defaultMode: 0o400
+        {{- end }}
+        {{- with .Values.gateway.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
         {{- end }}
         {{- end }}
       {{- with .Values.nodeSelector }}

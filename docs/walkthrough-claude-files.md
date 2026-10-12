@@ -178,7 +178,7 @@ What's happening:
   the sandbox `Ready`; the trailing command is the sandbox's main process,
   kept alive with `sleep`. `sandbox connect` would attach to that `sleep`,
   so this walkthrough uses `sandbox exec`; for an interactive shell create a
-  sandbox without a trailing command and detach with Ctrl-P Ctrl-Q (`exit`
+  sandbox without a trailing command and detach with Ctrl-D or Ctrl-P Ctrl-Q (`exit`
   ends it).
 
 ## 7. Upload a file
@@ -191,7 +191,7 @@ cat > /tmp/draft.md <<'EOF'
 
 Three things shipped this week:
 - Helm chart published as OCI artifact.
-- Driver release on upstream OpenShell v0.1.2.
+- Driver release on upstream OpenShell v0.1.3.
 - E2E live-cluster smoke succeeded.
 
 Two things outstanding:
@@ -445,7 +445,7 @@ kubectl -n "$NS" run cli --restart=Never --image=alpine:3.20 --command -- sleep 
 # Inside the pod (one-time setup):
 kubectl -n "$NS" exec cli -- sh -c '
   apk add --no-cache curl rsync openssh-client &&
-  curl -fsSL https://github.com/NVIDIA/OpenShell/releases/download/v0.1.2/openshell-x86_64-unknown-linux-musl.tar.gz \
+  curl -fsSL https://github.com/NVIDIA/OpenShell/releases/download/v0.1.3/openshell-x86_64-unknown-linux-musl.tar.gz \
     | tar -xz -C /usr/local/bin &&
   /usr/local/bin/openshell gateway add --local http://ods-openshell-driver-kyma:8080
 '

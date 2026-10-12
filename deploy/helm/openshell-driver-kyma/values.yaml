@@ -27,6 +27,21 @@ serviceAccount:
   create: true
   name: openshell-driver
 
+# Cluster-scoped RBAC of the driver (upstream v0.1.3's rbac.clusterScoped). Set
+# create=false for a namespace-admin install: a cluster admin then applies the
+# ClusterRole and ClusterRoleBinding once, out of band, for example from
+#   helm template <release> <chart> -n <namespace> -f <values> \
+#     --show-only templates/clusterrole.yaml --show-only templates/clusterrolebinding.yaml
+# The ServiceAccount's name and namespace do not change, so that binding keeps
+# matching. The pre-install CRD check has a ClusterRole of its own: set
+# crdPreInstallCheck.enabled=false too. The names default to
+# <fullname>-driver-<release namespace>.
+rbac:
+  clusterScoped:
+    create: true
+    clusterRoleName: ""
+    clusterRoleBindingName: ""
+
 # Sandbox pods (created by the agent-sandbox controller) attach this
 # ServiceAccount via spec.podSpec.serviceAccountName. The driver receives
 # the name as OPENSHELL_K8S_SANDBOX_SERVICE_ACCOUNT. The SA has no RBAC and
@@ -423,6 +438,27 @@ gateway:
     enabled: false
     clientCa:
       enabled: false
+  # The gateway's OCSF audit events as JSONL (upstream v0.1.3; its chart's
+  # server.ocsfLog), rendered into the gateway TOML as [openshell.gateway.ocsf_log].
+  # The default path is on the gateway's /tmp emptyDir: writable, but lost when
+  # the pod restarts. To keep the records, mount a volume with extraVolumes and
+  # extraVolumeMounts below and set path on it.
+  ocsfLog:
+    enabled: false
+    path: /tmp/gateway-ocsf.jsonl
+    # Empty emits native OCSF 1.8.0; "1.1" or "1.3" downgrades.
+    schemaVersion: ""
+    # Rotate the active file daily (UTC), or never.
+    rotation: daily
+    # Rotated files kept, with daily rotation only.
+    maxFiles: 7
+    # Records and encoded bytes that may wait for the file writer.
+    queueCapacity: 10000
+    queueMaxBytes: 16777216
+  # Additional volumes for the driver+gateway pod, and mounts for the gateway
+  # container only (upstream's server.extraVolumes / extraVolumeMounts).
+  extraVolumes: []
+  extraVolumeMounts: []
   # Gateway pod-level resources, separate from the driver's.
   resources:
     requests:

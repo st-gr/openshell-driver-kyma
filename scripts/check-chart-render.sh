@@ -58,6 +58,10 @@
 #      release's hosts.
 #      8c: DENY policies with source addresses are refused on an ingress gateway that
 #      has TCP or TLS-passthrough servers, where Istio would apply them without the host.
+#   9. upstream v0.1.3's additions: the gateway's OCSF audit log renders as upstream
+#      renders it ([openshell.gateway.ocsf_log], refusing what the gateway refuses),
+#      with extra volumes to keep it; and the cluster-scoped RBAC can be left to a
+#      cluster admin (rbac.clusterScoped), as upstream's chart allows.
 # Needs helm, python3 with PyYAML, and network access (for check 1).
 set -euo pipefail
 
@@ -419,6 +423,28 @@ try bad-8-istio-gateway-empty 'gatewayIngress.istioGateway' t "${ingress_common[
 # A 0.9.x values file that still enables the removed APIRule must not lose its route silently.
 try bad-8-apirule-leftover 'gatewayApirule' t --set gatewayApirule.enabled=true \
 	--set gatewayApirule.host=openshell.example.org
+
+# 9. Upstream v0.1.3's gateway OCSF JSONL log (its chart's server.ocsfLog) and optional
+# cluster-scoped RBAC (its chart's rbac.clusterScoped). The names start with good-9/bad-9,
+# so checks 4 and 5 (r*.yaml) skip them.
+try good-9-ocsf '' t --set gateway.ocsfLog.enabled=true
+try good-9-ocsf-never '' t --set gateway.ocsfLog.enabled=true --set gateway.ocsfLog.rotation=never \
+	--set gateway.ocsfLog.schemaVersion=1.3 --set gateway.ocsfLog.path=/var/log/openshell/ocsf.jsonl \
+	--set gateway.ocsfLog.queueCapacity=500 --set gateway.ocsfLog.queueMaxBytes=1048576 \
+	--set-json 'gateway.extraVolumes=[{"name":"ocsf","persistentVolumeClaim":{"claimName":"ocsf-log"}}]' \
+	--set-json 'gateway.extraVolumeMounts=[{"name":"ocsf","mountPath":"/var/log/openshell"}]'
+try bad-9-ocsf-rotation 'gateway.ocsfLog.rotation' t --set gateway.ocsfLog.enabled=true --set gateway.ocsfLog.rotation=hourly
+try bad-9-ocsf-schema 'gateway.ocsfLog.schemaVersion' t --set gateway.ocsfLog.enabled=true --set-string gateway.ocsfLog.schemaVersion=1.2
+try bad-9-ocsf-path 'gateway.ocsfLog.path' t --set gateway.ocsfLog.enabled=true --set gateway.ocsfLog.path=
+try bad-9-ocsf-queue 'gateway.ocsfLog.queueCapacity' t --set gateway.ocsfLog.enabled=true --set gateway.ocsfLog.queueCapacity=0
+try bad-9-ocsf-max-files 'gateway.ocsfLog.maxFiles' t --set gateway.ocsfLog.enabled=true --set gateway.ocsfLog.maxFiles=0
+try bad-9-ocsf-enabled-string 'gateway.ocsfLog.enabled must be a boolean' t --set-string gateway.ocsfLog.enabled=false
+try good-9-no-cluster-rbac '' t --set rbac.clusterScoped.create=false
+try good-9-no-cluster-rbac-managed '' t --set driver.workspaceMode=managed --set gateway.sandboxJwt.gatewayId=gw \
+	--set rbac.clusterScoped.create=false
+try good-9-cluster-rbac-names '' t --set rbac.clusterScoped.clusterRoleName=osh-driver \
+	--set rbac.clusterScoped.clusterRoleBindingName=osh-driver-binding
+try bad-9-cluster-rbac-string 'rbac.clusterScoped.create must be a boolean' t --set-string rbac.clusterScoped.create=false
 
 # 4 and 5. Renders for the NetworkPolicy and RBAC checks. Named rbac-*, so check 2's
 # render-*.yaml glob skips them, and check 4's r*.yaml glob takes them.
@@ -1457,6 +1483,68 @@ if (work / "bad-8c-deny-tcp.err").exists():
                             + first_line(refusal))
 for name in ("good-8c-deny-http", "good-8c-allow-tcp", "good-8c-deny-no-cidrs"):
     rendered(name)
+
+# 9. The gateway's OCSF JSONL log: rendered into the gateway TOML as upstream's chart renders
+# server.ocsfLog (its _toml.tpl at the pinned tag), with upstream's defaults; max_files only
+# with daily rotation (the gateway refuses it otherwise); nothing without the value.
+def gateway_toml(name):
+    cm = next(d for d in docs(work / f"{name}.yaml") if d.get("kind") == "ConfigMap"
+              and d["metadata"]["name"].endswith("-gateway-config"))
+    return toml_tables(cm["data"]["gateway.toml"], name)
+
+for name, want in (
+        ("good-9-ocsf", {"path": "/tmp/gateway-ocsf.jsonl", "rotation": "daily", "max_files": 7,
+                         "queue_capacity": 10000, "queue_max_bytes": 16777216}),
+        ("good-9-ocsf-never", {"path": "/var/log/openshell/ocsf.jsonl", "rotation": "never",
+                               "schema_version": "1.3", "queue_capacity": 500, "queue_max_bytes": 1048576})):
+    if rendered(name) is None:
+        continue
+    got = gateway_toml(name).get("openshell.gateway.ocsf_log")
+    if got != want:
+        failures.append(f"{name}: [openshell.gateway.ocsf_log] is {got}, want {want}")
+if "openshell.gateway.ocsf_log" in gateway_toml("render-shared-true"):
+    failures.append("render-shared-true: the gateway TOML has an OCSF log without gateway.ocsfLog.enabled")
+# The extra volumes and mounts land on the pod and the gateway container, after the chart's own.
+if rendered("good-9-ocsf-never") is not None:
+    gateway, pod, _, _ = gateway_parts("good-9-ocsf-never")
+    if {"name": "ocsf", "persistentVolumeClaim": {"claimName": "ocsf-log"}} not in pod["volumes"] \
+            or {"name": "ocsf", "mountPath": "/var/log/openshell"} not in gateway["volumeMounts"]:
+        failures.append("good-9-ocsf-never: gateway.extraVolumes/extraVolumeMounts did not reach the pod "
+                        f"and the gateway container: {pod['volumes']} / {gateway['volumeMounts']}")
+    driver = driver_container(docs(work / "good-9-ocsf-never.yaml"))
+    if any(m.get("name") == "ocsf" for m in driver.get("volumeMounts", [])):
+        failures.append("good-9-ocsf-never: the extra mount reached the driver container, not only the gateway")
+
+# 9. Cluster-scoped RBAC left to a cluster admin: no ClusterRole or ClusterRoleBinding of the
+# driver, in any mode, and the namespaced Role and RoleBinding unchanged; names can be set.
+def cluster_rbac(name):
+    return sorted((d["kind"], d["metadata"]["name"]) for d in docs(work / f"{name}.yaml")
+                  if d.get("kind") in ("ClusterRole", "ClusterRoleBinding")
+                  and "helm.sh/hook" not in (d["metadata"].get("annotations") or {}))
+
+def namespaced_rbac(name):
+    return sorted((d["kind"], d["metadata"]["name"], json.dumps(d.get("rules") or d.get("roleRef"), sort_keys=True))
+                  for d in docs(work / f"{name}.yaml") if d.get("kind") in ("Role", "RoleBinding")
+                  and "helm.sh/hook" not in (d["metadata"].get("annotations") or {}))
+
+for name, reference in (("good-9-no-cluster-rbac", "render-shared-false"),
+                        ("good-9-no-cluster-rbac-managed", "render-managed-false")):
+    if rendered(name) is None:
+        continue
+    if cluster_rbac(name):
+        failures.append(f"{name}: rbac.clusterScoped.create=false, but the chart rendered {cluster_rbac(name)}")
+    if namespaced_rbac(name) != namespaced_rbac(reference):
+        failures.append(f"{name}: switching cluster RBAC off changed the namespaced Role/RoleBinding")
+if not cluster_rbac("render-shared-true"):
+    failures.append("render-shared-true: no ClusterRole/ClusterRoleBinding by default")
+if rendered("good-9-cluster-rbac-names") is not None:
+    documents = docs(work / "good-9-cluster-rbac-names.yaml")
+    role = [d for d in documents if d.get("kind") == "ClusterRole" and d["metadata"]["name"] == "osh-driver"]
+    binding = [d for d in documents if d.get("kind") == "ClusterRoleBinding"
+               and d["metadata"]["name"] == "osh-driver-binding"]
+    if len(role) != 1 or len(binding) != 1 or binding[0]["roleRef"]["name"] != "osh-driver":
+        failures.append("good-9-cluster-rbac-names: rbac.clusterScoped.clusterRoleName/clusterRoleBindingName "
+                        f"did not name the ClusterRole and its binding: {cluster_rbac('good-9-cluster-rbac-names')}")
 
 # The provider hook under OIDC: it registers the gateway once with the client-credentials
 # grant and then addresses it by name. --gateway-endpoint bypasses the registered gateway

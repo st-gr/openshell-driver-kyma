@@ -16,14 +16,42 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   `openshell_core::config::{SUPERVISOR_IMAGE_ENV, SANDBOX_RUNTIME_IMAGE_ENV}`
   (same environment variable names). Both are mirrored in `upstream_args.rs`.
 
+### Added
+
+- **`gateway.ocsfLog`**: the gateway's OCSF audit events as JSONL (upstream
+  v0.1.3's `server.ocsfLog`), rendered into the gateway TOML as
+  `[openshell.gateway.ocsf_log]` with upstream's defaults (daily rotation, seven
+  files, the same queue limits). Values the gateway would refuse fail the render.
+  `scripts/check-gateway-config.sh` runs the pinned gateway image against the
+  rendered table.
+- **`gateway.extraVolumes` / `gateway.extraVolumeMounts`** (upstream's
+  `server.extraVolumes` / `extraVolumeMounts`): volumes for the pod and mounts
+  for the gateway container, for example to keep the OCSF log.
+- **`rbac.clusterScoped.create`** and the ClusterRole/ClusterRoleBinding names
+  (upstream v0.1.3's `rbac.clusterScoped`): a namespace admin can install and
+  upgrade the release while a cluster admin applies the driver's cluster-scoped
+  RBAC once.
+
+### Documentation
+
+- `openshell service expose … --authorization-mode bearer-passthrough` (new in
+  the v0.1.3 CLI) for services that check Bearer tokens themselves; by default
+  the gateway removes the `Authorization` header.
+- `Ctrl-D` detaches from `sandbox connect` (v0.1.3 CLI), besides Ctrl-P Ctrl-Q.
+- Install instructions and examples name the v0.1.3 CLI.
+
 ### Did not break us
 
-- Upstream's chart changes (`rbac.create`/`rbac.clusterScoped`, `gatewayConfig`
-  TOML rendering, HPA, replica routing, OCSF log, `sandboxUid`/`sandboxGid`
-  values) restructure its gateway chart; the Role/ClusterRole rules, the
-  workspace-secret-source Role, the SSH NetworkPolicy and
-  `validate_workspace_mode` are semantically unchanged, so this chart's RBAC and
-  guards are unchanged (only upstream line references moved).
+- Upstream's other chart changes are not mirrored, because they do not apply to
+  this chart's single gateway sidecar: the HPA and replica routing (one replica,
+  a ReadWriteOnce database), the Gateway API `sectionName`, the credential
+  drivers' CA, `rbac.create` and `workspaceResources` (this chart's namespaced
+  RBAC is always needed by its driver), and the schema-v2 `gatewayConfig`
+  passthrough. The Role/ClusterRole rules, the workspace-secret-source Role, the
+  SSH NetworkPolicy and `validate_workspace_mode` are semantically unchanged, so
+  this chart's RBAC and guards are unchanged (only upstream line references
+  moved). `sandboxUid`/`sandboxGid` already exist here as `driver.sandboxUid`/
+  `sandboxGid`.
 - The rest of upstream's `main.rs` is unchanged (`UPSTREAM_MAIN_DRIFT` did not
   fire); the new `ANNOTATION_SCC_MCS` constant needed no wrapper change.
 

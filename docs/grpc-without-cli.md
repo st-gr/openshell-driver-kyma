@@ -38,13 +38,13 @@ not this one. Fetch the four files you need:
 ```bash
 mkdir -p /tmp/proto && cd /tmp/proto
 for f in datamodel.proto options.proto sandbox.proto openshell.proto; do
-  curl -fsSL "https://raw.githubusercontent.com/NVIDIA/OpenShell/v0.1.2/proto/$f" -o "$f"
+  curl -fsSL "https://raw.githubusercontent.com/NVIDIA/OpenShell/v0.1.3/proto/$f" -o "$f"
 done
 ```
 
 These pin the message types you'll send and the response shapes you'll
 get back. Use the tag of the upstream release your gateway image was built
-from: the chart's `upstream.version` (`v0.1.2`).
+from: the chart's `upstream.version` (`v0.1.3`).
 
 ## Reach the gateway
 
