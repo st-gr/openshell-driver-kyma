@@ -21,11 +21,11 @@ flowchart TB
     end
 
     subgraph S3["3 — helm install chart 0.10.0"]
-        POD["driver + gateway pod 2/2<br/>gateway v0.1.2, Unix socket"]
+        POD["driver + gateway pod 2/2<br/>gateway v0.1.3, Unix socket"]
         HOOK["hook Job: provider profile import +<br/>provider create (auto-deletes)"]
     end
 
-    S45["4-5 — install openshell CLI v0.1.2,<br/>port-forward :8080,<br/>gateway add --local"]
+    S45["4-5 — install openshell CLI v0.1.3,<br/>port-forward :8080,<br/>gateway add --local"]
 
     subgraph S6["6 — run Claude in a sandbox"]
         CREATE["sandbox create --provider ods-anthropic"]
@@ -261,15 +261,15 @@ See [`install-cli.md`](install-cli.md) for the full matrix. For a
 quick smoke test on Linux (or WSL2):
 
 ```bash
-VERSION=v0.1.2
+VERSION=v0.1.3
 curl -fsSL "https://github.com/NVIDIA/OpenShell/releases/download/${VERSION}/openshell-x86_64-unknown-linux-musl.tar.gz" \
   | tar -xz -C /usr/local/bin
 openshell --version
 ```
 
 **Keep the CLI and the gateway on the same version.** The chart pins
-the gateway to the upstream `v0.1.2` digest (see `values.yaml`), so install
-the matching `v0.1.2` CLI. The gRPC contract does drift between releases: a
+the gateway to the upstream `v0.1.3` digest (see `values.yaml`), so install
+the matching `v0.1.3` CLI. The gRPC contract does drift between releases: a
 newer CLI against an older gateway can fail on individual commands whose
 response shape changed. If you bump one, bump the other.
 
@@ -323,7 +323,7 @@ openshell sandbox list         # hello ... Ready
 > `sandbox connect` attaches to the main process, here `sleep`, so use
 > `sandbox exec` with this sandbox. For an interactive shell, create the
 > sandbox without a trailing command (its login shell becomes the main
-> process) and detach with Ctrl-P Ctrl-Q; `exit` would end the sandbox.
+> process) and detach with Ctrl-D or Ctrl-P Ctrl-Q; `exit` would end the sandbox.
 
 `--detach` makes the command return once the gateway reports the sandbox
 `Ready`. Every sandbox gets `ANTHROPIC_BASE_URL` and `ANTHROPIC_MODEL` from the
@@ -439,7 +439,7 @@ cluster-wide — remove it separately with a matching
 ## Versions
 
 This tutorial targets chart `openshell-driver-kyma` `0.10.0`, which deploys
-upstream NVIDIA OpenShell `v0.1.2`: the gateway, supervisor and sandbox
+upstream NVIDIA OpenShell `v0.1.3`: the gateway, supervisor and sandbox
 runtime images are pinned by digest to that release, and the CLI you install
 in step 4 must be the same release. The agent-sandbox controller is v0.5.2.
 The chart's CI installs the chart against a real gateway image and follows a

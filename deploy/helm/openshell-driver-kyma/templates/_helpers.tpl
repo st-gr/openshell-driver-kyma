@@ -258,3 +258,11 @@ the provider the hook creates from it (inferenceProvider.profileId and .name).
 {{- define "openshell-driver-kyma.inferenceProviderName" -}}
 {{- default (printf "%s-%s" .Release.Name .Values.inferenceProvider.type) .Values.inferenceProvider.name -}}
 {{- end -}}
+
+{{/*
+The driver's ClusterRole: rbac.clusterScoped.clusterRoleName, else
+<fullname>-driver-<release namespace>. The ClusterRoleBinding refers to it.
+*/}}
+{{- define "openshell-driver-kyma.clusterRoleName" -}}
+{{- default (printf "%s-driver-%s" (include "openshell-driver-kyma.fullname" .) .Release.Namespace) .Values.rbac.clusterScoped.clusterRoleName -}}
+{{- end -}}

@@ -1,4 +1,28 @@
 {{- if .Values.gateway.enabled -}}
+{{- $ocsf := .Values.gateway.ocsfLog -}}
+{{- /* Upstream's chart refuses these values (its _toml.tpl at the pinned tag), and the
+gateway refuses the TOML they would render (openshell-server config_file.rs
+OcsfLogConfig). A string is always true in a template, so "false" would enable it. */ -}}
+{{- if not (kindIs "bool" $ocsf.enabled) -}}
+{{- fail (printf "gateway.ocsfLog.enabled must be a boolean (true or false), got the %s %q." (kindOf $ocsf.enabled) (toString $ocsf.enabled)) -}}
+{{- end -}}
+{{- if $ocsf.enabled -}}
+{{- if not $ocsf.path -}}
+{{- fail "gateway.ocsfLog.path must be set when gateway.ocsfLog.enabled is true." -}}
+{{- end -}}
+{{- if not (has $ocsf.rotation (list "daily" "never")) -}}
+{{- fail (printf "gateway.ocsfLog.rotation must be daily or never, got %q." (toString $ocsf.rotation)) -}}
+{{- end -}}
+{{- if not (has (toString $ocsf.schemaVersion) (list "" "1.1" "1.3")) -}}
+{{- fail (printf "gateway.ocsfLog.schemaVersion must be empty, 1.1 or 1.3, got %q." (toString $ocsf.schemaVersion)) -}}
+{{- end -}}
+{{- if or (lt (int $ocsf.queueCapacity) 1) (lt (int $ocsf.queueMaxBytes) 1) -}}
+{{- fail "gateway.ocsfLog.queueCapacity and gateway.ocsfLog.queueMaxBytes must be positive." -}}
+{{- end -}}
+{{- if and (eq $ocsf.rotation "daily") (lt (int $ocsf.maxFiles) 1) -}}
+{{- fail "gateway.ocsfLog.maxFiles must be positive when gateway.ocsfLog.rotation is daily." -}}
+{{- end -}}
+{{- end -}}
 # Gateway TOML configuration. Mounted at /etc/openshell/gateway.toml.
 # Rendered whenever the gateway sidecar runs — the gateway needs:
 #
@@ -57,6 +81,21 @@ data:
     kid_path         = "/etc/openshell-jwt/kid"
     gateway_id       = {{ include "openshell-driver-kyma.gatewayId" . | quote }}
     ttl_secs         = {{ .Values.gateway.sandboxJwt.ttlSecs }}
+    {{- end }}
+    {{- if $ocsf.enabled }}
+
+    [openshell.gateway.ocsf_log]
+    # gateway.ocsfLog: the gateway's OCSF audit events as JSONL.
+    path            = {{ $ocsf.path | quote }}
+    rotation        = {{ $ocsf.rotation | quote }}
+    {{- if eq $ocsf.rotation "daily" }}
+    max_files       = {{ int $ocsf.maxFiles }}
+    {{- end }}
+    {{- with toString $ocsf.schemaVersion }}
+    schema_version  = {{ . | quote }}
+    {{- end }}
+    queue_capacity  = {{ int $ocsf.queueCapacity }}
+    queue_max_bytes = {{ int $ocsf.queueMaxBytes }}
     {{- end }}
 
     [openshell.drivers.kyma]

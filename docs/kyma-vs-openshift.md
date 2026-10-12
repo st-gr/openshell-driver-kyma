@@ -6,7 +6,7 @@ was the structural reference for this project. This document captures the
 concrete differences between it and the Kyma driver.
 
 The Kyma driver runs upstream OpenShell's Kubernetes driver
-(`openshell-driver-kubernetes`, release v0.1.2) unchanged, so provisioning,
+(`openshell-driver-kubernetes`, release v0.1.3) unchanged, so provisioning,
 sandbox authentication and isolation are upstream's, and it adds two things
 of its own: request enrichment (the Istio opt-out and Kagenti labels, plus
 configured sandbox environment) and Pod Security labels on the namespaces the
