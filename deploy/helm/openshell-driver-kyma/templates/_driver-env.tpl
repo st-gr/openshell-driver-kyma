@@ -155,10 +155,6 @@ scripts/check-chart-render.sh fails CI when an upstream option is missing here.
 - name: OPENSHELL_K8S_DEFAULT_RUNTIME_CLASS_NAME
   value: {{ . | quote }}
 {{- end }}
-{{- if $d.istioInjectSandboxes }}
-- name: OPENSHELL_KYMA_ISTIO_INJECT_SANDBOXES
-  value: "true"
-{{- end }}
 {{- if $d.disableClaudeTelemetry }}
 - name: OPENSHELL_KYMA_DISABLE_CLAUDE_TELEMETRY
   value: "true"
@@ -277,6 +273,12 @@ while admission is enabled, as upstream refuses it at startup
 (ResourceAdmissionConfig::validate, src/resource_admission.rs:135-140).
 */}}
 {{- define "openshell-driver-kyma.driverValueGuards" -}}
+{{- /* Removed in 0.10.2: upstream v0.1.3 refuses a sandbox workload pod that receives a
+projected ServiceAccount token, which an Istio sidecar brings, so with injection every
+sandbox creation failed. */ -}}
+{{- if .Values.driver.istioInjectSandboxes -}}
+{{- fail "driver.istioInjectSandboxes was removed in 0.10.2: upstream OpenShell v0.1.3 refuses a sandbox workload pod that receives a projected ServiceAccount token, which an Istio sidecar brings, so every sandbox creation failed with it. Remove the value; sandbox workloads never get a sidecar." -}}
+{{- end -}}
 {{- $sock := toString .Values.driver.socket -}}
 {{- $parts := splitList "/" (trimPrefix "/" $sock) -}}
 {{- if or (not (hasPrefix "/" $sock)) (hasSuffix "/" $sock) (lt (len $parts) 4) (has "" $parts) -}}

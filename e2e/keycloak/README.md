@@ -31,6 +31,18 @@ Set `OSH_POLICY_ACTION=ALLOW` if the ingress gateway already has ALLOW
 AuthorizationPolicies (the default, `DENY`, is for one without; same rule as the
 chart's `gatewayIngress.policyAction`).
 
+The script adds a policy to the shared ingress gateway. Record how the other
+applications behind it answer before you run it, and compare afterwards, with
+the live check's probe mode (one URL per application; it exits 1 and prints the
+difference when an answer changed):
+
+```bash
+OSH_PROBE_ONLY=1 OSH_NEIGHBOUR_URLS=<url>,<url> scripts/remote-access-check.sh > /tmp/neighbours.before
+OSH_DOMAIN=… OSH_ALLOWED_CIDRS=… e2e/keycloak/deploy.sh
+OSH_PROBE_ONLY=1 OSH_NEIGHBOUR_URLS=<url>,<url> OSH_PROBE_BASELINE=/tmp/neighbours.before \
+  scripts/remote-access-check.sh
+```
+
 Keycloak is published at `keycloak.<cluster-domain>` through the cluster's
 Istio ingress gateway, reachable from your CIDR blocks and from the cluster's own
 pod and node networks (the OpenShell gateway and the provider hook reach the

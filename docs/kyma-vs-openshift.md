@@ -36,7 +36,7 @@ first sandbox is created.
 | Default mesh | Optional (Service Mesh Operator) | Istio module enabled by default |
 | Sidecar injection on labeled namespaces | Off unless explicitly opted in | On unless explicitly opted out |
 | Driver pod | Annotation: not needed | Annotation: `sidecar.istio.io/inject: "false"` (UDS doesn't benefit from mTLS) |
-| Sandbox pod | Mesh not assumed | Controlled by `--kyma-istio-inject-sandboxes` (`driver.istioInjectSandboxes`, default `false`) |
+| Sandbox pod | Mesh not assumed | Never injected: workload pods carry `sidecar.istio.io/inject: "false"`, because upstream refuses a workload pod with a sidecar's ServiceAccount token (see [`istio-considerations.md`](istio-considerations.md)) |
 
 See [`istio-considerations.md`](istio-considerations.md) for the
 reasoning behind defaulting injection off for sandboxes.

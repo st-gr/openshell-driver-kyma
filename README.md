@@ -66,7 +66,6 @@ start with `--kyma-` / `OPENSHELL_KYMA_`:
 
 | Flag | Values key | Default | Purpose |
 |------|------------|---------|---------|
-| `--kyma-istio-inject-sandboxes` | `driver.istioInjectSandboxes` | `false` | Value of the `sidecar.istio.io/inject` label on sandbox workloads. False means no sidecar. |
 | `--kyma-disable-claude-telemetry` | `driver.disableClaudeTelemetry` | `false` | Adds `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` to every sandbox. |
 | `--kyma-sandbox-env` | `driver.sandboxEnv` | none | `KEY=VALUE` added to every sandbox. Comma-separated, so a value cannot contain a comma; `OPENSHELL_*` keys other than `OPENSHELL_LOG_LEVEL` are rejected. |
 | `--kyma-workspace-psa-level` | `driver.workspacePsaLevel` | `""` | Pod Security level for namespaces the driver creates in managed mode (`privileged`, `baseline`, `restricted`; empty leaves them unlabelled). |

@@ -145,6 +145,13 @@ if base OSH_NEIGHBOUR_URLS="$NEIGHBOUR" >"$WORK/no-action" 2>&1; then
 fi
 grep -q OSH_POLICY_ACTION "$WORK/no-action" || die "the refusal does not name OSH_POLICY_ACTION: $(cat "$WORK/no-action")"
 base OSH_POLICY_ACTION=ALLOW OSH_DRY_RUN=1 >"$WORK/dry-run"
+grep -qx 'ingress namespace: istio-system' "$WORK/dry-run" || die "the dry run does not name the ingress namespace: $(cat "$WORK/dry-run")"
+# The ingress namespace comes from the chart's values, not a constant: the checks of the
+# policies and of what is left after a revert look there.
+printf 'gatewayIngress:\n  ingressNamespace: custom-ingress\n' >"$WORK/ingress-ns.yaml"
+base OSH_POLICY_ACTION=ALLOW OSH_DRY_RUN=1 OSH_EXTRA_VALUES="$WORK/ingress-ns.yaml" >"$WORK/dry-run-ns"
+grep -qx 'ingress namespace: custom-ingress' "$WORK/dry-run-ns" \
+	|| die "the ingress namespace is not read from the values: $(cat "$WORK/dry-run-ns")"
 grep -qx 'gateway.tls.enabled=true' "$WORK/dry-run" || die "the dry run does not install gateway TLS: $(cat "$WORK/dry-run")"
 if grep -qi 'jwks' "$WORK/dry-run"; then
 	die "the dry run still sets a JWKS value: $(cat "$WORK/dry-run")"

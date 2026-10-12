@@ -266,9 +266,9 @@ The pre-install hook will:
   an unauthenticated gateway), without `gateway.tls.enabled`, without
   `gatewayIngress.domain`, or with `serviceHosts.enabled` and no `allowedCidrs`.
 
-Installing with `gatewayIngress.enabled` creates, in `istio-system`,
-AuthorizationPolicies and a Secret with the chart CA's public certificate, so
-the installing identity needs rights there. The ingress gateway is shared with
+Installing with `gatewayIngress.enabled` creates AuthorizationPolicies in
+`istio-system`, and nothing else there, so the installing identity needs rights
+to create those. The ingress gateway is shared with
 every other application of the cluster, and nothing the chart creates applies
 to it as a whole: every policy rule names this release's hosts, and there is no
 RequestAuthentication (on an ingress gateway it would answer 401 to every other
@@ -276,9 +276,13 @@ application's Bearer tokens). The ingress gateway checks no token. It routes,
 re-encrypts to the gateway pod, and fences by source address where you set
 `allowedCidrs`; the gateway authenticates every call.
 
-For the first seconds of a first install the gateway host answers 503: a
-post-install Job copies the chart CA into `istio-system`, and until then the
-ingress gateway cannot verify the gateway pod.
+The ingress gateway verifies the gateway pod against the chart CA, which the
+PKI hook writes as the ConfigMap `<fullname>-gateway-ca` in the release
+namespace and keeps current on every install and upgrade. The DestinationRule
+names it as `configmap://<namespace>/<name>`; Istio reads such a credential
+from any namespace, because it holds only a public certificate. The ConfigMap
+is created by a hook, so `helm uninstall` leaves it behind; delete it by hand
+if you remove the release for good.
 
 ### Upgrading to gateway TLS
 
@@ -296,7 +300,7 @@ kubectl -n openshell-system delete secret \
 ```
 
 Sandboxes from before the upgrade must be recreated: their pods carry the
-plaintext gateway endpoint and tokens of the old signing key.
+plaintext gateway endpoint and no certificate to verify the gateway with.
 
 ### Choose the policy action
 
@@ -554,11 +558,10 @@ Sandbox pods themselves are never published.
   grant the driver `create` and `delete` on Secrets in each operator namespace.
   Upstream ships that Role in its separate `openshell-workspace` chart; this
   chart does not.
-- **Gateway TLS with Istio-injected sandboxes** (`gateway.tls.enabled`, which
-  `gatewayIngress` requires, together with `driver.istioInjectSandboxes`): not
-  verified. A sandbox's sidecar may treat the gateway Service's `grpc` port as
-  plaintext HTTP/2 and break the supervisor's TLS connection to the gateway.
-  Create a sandbox on your cluster before you rely on the combination.
+- **No Istio sidecars in sandbox workloads.** Upstream refuses a workload pod
+  that receives a projected ServiceAccount token, which a sidecar brings, so
+  sandbox workloads always carry `sidecar.istio.io/inject: "false"`
+  ([`istio-considerations.md`](istio-considerations.md)).
 - **Managed mode**: the gateway id (default: the release fullname) must be at
   most 33 characters; a longer release name must set
   `gateway.sandboxJwt.gatewayId`.
@@ -573,8 +576,9 @@ Sandbox pods themselves are never published.
 - **`gateway.dbPersistence.enabled=false`**: a gateway restart loses the
   provider and profile. With the chart's hook (`inferenceProvider.enabled`,
   no OIDC issuer) the next `helm upgrade` re-runs the hook and re-creates
-  them. The OIDC path has no hook, so nothing does: register them again from
-  an authenticated CLI session (step 3b).
+  them. With an OIDC issuer the hook does the same when
+  `gateway.oidc.clientCredentialsSecret` names a client secret; without one,
+  register them again from an authenticated CLI session (step 3b).
 - **`driver.sandboxEnv` values cannot contain a comma** (the driver splits the
   list on commas), nor can `inferenceProvider.baseUrl` or `modelId`. Set such a
   variable per sandbox instead.

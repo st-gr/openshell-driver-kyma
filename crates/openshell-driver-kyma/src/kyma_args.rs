@@ -14,10 +14,6 @@ const RESERVED_ENV_PREFIX: &str = "OPENSHELL_";
 /// Kyma options, flattened next to [`crate::upstream_args::UpstreamArgs`].
 #[derive(clap::Args, Debug, Clone)]
 pub struct KymaArgs {
-    /// Let Istio inject a sidecar into sandbox workloads (label value "true").
-    #[arg(long, env = "OPENSHELL_KYMA_ISTIO_INJECT_SANDBOXES")]
-    pub kyma_istio_inject_sandboxes: bool,
-
     /// Add CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 to every sandbox.
     #[arg(long, env = "OPENSHELL_KYMA_DISABLE_CLAUDE_TELEMETRY")]
     pub kyma_disable_claude_telemetry: bool,
@@ -72,10 +68,7 @@ impl KymaArgs {
         if self.kyma_disable_claude_telemetry {
             environment.push((CLAUDE_TELEMETRY_ENV.to_string(), "1".to_string()));
         }
-        EnrichConfig {
-            istio_inject: self.kyma_istio_inject_sandboxes,
-            environment,
-        }
+        EnrichConfig { environment }
     }
 
     /// The `--kyma-sandbox-env` entries as pairs. The one parser behind both
@@ -162,6 +155,20 @@ mod tests {
         }
     }
 
+    // Upstream v0.1.3 refuses a workload pod that receives a projected ServiceAccount
+    // token, which an Istio sidecar brings: the option to inject one is gone, and the
+    // flag is refused rather than silently ignored.
+    #[test]
+    fn istio_injection_flag_is_gone() {
+        let _env = env_lock();
+        let result =
+            Probe::try_parse_from(["openshell-driver-kyma", "--kyma-istio-inject-sandboxes"]);
+        assert!(
+            result.is_err(),
+            "the removed --kyma-istio-inject-sandboxes flag still parses"
+        );
+    }
+
     // The chart passes the list through the environment variable, not the
     // flag: clap must split the variable on commas too.
     #[test]
@@ -181,7 +188,6 @@ mod tests {
     #[test]
     fn defaults() {
         let args = parse(&[]);
-        assert!(!args.kyma_istio_inject_sandboxes);
         assert_eq!(args.kyma_workspace_psa_level, "");
         assert_eq!(args.kyma_health_port, 9090);
         assert!(args.validate().is_ok());

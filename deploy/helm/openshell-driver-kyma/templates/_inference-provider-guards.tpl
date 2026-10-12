@@ -85,6 +85,13 @@ path: every call would fail, and so would the install. */ -}}
 {{- end -}}
 
 {{- define "openshell-driver-kyma.gatewayTlsGuards" -}}
+{{- /* A string is always true in a template: "false" would switch TLS on. */ -}}
+{{- if not (kindIs "bool" .Values.gateway.tls.enabled) -}}
+{{- fail (printf "gateway.tls.enabled must be a boolean (true or false), got the %s %q." (kindOf .Values.gateway.tls.enabled) (toString .Values.gateway.tls.enabled)) -}}
+{{- end -}}
+{{- if not (kindIs "bool" .Values.gateway.tls.clientCa.enabled) -}}
+{{- fail (printf "gateway.tls.clientCa.enabled must be a boolean (true or false), got the %s %q." (kindOf .Values.gateway.tls.clientCa.enabled) (toString .Values.gateway.tls.clientCa.enabled)) -}}
+{{- end -}}
 {{- if .Values.gateway.tls.enabled -}}
 {{- if not .Values.gateway.enabled -}}
 {{- fail "gateway.tls.enabled=true requires gateway.enabled=true (no in-pod gateway sidecar to terminate TLS on)." -}}

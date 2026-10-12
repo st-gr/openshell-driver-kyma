@@ -226,6 +226,15 @@ spec:
               openshell gateway add "${GATEWAY_URL}" --name in-cluster \
                 --oidc-issuer "${OIDC_ISSUER}" --oidc-client-id "${OIDC_CLIENT_ID}" \
                 --oidc-audience "${OIDC_AUDIENCE}"
+              # `gateway add` exits 0 even when the client-credentials login fails; it
+              # stores a token only on success (upstream openshell-cli
+              # commands/gateway.rs at the pinned tag). Stop here with the real cause
+              # instead of failing later on the first call.
+              if [ ! -s "${XDG_CONFIG_HOME:-${HOME}/.config}/openshell/gateways/in-cluster/oidc_token.json" ]; then
+                echo "[hook] the OIDC client-credentials login failed (no token stored; see the CLI's output above)." >&2
+                echo "[hook] Check gateway.oidc.issuer, the client id ${OIDC_CLIENT_ID}, the secret in gateway.oidc.clientCredentialsSecret, and that this client may use the client-credentials grant." >&2
+                exit 1
+              fi
               {{- if .Values.gateway.tls.enabled }}
               # The gateway's certificate is signed by the chart CA. The CLI reads a
               # registered gateway's CA from that gateway's directory (upstream

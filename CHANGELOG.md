@@ -4,6 +4,53 @@ All notable changes to openshell-driver-kyma are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.10.2] — unreleased
+
+Findings deferred from the 0.10.0 review (issue #82).
+
+### Changed
+
+- **The ingress gateway reads the chart CA from a ConfigMap in the release
+  namespace.** The PKI hook writes it (`<fullname>-gateway-ca`, upstream's
+  `--backend-ca-configmap-name`) and keeps it current on every install and
+  upgrade; the DestinationRule names it as `configmap://<namespace>/<name>`.
+  The chart therefore renders nothing into the ingress gateway's namespace
+  except the two host-scoped AuthorizationPolicies: the CA Secret, the Job that
+  copied the CA into it, and that Job's ServiceAccount, Role and RoleBinding are
+  gone. With them go the `alpine/kubectl` image from docker.io, its 120-second
+  deadline, and the Job name that exceeded 63 characters for long release names.
+  `gatewayIngress.caHook.image` is removed (an old values file that sets it is
+  ignored). The ConfigMap is created by a hook, so `helm uninstall` leaves it.
+
+### Removed
+
+- **`driver.istioInjectSandboxes` / `--kyma-istio-inject-sandboxes`.** With
+  upstream v0.1.3 it made every sandbox creation fail: upstream refuses a
+  workload pod that receives a projected ServiceAccount token ("admitted
+  workload Pod does not preserve capability-free isolation"), and an Istio
+  sidecar brings one (seen live on Kyma). Sandbox workloads now always carry
+  `sidecar.istio.io/inject: "false"`. A values file that still sets the option
+  to `true` fails the render with an explanation; the driver refuses the flag.
+
+### Fixed
+
+- `gatewayIngress.allowedCidrs` entries with an octet over 255 or a prefix over
+  32 (IPv4) or 128 (IPv6) fail the render, instead of failing when Istio applies
+  the policy.
+- `gateway.tls.enabled` and `gateway.tls.clientCa.enabled` given as strings fail
+  with the chart's message instead of Helm's type error.
+- The provider hook stops with a clear message when the OIDC client-credentials
+  login fails; `openshell gateway add` exits 0 in that case, so the hook used to
+  fail later with an unrelated-looking error.
+- `scripts/remote-access-check.sh` reads the ingress gateway's namespace from the
+  chart instead of assuming `istio-system`, checks the CA ConfigMap, and gives up
+  on an unreachable neighbour after 5 s instead of 20 s.
+- Check 8b of `scripts/check-chart-render.sh` requires hosts on every `to` entry
+  of an AuthorizationPolicy rule. `scripts/check-gateway-config.sh` also runs the
+  PKI hook's arguments against the pinned gateway image.
+- Docs: the installer's rights in `istio-system`, the provider hook with OIDC,
+  and why sandboxes must be recreated after turning on gateway TLS.
+
 ## [0.10.1] — 2026-10-12
 
 ### Changed
@@ -75,7 +122,7 @@ kubectl -n <namespace> delete secret \
 ```
 
 Sandboxes from before that upgrade must be recreated: their pods carry the
-plaintext gateway endpoint and tokens of the old signing key. Installs that keep
+plaintext gateway endpoint and no certificate to verify the gateway with. Installs that keep
 gateway TLS off need nothing.
 
 ### Added
