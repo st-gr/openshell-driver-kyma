@@ -1591,6 +1591,14 @@ if rendered("good-8-inference-oidc") is not None:
                        '--oidc-audience "${OIDC_AUDIENCE}"')):
         failures.append("good-8-inference-oidc: the hook does not register the gateway with "
                         "`openshell gateway add ... --oidc-issuer --oidc-client-id --oidc-audience`")
+    # `openshell gateway add` exits 0 after a failed client-credentials login and stores no
+    # token (upstream openshell-cli commands/gateway.rs at the pinned tag); the hook must
+    # notice right away, before the first call fails with an unrelated-looking error.
+    token = 'oidc_token.json'
+    if (token not in script or "client-credentials login" not in script
+            or not (script.index("openshell gateway add") < script.index(token) < script.index("osh() {"))):
+        failures.append("good-8-inference-oidc: the hook does not check, right after `openshell gateway add`, "
+                        "that the client-credentials login stored a token (oidc_token.json)")
     if "--gateway-endpoint" in script or "openshell --gateway in-cluster" not in script:
         failures.append("good-8-inference-oidc: under OIDC the hook must address the registered gateway "
                         "(--gateway in-cluster), never --gateway-endpoint, which sends no token")
