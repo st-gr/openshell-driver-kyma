@@ -58,7 +58,7 @@
 #      release's hosts.
 #      8c: DENY policies with source addresses are refused on an ingress gateway that
 #      has TCP or TLS-passthrough servers, where Istio would apply them without the host.
-#   9. upstream v0.1.3's additions: the gateway's OCSF audit log renders as upstream
+#   9. upstream v0.1.4's additions: the gateway's OCSF audit log renders as upstream
 #      renders it ([openshell.gateway.ocsf_log], refusing what the gateway refuses),
 #      with extra volumes to keep it; and the cluster-scoped RBAC can be left to a
 #      cluster admin (rbac.clusterScoped), as upstream's chart allows.
@@ -429,7 +429,7 @@ try bad-8-selector-empty 'gatewayIngress.ingressSelector' t "${ingress_common[@]
 try bad-8-ingress-namespace-empty 'gatewayIngress.ingressNamespace' t "${ingress_common[@]}" \
 	--set gatewayIngress.ingressNamespace=
 try bad-8-istio-gateway-empty 'gatewayIngress.istioGateway' t "${ingress_common[@]}" --set gatewayIngress.istioGateway=
-# Istio sidecars in sandbox workloads: upstream v0.1.3 refuses such a workload pod (it
+# Istio sidecars in sandbox workloads: upstream v0.1.4 refuses such a workload pod (it
 # receives a projected ServiceAccount token), so the option is gone and a values file
 # that still sets it fails the render instead of failing every sandbox creation.
 try bad-3-istio-inject 'driver.istioInjectSandboxes was removed' t --set driver.istioInjectSandboxes=true
@@ -437,7 +437,7 @@ try bad-3-istio-inject 'driver.istioInjectSandboxes was removed' t --set driver.
 try bad-8-apirule-leftover 'gatewayApirule' t --set gatewayApirule.enabled=true \
 	--set gatewayApirule.host=openshell.example.org
 
-# 9. Upstream v0.1.3's gateway OCSF JSONL log (its chart's server.ocsfLog) and optional
+# 9. Upstream v0.1.4's gateway OCSF JSONL log (its chart's server.ocsfLog) and optional
 # cluster-scoped RBAC (its chart's rbac.clusterScoped). The names start with good-9/bad-9,
 # so checks 4 and 5 (r*.yaml) skip them.
 try good-9-ocsf '' t --set gateway.ocsfLog.enabled=true
@@ -923,7 +923,7 @@ def effective_rules(documents, where):
 
 SANDBOX_VERBS = ["create", "delete", "get", "list", "patch", "update", "watch"]
 # Blocks of (apiGroup, resource, verbs[, resourceNames]) rows. Upstream's come from
-# the v0.1.3 templates of deploy/helm/openshell (role.yaml for shared mode, whose
+# the v0.1.4 templates of deploy/helm/openshell (role.yaml for shared mode, whose
 # Role holds the namespaced rights; clusterrole.yaml for the cluster-wide rights of
 # every mode and the namespaced rights of the other modes); the line numbers refer to those.
 PVC_GET = [("", "persistentvolumeclaims", ["get"])]           # role.yaml:13-18, clusterrole.yaml:18-22; with allowDriverConfig

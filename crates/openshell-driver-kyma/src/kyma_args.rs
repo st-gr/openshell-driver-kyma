@@ -155,7 +155,7 @@ mod tests {
         }
     }
 
-    // Upstream v0.1.3 refuses a workload pod that receives a projected ServiceAccount
+    // Upstream v0.1.4 refuses a workload pod that receives a projected ServiceAccount
     // token, which an Istio sidecar brings: the option to inject one is gone, and the
     // flag is refused rather than silently ignored.
     #[test]

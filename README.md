@@ -6,7 +6,7 @@
 
 A compute driver that runs [OpenShell](https://github.com/NVIDIA/OpenShell)
 agent sandboxes on **SAP BTP Kyma** clusters. The driver runs upstream
-OpenShell's Kubernetes driver (`openshell-driver-kubernetes`, release v0.1.3)
+OpenShell's Kubernetes driver (`openshell-driver-kubernetes`, release v0.1.4)
 unchanged, so every `ComputeDriver` RPC, the sandbox lifecycle and the
 isolation are upstream's. It adds only request enrichment (the Istio opt-out
 and Kagenti labels, plus configured sandbox environment) and Pod Security

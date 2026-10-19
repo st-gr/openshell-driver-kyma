@@ -4,6 +4,21 @@ All notable changes to openshell-driver-kyma are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.10.3] — 2026-10-19
+
+Moves to upstream OpenShell v0.1.4.
+
+### Changed
+
+- **Upstream v0.1.3 -> v0.1.4.** The three `openshell-*` dependencies, the
+  chart's `upstream.version` and the gateway, supervisor and sandbox runtime
+  image digests all move to v0.1.4.
+- **No breaking change for us.** Upstream's option surface (`config.rs`,
+  `main.rs` option struct), its Helm templates (RBAC, NetworkPolicy,
+  workspace-secret-source role) and its chart `values.yaml` have no diff between
+  v0.1.3 and v0.1.4, so `upstream_args.rs`, `main.rs` and the chart's rules and
+  checks needed no mirroring beyond the version references.
+
 ## [0.10.2] — 2026-10-12
 
 Findings deferred from the 0.10.0 review (issue #82).

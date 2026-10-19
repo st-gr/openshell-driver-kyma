@@ -75,7 +75,7 @@ dev-shell-with-kube:
 upstream-args-check:
 	./scripts/check-upstream-args.sh
 
-# Move the driver to a new upstream release: make upstream-bump TAG=v0.1.3
+# Move the driver to a new upstream release: make upstream-bump TAG=v0.1.4
 # Rewrites the tag on the three openshell-* git dependencies, refreshes
 # Cargo.lock, then prints any option-surface diff to mirror into
 # crates/openshell-driver-kyma/src/upstream_args.rs, and any change to the rest

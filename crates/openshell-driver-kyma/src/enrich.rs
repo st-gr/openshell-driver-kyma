@@ -13,7 +13,7 @@ use openshell_core::proto::compute::v1::DriverSandbox;
 
 /// Istio must not inject a sidecar into sandbox workloads: upstream's workload
 /// fence gives them no egress, the sidecar would sit outside the boundary, and
-/// upstream (v0.1.3) refuses a workload pod that receives a projected
+/// upstream (v0.1.4) refuses a workload pod that receives a projected
 /// ServiceAccount token, which the sidecar brings. Workload pods always get "false".
 pub const ISTIO_INJECT_LABEL: &str = "sidecar.istio.io/inject";
 pub const KAGENTI_TYPE_LABEL: &str = "kagenti.io/type";

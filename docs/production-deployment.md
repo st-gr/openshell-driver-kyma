@@ -128,7 +128,7 @@ imagePullSecrets:
 gateway:
   enabled: true
   # The gateway, supervisor and sandbox-runtime images default to digests of
-  # the upstream OpenShell release named by `upstream.version` (v0.1.3). Leave
+  # the upstream OpenShell release named by `upstream.version` (v0.1.4). Leave
   # them alone unless you move that version too: they must match each other
   # and the driver.
 
@@ -228,7 +228,7 @@ URL is not part of the binding: `inferenceProvider.baseUrl` when the chart's
 hook registers the provider, `ANTHROPIC_BASE_URL` on the OIDC path above).
 `binaries` in the profile gates which processes may reach the endpoint
 (`inferenceProvider.binaries` with the hook; the profile you import in step 3b
-on the OIDC path); upstream v0.1.3 still resolves a static key like this one
+on the OIDC path); upstream v0.1.4 still resolves a static key like this one
 by endpoint, not by calling binary, so treat the endpoint as the scope.
 
 The provider and its profile live in the gateway's DB. That is what
@@ -462,7 +462,7 @@ openshell status
     > ~/.config/openshell/gateways/kyma-forward/mtls/ca.crt
   ```
 - **Gateway audit log.** `gateway.ocsfLog.enabled: true` makes the gateway
-  write its OCSF audit events as JSONL (upstream v0.1.3). The default path is
+  write its OCSF audit events as JSONL (upstream v0.1.4). The default path is
   on the pod's `/tmp` and is lost when the pod restarts; to keep the records,
   add a volume with `gateway.extraVolumes` and `gateway.extraVolumeMounts` and
   set `gateway.ocsfLog.path` on it. Rotation is daily with seven files kept,
@@ -537,7 +537,7 @@ Things to know:
   removes the caller's `Authorization` header before the request reaches the
   service; for a service that checks Bearer tokens itself, expose it with
   `openshell service expose <sandbox> <port> --authorization-mode
-  bearer-passthrough` (CLI v0.1.3 or later), which passes a single
+  bearer-passthrough` (CLI v0.1.4 or later), which passes a single
   `Authorization: Bearer` header through.
 - Service hosts are published per workspace. Routes and policies match
   `<workspace>--*` for the workspaces in `gatewayIngress.serviceHosts.workspaces`
