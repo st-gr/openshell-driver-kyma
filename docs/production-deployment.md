@@ -462,7 +462,7 @@ openshell status
     > ~/.config/openshell/gateways/kyma-forward/mtls/ca.crt
   ```
 - **Gateway audit log.** `gateway.ocsfLog.enabled: true` makes the gateway
-  write its OCSF audit events as JSONL (upstream v0.1.4). The default path is
+  write its OCSF audit events as JSONL (upstream v0.1.3 and later). The default path is
   on the pod's `/tmp` and is lost when the pod restarts; to keep the records,
   add a volume with `gateway.extraVolumes` and `gateway.extraVolumeMounts` and
   set `gateway.ocsfLog.path` on it. Rotation is daily with seven files kept,
@@ -537,7 +537,7 @@ Things to know:
   removes the caller's `Authorization` header before the request reaches the
   service; for a service that checks Bearer tokens itself, expose it with
   `openshell service expose <sandbox> <port> --authorization-mode
-  bearer-passthrough` (CLI v0.1.4 or later), which passes a single
+  bearer-passthrough` (CLI v0.1.3 or later), which passes a single
   `Authorization: Bearer` header through.
 - Service hosts are published per workspace. Routes and policies match
   `<workspace>--*` for the workspaces in `gatewayIngress.serviceHosts.workspaces`
@@ -562,6 +562,15 @@ Sandbox pods themselves are never published.
   that receives a projected ServiceAccount token, which a sidecar brings, so
   sandbox workloads always carry `sidecar.istio.io/inject: "false"`
   ([`istio-considerations.md`](istio-considerations.md)).
+- **mTLS operators** (upstream v0.1.4, `--enable-operator-auth`) have no chart
+  value, as in upstream's chart: set
+  `gateway.extraArgs: ["--enable-operator-auth=true"]` with `gateway.tls.enabled`
+  and `gateway.tls.clientCa.enabled`; the gateway refuses to start without
+  them. A certificate with `OU=operator` under the client CA then administers
+  every workspace and may read provider credentials, so restrict who can issue
+  certificates under that CA. Operators connect directly to the gateway
+  (in-cluster or `kubectl port-forward`): `gatewayIngress` opens its own TLS
+  connection to the gateway and cannot carry an operator certificate.
 - **Managed mode**: the gateway id (default: the release fullname) must be at
   most 33 characters; a longer release name must set
   `gateway.sandboxJwt.gatewayId`.

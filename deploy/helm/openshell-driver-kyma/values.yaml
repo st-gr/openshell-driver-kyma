@@ -27,7 +27,7 @@ serviceAccount:
   create: true
   name: openshell-driver
 
-# Cluster-scoped RBAC of the driver (upstream v0.1.4's rbac.clusterScoped). Set
+# Cluster-scoped RBAC of the driver (upstream's rbac.clusterScoped, since v0.1.3). Set
 # create=false for a namespace-admin install: a cluster admin then applies the
 # ClusterRole and ClusterRoleBinding once, out of band, for example from
 #   helm template <release> <chart> -n <namespace> -f <values> \
@@ -437,7 +437,16 @@ gateway:
     enabled: false
     clientCa:
       enabled: false
-  # The gateway's OCSF audit events as JSONL (upstream v0.1.4; its chart's
+  # Gateway-wide gRPC request rate limit (upstream's server.grpcRateLimit), rendered
+  # into the gateway TOML as grpc_rate_limit_requests/_window_seconds. Applies to gRPC
+  # API traffic only, not to health, metrics or loopback service HTTP. Both values
+  # positive turn it on; both 0 (default) leave it off. Since upstream v0.1.4 the
+  # gateway's unauthenticated reflection service has its own counter with the same
+  # limit, so set this when the gateway is reachable through gatewayIngress.
+  grpcRateLimit:
+    requests: 0
+    windowSeconds: 0
+  # The gateway's OCSF audit events as JSONL (upstream v0.1.3 and later; its chart's
   # server.ocsfLog), rendered into the gateway TOML as [openshell.gateway.ocsf_log].
   # The default path is on the gateway's /tmp emptyDir: writable, but lost when
   # the pod restarts. To keep the records, mount a volume with extraVolumes and

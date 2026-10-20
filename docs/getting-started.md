@@ -265,7 +265,7 @@ curl --resolve default--web.openshell.localhost:8080:127.0.0.1 \
 
 The gateway removes a request's `Authorization` header before it reaches the
 service. A service that checks Bearer tokens itself needs
-`--authorization-mode bearer-passthrough` on `service expose` (CLI v0.1.4 or
+`--authorization-mode bearer-passthrough` on `service expose` (CLI v0.1.3 or
 later).
 
 ### Two operational notes

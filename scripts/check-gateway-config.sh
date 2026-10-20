@@ -136,6 +136,13 @@ check_args remote-access \
   --set gateway.oidc.clientId=osh-client \
   --set gateway.oidc.authOnly=true \
   --set gateway.tls.enabled=true
+# Upstream v0.1.4's mTLS operators (`--enable-operator-auth`, OU=operator certificates)
+# have no chart value, as in upstream's chart: they are reached through gateway.extraArgs,
+# and need TLS and the client CA, so the pinned image must accept that command line.
+check_args operator-auth \
+  --set gateway.tls.enabled=true \
+  --set gateway.tls.clientCa.enabled=true \
+  --set-json 'gateway.extraArgs=["--enable-operator-auth=true"]'
 check_args rbac-roles \
   --set gateway.oidc.issuer=https://issuer.example \
   --set gateway.oidc.audience=osh-client \
@@ -182,6 +189,17 @@ check_config() {
 }
 check_config defaults "$WORK/gateway.toml"
 
+# The gRPC rate limit (gateway.grpcRateLimit).
+render templates/gateway-config.yaml --set gateway.grpcRateLimit.requests=120 \
+  --set gateway.grpcRateLimit.windowSeconds=60 > "$WORK/rendered-rate-limit.yaml"
+python3 - "$WORK/rendered-rate-limit.yaml" "$WORK/gateway-rate-limit.toml" <<'PY'
+import sys, yaml
+doc = yaml.safe_load(open(sys.argv[1]))
+open(sys.argv[2], "w").write(doc["data"]["gateway.toml"])
+PY
+grep -q '^ *grpc_rate_limit_requests = 120$' "$WORK/gateway-rate-limit.toml" \
+  || { echo "ERROR: the rate-limit render has no grpc_rate_limit_requests; nothing to test" >&2; exit 1; }
+check_config rate-limit "$WORK/gateway-rate-limit.toml"
 # The gateway's OCSF audit log (gateway.ocsfLog), both rotation modes.
 for variant in daily never; do
   render templates/gateway-config.yaml --set gateway.ocsfLog.enabled=true \

@@ -8,7 +8,7 @@ workload pod. Istio honours the label even in a namespace labelled
 
 ## Why sandbox workloads never get a sidecar
 
-1. **Upstream refuses it.** Upstream OpenShell (v0.1.4) checks every admitted
+1. **Upstream refuses it.** Upstream OpenShell (v0.1.3 and later) checks every admitted
    workload pod for capability-free isolation and refuses one that receives a
    projected ServiceAccount token. An Istio sidecar brings one, so the sandbox
    is never created: `openshell sandbox create` fails with "admitted workload
@@ -25,7 +25,7 @@ workload pod. Istio honours the label even in a namespace labelled
 
 Releases up to 0.10.1 had an option to let Istio inject sidecars into
 sandbox workloads (`driver.istioInjectSandboxes`,
-`--kyma-istio-inject-sandboxes`). With upstream v0.1.4 it made every sandbox
+`--kyma-istio-inject-sandboxes`). With upstream v0.1.3 it made every sandbox
 creation fail, so 0.10.2 removed it; a values file that still sets it to
 `true` fails the render with an explanation.
 

@@ -12,12 +12,49 @@ Moves to upstream OpenShell v0.1.4.
 
 - **Upstream v0.1.3 -> v0.1.4.** The three `openshell-*` dependencies, the
   chart's `upstream.version` and the gateway, supervisor and sandbox runtime
-  image digests all move to v0.1.4.
-- **No breaking change for us.** Upstream's option surface (`config.rs`,
-  `main.rs` option struct), its Helm templates (RBAC, NetworkPolicy,
-  workspace-secret-source role) and its chart `values.yaml` have no diff between
-  v0.1.3 and v0.1.4, so `upstream_args.rs`, `main.rs` and the chart's rules and
-  checks needed no mirroring beyond the version references.
+  image digests all move to v0.1.4. The Kubernetes driver's options
+  (`config.rs`, `main.rs`) and upstream's Helm chart have no diff between the
+  two tags, so `upstream_args.rs` and the chart's rules needed no mirroring.
+- **Two upstream driver fixes arrive with it.** Kubernetes API calls time out
+  per request instead of per idle pooled connection, and starting a stopped
+  sandbox renders its bootstrap init container again from the gateway's config,
+  so a sandbox created before an upgrade starts with the new sandbox runtime
+  image.
+
+### Added
+
+- **`gateway.grpcRateLimit.{requests,windowSeconds}`**, upstream's
+  `server.grpcRateLimit`: a gateway-wide gRPC request limit, rendered into the
+  gateway TOML. Both positive turn it on, both 0 (default) leave it off; anything
+  else fails the render with upstream's message. Since upstream v0.1.4 it also
+  bounds the gateway's reflection service (below).
+
+### Upstream v0.1.4 features, and how to reach them
+
+- **gRPC server reflection.** The gateway serves reflection v1 for
+  `openshell.v1.OpenShell` without a bearer token (TLS and client-certificate
+  requirements still apply). With `gatewayIngress` it is reachable from the
+  allowed addresses like the rest of the gateway; set `gateway.grpcRateLimit`
+  to bound it. `docs/grpc-without-cli.md` uses it instead of downloaded proto
+  files.
+- **mTLS operators** (`--enable-operator-auth`): a client certificate with
+  `OU=operator` under the gateway's client CA becomes a gateway-wide operator
+  that may read provider credentials. Upstream's chart has no named value for it
+  either; set `gateway.extraArgs: ["--enable-operator-auth=true"]` together with
+  `gateway.tls.enabled` and `gateway.tls.clientCa.enabled` (the gateway refuses
+  to start without them). Operators connect directly to the gateway, in-cluster
+  or through a port-forward: an ingress that opens its own TLS connection, such
+  as `gatewayIngress`, cannot carry an operator certificate.
+  `scripts/check-gateway-config.sh` checks that the pinned gateway accepts this
+  command line.
+
+### Fixed
+
+- Version references that described upstream v0.1.3 behaviour now say so, or
+  "v0.1.3 and later": the refusal of Istio-injected sandbox workloads (seen
+  live on v0.1.3, still in v0.1.4), the OCSF log and `rbac.clusterScoped` (both
+  added in v0.1.3), and `service expose --authorization-mode bearer-passthrough`
+  (CLI v0.1.3 or later).
 
 ## [0.10.2] — 2026-10-12
 

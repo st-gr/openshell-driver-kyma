@@ -23,6 +23,16 @@ OcsfLogConfig). A string is always true in a template, so "false" would enable i
 {{- fail "gateway.ocsfLog.maxFiles must be positive when gateway.ocsfLog.rotation is daily." -}}
 {{- end -}}
 {{- end -}}
+{{- /* Upstream's chart refuses these (its _toml.tpl at the pinned tag): the gateway's
+settings are unsigned, and one positive value alone would leave the limit off. */ -}}
+{{- $rateRequests := int (.Values.gateway.grpcRateLimit.requests | default 0) -}}
+{{- $rateWindow := int (.Values.gateway.grpcRateLimit.windowSeconds | default 0) -}}
+{{- if or (lt $rateRequests 0) (lt $rateWindow 0) -}}
+{{- fail "gateway.grpcRateLimit.requests and gateway.grpcRateLimit.windowSeconds must not be negative; they map to unsigned gateway settings" -}}
+{{- end -}}
+{{- if and (or (gt $rateRequests 0) (gt $rateWindow 0)) (not (and (gt $rateRequests 0) (gt $rateWindow 0))) -}}
+{{- fail "gateway.grpcRateLimit requires both requests and windowSeconds to be positive to enable rate limiting, or both 0/unset to disable it" -}}
+{{- end -}}
 # Gateway TOML configuration. Mounted at /etc/openshell/gateway.toml.
 # Rendered whenever the gateway sidecar runs — the gateway needs:
 #
@@ -58,6 +68,10 @@ data:
 
     [openshell.gateway]
     log_level = {{ .Values.driver.logLevel | quote }}
+    {{- if gt $rateRequests 0 }}
+    grpc_rate_limit_requests = {{ $rateRequests }}
+    grpc_rate_limit_window_seconds = {{ $rateWindow }}
+    {{- end }}
 
     [openshell.gateway.auth]
     # When OIDC is not configured, every gRPC request would otherwise be

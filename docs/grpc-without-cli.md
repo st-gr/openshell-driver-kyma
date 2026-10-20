@@ -19,7 +19,7 @@ image the chart runs by default) serves:
 |---|---|
 | **gRPC** (`application/grpc` over HTTP/2) | ✅ primary protocol; what the CLI uses |
 | **gRPC-Web** (`application/grpc-web`) | ✅ accepted; lets you use any HTTP client |
-| **Server reflection** | ❌ not enabled — bring your own `.proto` files |
+| **Server reflection** | ✅ v1, upstream v0.1.4 and later; advertises only `openshell.v1.OpenShell`, needs no bearer token |
 | **HTTP/JSON transcoding** (grpc-gateway) | ❌ not enabled |
 | **Connect-RPC** (`Connect-Protocol-Version` header) | ❌ not enabled |
 | **TLS** | gated by `gateway.tls.enabled`. With it off (default), use `--plaintext` / `http://`. With it on, also consider `gateway.tls.clientCa.enabled` for mTLS. |
@@ -30,10 +30,24 @@ probes (`/healthz`, `/readyz`) are plain HTTP/1.1 on
 `gateway.healthPort` (default `9092`). Prometheus metrics are on
 `gateway.metricsPort` (default `9091`).
 
-## Prerequisite: grab the proto files
+## Prerequisite: the message types
 
-The gateway's `.proto` files live in NVIDIA's upstream OpenShell repo,
-not this one. Fetch the four files you need:
+The gateway (upstream v0.1.4 and later) serves gRPC server reflection, so
+`grpcurl` can learn the message types from it: drop `-import-path` and
+`-proto` from the examples below. Reflection needs no bearer token, but TLS
+and client-certificate requirements still apply. It advertises only the public
+`openshell.v1.OpenShell` service, and with `gateway.grpcRateLimit` set it has a
+separate counter with the same limit; over the limit the stream closes with
+`RESOURCE_EXHAUSTED`.
+
+```bash
+grpcurl -plaintext ods-openshell-driver-kyma:8080 list
+grpcurl -plaintext ods-openshell-driver-kyma:8080 describe openshell.v1.OpenShell
+```
+
+For tools without reflection, or to pin the schema, use the `.proto` files.
+They live in NVIDIA's upstream OpenShell repo, not this one. Fetch the four
+files you need:
 
 ```bash
 mkdir -p /tmp/proto && cd /tmp/proto
