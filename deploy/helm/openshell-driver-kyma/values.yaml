@@ -4,7 +4,7 @@
 # Sandbox provisioning namespace. The driver creates Sandbox CRs here.
 # Cluster-admin should label this namespace
 # `pod-security.kubernetes.io/enforce: privileged`, the level the chart's CI
-# runs at. Upstream v0.1.3's sandbox pods request no privileges (non-root, all
+# runs at. Upstream v0.1.4's sandbox pods request no privileges (non-root, all
 # capabilities dropped, RuntimeDefault seccomp), so a stricter level may admit
 # them, but only `privileged` is verified here. The provider hook runs as
 # root, which `restricted` refuses.
@@ -27,7 +27,7 @@ serviceAccount:
   create: true
   name: openshell-driver
 
-# Cluster-scoped RBAC of the driver (upstream v0.1.3's rbac.clusterScoped). Set
+# Cluster-scoped RBAC of the driver (upstream's rbac.clusterScoped, since v0.1.3). Set
 # create=false for a namespace-admin install: a cluster admin then applies the
 # ClusterRole and ClusterRoleBinding once, out of band, for example from
 #   helm template <release> <chart> -n <namespace> -f <values> \
@@ -81,11 +81,11 @@ driver:
   # starting with `sha256:` and the helper emits `<repo>@sha256:<digest>`
   # automatically.
   #
-  # This digest is supervisor v0.1.3, version-matched to gateway.image
+  # This digest is supervisor v0.1.4, version-matched to gateway.image
   # below. It tracked `:latest` until chart 0.3.0 — that tag moved twice
   # in one week, so sandboxes were silently picking up new privileged
   # binaries. Re-pin both together when bumping upstream.
-  supervisorImage: ghcr.io/nvidia/openshell/supervisor@sha256:4ab2b970cdb02c7518ba4ccbbadb4861ae9a8d0b8770e5b160697f0453b0a8e4
+  supervisorImage: ghcr.io/nvidia/openshell/supervisor@sha256:aa681d8264af6ee860e38349ed3c76609a51778eb6d0f02743df03787b80a290
   # The gateway endpoint sandboxes dial (OPENSHELL_GRPC_ENDPOINT). Empty
   # defaults to this release's Service when gateway.enabled is true, https://
   # when gateway.tls.enabled and http:// otherwise, as upstream's chart derives
@@ -183,7 +183,7 @@ driver:
   # Sandbox runtime (isolation backend) image, digest-pinned. Upstream's
   # compiled-in default depends on build variables a git-dependency build does
   # not set, so the chart always passes it.
-  sandboxRuntimeImage: ghcr.io/nvidia/openshell/sandbox@sha256:2658534bfb3f1ebba4bb7792e9e875a0972edbe7ae5f58d807ae22c46844a2ac
+  sandboxRuntimeImage: ghcr.io/nvidia/openshell/sandbox@sha256:ca00c094aeaa60681b8196cda18ab3c5dd5f7d782d4c36798256427b67599070
   sandboxRuntimeImagePullPolicy: ""
   supervisorImagePullPolicy: ""
   # Default sandbox image when a create request names none
@@ -198,7 +198,7 @@ driver:
   sandboxSshSocketPath: ""
   bindAddress: ""
   # OTLP/gRPC trace collector (OPENSHELL_OTLP_ENDPOINT), e.g.
-  # http://collector.observability:4317. Plain http:// (upstream v0.1.3 builds
+  # http://collector.observability:4317. Plain http:// (upstream v0.1.4 builds
   # its exporter without TLS). With networkPolicy.enabled the driver pod may
   # then reach that port (80 when none is given), on any address.
   otlpEndpoint: ""
@@ -261,7 +261,7 @@ driver:
 # The upstream NVIDIA/OpenShell release this chart's driver links. Must equal
 # the tag in the workspace Cargo.toml (scripts/check-chart-render.sh).
 upstream:
-  version: v0.1.3
+  version: v0.1.4
 
 networkPolicy:
   # NetworkPolicies the chart renders:
@@ -360,7 +360,7 @@ podLabels: {}
 gateway:
   enabled: false
   image:
-    # Pinned by digest to the gateway image upstream published for `v0.1.3`,
+    # Pinned by digest to the gateway image upstream published for `v0.1.4`,
     # the same release as `upstream.version`, the Cargo.toml tag, the
     # supervisor and sandbox runtime images above, and the `openshell` CLI the
     # provider hook downloads. Re-pin them together when `upstream.version`
@@ -368,7 +368,7 @@ gateway:
     # shape changed. Resolve a digest with `docker buildx imagetools inspect`
     # on https://github.com/NVIDIA/OpenShell/pkgs/container/openshell%2Fgateway
     repository: ghcr.io/nvidia/openshell/gateway
-    tag: "sha256:ea14aa4db0980fab4769fb6b5509ac42ae3dc8495e645b1ba1fe1ada49892fa6"
+    tag: "sha256:bdb4fe248070032c88be78f029dad9325cb698480e90486e1413a674a5d8edc8"
     pullPolicy: IfNotPresent
   grpcPort: 8080
   metricsPort: 9091
@@ -437,7 +437,16 @@ gateway:
     enabled: false
     clientCa:
       enabled: false
-  # The gateway's OCSF audit events as JSONL (upstream v0.1.3; its chart's
+  # Gateway-wide gRPC request rate limit (upstream's server.grpcRateLimit), rendered
+  # into the gateway TOML as grpc_rate_limit_requests/_window_seconds. Applies to gRPC
+  # API traffic only, not to health, metrics or loopback service HTTP. Both values
+  # positive turn it on; both 0 (default) leave it off. Since upstream v0.1.4 the
+  # gateway's unauthenticated reflection service has its own counter with the same
+  # limit, so set this when the gateway is reachable through gatewayIngress.
+  grpcRateLimit:
+    requests: 0
+    windowSeconds: 0
+  # The gateway's OCSF audit events as JSONL (upstream v0.1.3 and later; its chart's
   # server.ocsfLog), rendered into the gateway TOML as [openshell.gateway.ocsf_log].
   # The default path is on the gateway's /tmp emptyDir: writable, but lost when
   # the pod restarts. To keep the records, mount a volume with extraVolumes and
@@ -621,7 +630,7 @@ inferenceProvider:
   profileId: ""
   # Executable paths for the profile's `binaries` list: the processes that may reach
   # the inference endpoint through the sandbox supervisor. The API key itself is
-  # bound to the endpoint's host and port (upstream v0.1.3 does not yet restrict
+  # bound to the endpoint's host and port (upstream v0.1.4 does not yet restrict
   # it by calling binary); the path of `baseUrl` is not part of that binding.
   # claude-code runs under node, so node must be listed; add the interpreter of
   # any other SDK your sandbox image uses. Must not be empty.

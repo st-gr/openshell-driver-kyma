@@ -8,7 +8,7 @@ workload pod. Istio honours the label even in a namespace labelled
 
 ## Why sandbox workloads never get a sidecar
 
-1. **Upstream refuses it.** Upstream OpenShell (v0.1.3) checks every admitted
+1. **Upstream refuses it.** Upstream OpenShell (v0.1.3 and later) checks every admitted
    workload pod for capability-free isolation and refuses one that receives a
    projected ServiceAccount token. An Istio sidecar brings one, so the sandbox
    is never created: `openshell sandbox create` fails with "admitted workload

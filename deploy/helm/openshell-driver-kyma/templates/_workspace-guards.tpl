@@ -6,7 +6,7 @@ crash-loop once the driver starts.
 
 Every rule below is one of upstream's startup refusals in
 KubernetesComputeConfig::validate_workspace_mode (openshell-driver-kubernetes
-src/config.rs, v0.1.3), so a value upstream would refuse fails `helm template`
+src/config.rs, v0.1.4), so a value upstream would refuse fails `helm template`
 instead of crash-looping the pod:
   managed   config.rs:669   gateway id is a DNS-1123 label
             config.rs:679   "openshell-<id>-" plus a 19-character workspace

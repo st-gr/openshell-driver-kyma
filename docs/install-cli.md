@@ -10,8 +10,8 @@ CLI.
 
 The CLI's gRPC contract evolves with the gateway. Pin the CLI to the
 same upstream release as the gateway image you deployed. The chart deploys
-upstream `v0.1.3` (`upstream.version` in `values.yaml`), so install the
-`v0.1.3` CLI; if you moved the chart to another upstream release, install
+upstream `v0.1.4` (`upstream.version` in `values.yaml`), so install the
+`v0.1.4` CLI; if you moved the chart to another upstream release, install
 that exact tag.
 
 ## Linux x86_64 — direct musl tarball (recommended for CI)
@@ -19,7 +19,7 @@ that exact tag.
 No glibc requirement; no Python. Single binary.
 
 ```bash
-VERSION=v0.1.3
+VERSION=v0.1.4
 curl -fsSL "https://github.com/NVIDIA/OpenShell/releases/download/${VERSION}/openshell-x86_64-unknown-linux-musl.tar.gz" \
   | tar -xz -C /usr/local/bin
 openshell --version
@@ -30,7 +30,7 @@ For Linux aarch64, use `openshell-aarch64-unknown-linux-musl.tar.gz`.
 ## macOS — Apple Silicon tarball
 
 ```bash
-VERSION=v0.1.3
+VERSION=v0.1.4
 curl -fsSL "https://github.com/NVIDIA/OpenShell/releases/download/${VERSION}/openshell-aarch64-apple-darwin.tar.gz" \
   | tar -xz -C /usr/local/bin
 openshell --version

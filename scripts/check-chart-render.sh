@@ -429,7 +429,7 @@ try bad-8-selector-empty 'gatewayIngress.ingressSelector' t "${ingress_common[@]
 try bad-8-ingress-namespace-empty 'gatewayIngress.ingressNamespace' t "${ingress_common[@]}" \
 	--set gatewayIngress.ingressNamespace=
 try bad-8-istio-gateway-empty 'gatewayIngress.istioGateway' t "${ingress_common[@]}" --set gatewayIngress.istioGateway=
-# Istio sidecars in sandbox workloads: upstream v0.1.3 refuses such a workload pod (it
+# Istio sidecars in sandbox workloads: upstream (v0.1.3 and later) refuses such a workload pod (it
 # receives a projected ServiceAccount token), so the option is gone and a values file
 # that still sets it fails the render instead of failing every sandbox creation.
 try bad-3-istio-inject 'driver.istioInjectSandboxes was removed' t --set driver.istioInjectSandboxes=true
@@ -452,6 +452,12 @@ try bad-9-ocsf-path 'gateway.ocsfLog.path' t --set gateway.ocsfLog.enabled=true 
 try bad-9-ocsf-queue 'gateway.ocsfLog.queueCapacity' t --set gateway.ocsfLog.enabled=true --set gateway.ocsfLog.queueCapacity=0
 try bad-9-ocsf-max-files 'gateway.ocsfLog.maxFiles' t --set gateway.ocsfLog.enabled=true --set gateway.ocsfLog.maxFiles=0
 try bad-9-ocsf-enabled-string 'gateway.ocsfLog.enabled must be a boolean' t --set-string gateway.ocsfLog.enabled=false
+# 10. Upstream's gateway-wide gRPC rate limit (its chart's server.grpcRateLimit): both values
+# positive, or both 0 to leave it off; upstream's chart refuses anything else. Since v0.1.4
+# it also bounds the gateway's unauthenticated reflection service.
+try good-10-rate-limit '' t --set gateway.grpcRateLimit.requests=120 --set gateway.grpcRateLimit.windowSeconds=60
+try bad-10-rate-limit-one 'gateway.grpcRateLimit requires both requests and windowSeconds' t --set gateway.grpcRateLimit.requests=120
+try bad-10-rate-limit-negative 'must not be negative' t --set gateway.grpcRateLimit.requests=-1 --set gateway.grpcRateLimit.windowSeconds=60
 try good-9-no-cluster-rbac '' t --set rbac.clusterScoped.create=false
 try good-9-no-cluster-rbac-managed '' t --set driver.workspaceMode=managed --set gateway.sandboxJwt.gatewayId=gw \
 	--set rbac.clusterScoped.create=false
@@ -923,7 +929,7 @@ def effective_rules(documents, where):
 
 SANDBOX_VERBS = ["create", "delete", "get", "list", "patch", "update", "watch"]
 # Blocks of (apiGroup, resource, verbs[, resourceNames]) rows. Upstream's come from
-# the v0.1.3 templates of deploy/helm/openshell (role.yaml for shared mode, whose
+# the v0.1.4 templates of deploy/helm/openshell (role.yaml for shared mode, whose
 # Role holds the namespaced rights; clusterrole.yaml for the cluster-wide rights of
 # every mode and the namespaced rights of the other modes); the line numbers refer to those.
 PVC_GET = [("", "persistentvolumeclaims", ["get"])]           # role.yaml:13-18, clusterrole.yaml:18-22; with allowDriverConfig
@@ -1475,6 +1481,14 @@ for name, want in (
         failures.append(f"{name}: [openshell.gateway.ocsf_log] is {got}, want {want}")
 if "openshell.gateway.ocsf_log" in gateway_toml("render-shared-true"):
     failures.append("render-shared-true: the gateway TOML has an OCSF log without gateway.ocsfLog.enabled")
+# 10. The gRPC rate limit lands in [openshell.gateway] under upstream's keys, and only when set.
+if rendered("good-10-rate-limit") is not None:
+    got = {k: v for k, v in gateway_toml("good-10-rate-limit").get("openshell.gateway", {}).items()
+           if k.startswith("grpc_rate_limit")}
+    if got != {"grpc_rate_limit_requests": 120, "grpc_rate_limit_window_seconds": 60}:
+        failures.append(f"good-10-rate-limit: [openshell.gateway] rate limit is {got}, want 120 per 60 s")
+if any(k.startswith("grpc_rate_limit") for k in gateway_toml("render-shared-true").get("openshell.gateway", {})):
+    failures.append("render-shared-true: the gateway TOML has a gRPC rate limit without gateway.grpcRateLimit")
 # The extra volumes and mounts land on the pod and the gateway container, after the chart's own.
 if rendered("good-9-ocsf-never") is not None:
     gateway, pod, _, _ = gateway_parts("good-9-ocsf-never")

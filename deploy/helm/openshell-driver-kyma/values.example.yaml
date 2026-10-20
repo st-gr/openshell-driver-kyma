@@ -35,7 +35,7 @@ namespace: openshell-system
 
 # ─── Driver image ─────────────────────────────────────────────────────────
 # image.tag should be PINNED BY DIGEST in production. The gateway, supervisor
-# and sandbox-runtime images default to digests of upstream v0.1.3 and must
+# and sandbox-runtime images default to digests of upstream v0.1.4 and must
 # move together with `upstream.version`; leave them unset here.
 image:
   repository: ghcr.io/st-gr/openshell-driver-kyma
@@ -45,7 +45,7 @@ image:
 # ─── Driver options ───────────────────────────────────────────────────────
 # Every key under `driver:` becomes an environment variable of the driver
 # container; see values.yaml for the full list. The supervisor and sandbox
-# runtime images are digest-pinned there for upstream v0.1.3.
+# runtime images are digest-pinned there for upstream v0.1.4.
 driver:
   # Set true when your in-cluster LLM gateway can't service Anthropic's
   # optional telemetry endpoints. Independent of inference routing.
@@ -82,7 +82,7 @@ imagePullSecrets: []
 # never reaches Ready.
 gateway:
   enabled: true
-  # The gateway image defaults to a digest of upstream v0.1.3 (values.yaml).
+  # The gateway image defaults to a digest of upstream v0.1.4 (values.yaml).
   # Leave `image` unset unless you are moving `upstream.version` too.
 
   # OIDC for client auth (the openshell CLI authenticates via OIDC).
@@ -133,7 +133,7 @@ gatewayIngress:
     enabled: false
 
 # ─── Inference provider (sandbox model traffic) ───────────────────────────
-# Architecture (upstream OpenShell v0.1.3's provider-profile model):
+# Architecture (upstream OpenShell v0.1.4's provider-profile model):
 #   - The chart renders a provider profile: the endpoint host and port of
 #     `baseUrl`, and the `binaries` allowed to reach it.
 #   - A post-install Job imports the profile and creates the provider from it
@@ -146,7 +146,7 @@ gatewayIngress:
 #     sandbox's supervisor substitutes the real key in requests to the
 #     profile's endpoint, and dials the upstream itself.
 #   - The key is bound to that host and port. `binaries` gates which processes
-#     may reach the endpoint; upstream v0.1.3 does not yet restrict the key by
+#     may reach the endpoint; upstream v0.1.4 does not yet restrict the key by
 #     calling binary.
 inferenceProvider:
   enabled: true
