@@ -87,6 +87,11 @@ data:
     allow_unauthenticated_users = true
     {{- end }}
 
+    [openshell.gateway.credential_storage]
+    # The provider credentials' key-encryption key, from the Secret the gateway
+    # container takes this variable from (gateway.credentialStorage).
+    key_encryption_key_env = "OPENSHELL_GATEWAY_CREDENTIAL_KEY_ENCRYPTION_KEY"
+
     {{- if .Values.gateway.sandboxJwt.enabled }}
 
     [openshell.gateway.gateway_jwt]

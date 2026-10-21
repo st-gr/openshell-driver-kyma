@@ -4,6 +4,38 @@ All notable changes to openshell-driver-kyma are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.10.4] — 2026-10-21
+
+Keeps stored provider credentials readable across gateway restarts.
+
+### Fixed
+
+- **The gateway lost its credential encryption key on every restart.** The
+  gateway encrypts provider credentials in its DB with a key-encryption key.
+  The chart configured none, so the gateway kept that key in a file on its
+  `gateway-state` emptyDir: with `gateway.dbPersistence.enabled`, every pod
+  restart (each upgrade among them) left the stored credentials undecryptable
+  ("encrypted with a different key-encryption key"). The chart now does what
+  upstream's chart does: it generates the key once as the Secret
+  `<fullname>-credential-storage-key-encryption-key` (reused on every upgrade,
+  kept on uninstall) and hands it to the gateway through
+  `[openshell.gateway.credential_storage] key_encryption_key_env`.
+
+### Added
+
+- **`gateway.credentialStorage.existingSecret`**, upstream's
+  `server.credentialStorage.existingSecret`: use your own Secret (key
+  `key-encryption-key`, a base64-encoded 32-byte value) instead of the generated
+  one. Needed with `helm template` (GitOps), which cannot reuse a generated key.
+
+### Upgrading
+
+- Credentials stored before this upgrade were encrypted with a key that the
+  next restart throws away, and the upgrade restarts the gateway: register them
+  again afterwards (the chart's inference-provider hook does this for its own
+  provider on every upgrade). Credentials stored before the last restart were
+  already unreadable.
+
 ## [0.10.3] — 2026-10-19
 
 Moves to upstream OpenShell v0.1.4.

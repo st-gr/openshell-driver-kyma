@@ -62,6 +62,9 @@
 #      renders it ([openshell.gateway.ocsf_log], refusing what the gateway refuses),
 #      with extra volumes to keep it; and the cluster-scoped RBAC can be left to a
 #      cluster admin (rbac.clusterScoped), as upstream's chart allows.
+#  11. the gateway's credential storage key-encryption key comes from a retained Secret,
+#      chart-generated or named (upstream's server.credentialStorage), never from a file on
+#      the gateway-state emptyDir, so stored provider credentials survive a pod restart.
 # Needs helm, python3 with PyYAML, and network access (for check 1).
 set -euo pipefail
 
@@ -458,6 +461,11 @@ try bad-9-ocsf-enabled-string 'gateway.ocsfLog.enabled must be a boolean' t --se
 try good-10-rate-limit '' t --set gateway.grpcRateLimit.requests=120 --set gateway.grpcRateLimit.windowSeconds=60
 try bad-10-rate-limit-one 'gateway.grpcRateLimit requires both requests and windowSeconds' t --set gateway.grpcRateLimit.requests=120
 try bad-10-rate-limit-negative 'must not be negative' t --set gateway.grpcRateLimit.requests=-1 --set gateway.grpcRateLimit.windowSeconds=60
+# 11. The credential storage key-encryption key (upstream's server.credentialStorage): a
+# retained, chart-generated Secret by default, or the operator's own Secret.
+try good-11-kek-existing '' t --set gateway.credentialStorage.existingSecret=my-kek
+try bad-11-kek-existing-name 'gateway.credentialStorage.existingSecret must be a valid Kubernetes Secret name' t \
+	--set gateway.credentialStorage.existingSecret=Not_A_Name
 try good-9-no-cluster-rbac '' t --set rbac.clusterScoped.create=false
 try good-9-no-cluster-rbac-managed '' t --set driver.workspaceMode=managed --set gateway.sandboxJwt.gatewayId=gw \
 	--set rbac.clusterScoped.create=false
@@ -530,7 +538,7 @@ render_as t "${inference_common[@]}" --set "inferenceProvider.baseUrl=$inference
 	--set "inferenceProvider.modelId=$inference_model" >"$WORK/rbac-inference.yaml"
 
 python3 - "$WORK" "$CHART" "$KYMA_ARGS" "$ALL_OPTIONS" <<'PY'
-import glob, json, pathlib, re, sys
+import base64, glob, json, pathlib, re, sys
 import yaml
 
 work, chart, kyma_args, all_options = (pathlib.Path(a) for a in sys.argv[1:5])
@@ -1489,6 +1497,50 @@ if rendered("good-10-rate-limit") is not None:
         failures.append(f"good-10-rate-limit: [openshell.gateway] rate limit is {got}, want 120 per 60 s")
 if any(k.startswith("grpc_rate_limit") for k in gateway_toml("render-shared-true").get("openshell.gateway", {})):
     failures.append("render-shared-true: the gateway TOML has a gRPC rate limit without gateway.grpcRateLimit")
+# 11. The credential storage key-encryption key, as upstream's chart renders it: the gateway
+# TOML names the environment variable, the gateway container takes it from the Secret, and
+# the chart generates that Secret (retained; the variable is a base64 32-byte key) unless
+# one is named.
+# Without it the gateway keeps its key in a file on the gateway-state emptyDir, so every
+# pod restart makes the credentials it stored undecryptable.
+KEK_ENV = "OPENSHELL_GATEWAY_CREDENTIAL_KEY_ENCRYPTION_KEY"
+KEK_SECRET = "t-openshell-driver-kyma-credential-storage-key-encryption-key"
+
+def kek_secrets(name):
+    return [d for d in docs(work / f"{name}.yaml") if d.get("kind") == "Secret"
+            and d["metadata"]["name"].endswith("-credential-storage-key-encryption-key")]
+
+for name, secret_name, generated in (("render-shared-true", KEK_SECRET, True),
+                                     ("good-11-kek-existing", "my-kek", False)):
+    if name != "render-shared-true" and rendered(name) is None:
+        continue
+    storage = gateway_toml(name).get("openshell.gateway.credential_storage")
+    if storage != {"key_encryption_key_env": KEK_ENV}:
+        failures.append(f"{name}: [openshell.gateway.credential_storage] is {storage}, "
+                        f"want key_encryption_key_env = {KEK_ENV}")
+    gateway, _, _, _ = gateway_parts(name)
+    want_env = {"name": KEK_ENV, "valueFrom": {"secretKeyRef": {"name": secret_name, "key": "key-encryption-key"}}}
+    if want_env not in gateway.get("env", []):
+        failures.append(f"{name}: the gateway container has no {KEK_ENV} from Secret {secret_name}: "
+                        f"{gateway.get('env')}")
+    secrets = kek_secrets(name)
+    if not generated:
+        if secrets:
+            failures.append(f"{name}: an existingSecret is named, yet the chart renders its own KEK Secret")
+        continue
+    ok = len(secrets) == 1 and secrets[0]["metadata"]["name"] == KEK_SECRET and secrets[0].get("type") == "Opaque" \
+        and (secrets[0]["metadata"].get("annotations") or {}).get("helm.sh/resource-policy") == "keep"
+    try:
+        # Secret data is base64 of what the variable holds, which the gateway decodes again.
+        text = base64.b64decode(secrets[0]["data"]["key-encryption-key"], validate=True) if ok else b""
+        key = base64.b64decode(text, validate=True)
+    except (KeyError, ValueError):
+        key = b""
+    if not ok or len(key) != 32:
+        failures.append(f"{name}: want one retained Opaque Secret {KEK_SECRET} whose key-encryption-key "
+                        f"is a base64 32-byte key, got {[s['metadata'] for s in secrets]} (key {len(key)} bytes)")
+if kek_secrets("rbac-shared-no-gateway"):
+    failures.append("rbac-shared-no-gateway: a KEK Secret renders without the in-pod gateway")
 # The extra volumes and mounts land on the pod and the gateway container, after the chart's own.
 if rendered("good-9-ocsf-never") is not None:
     gateway, pod, _, _ = gateway_parts("good-9-ocsf-never")

@@ -236,6 +236,15 @@ The provider and its profile live in the gateway's DB. That is what
 restart wipes them, and sandboxes cannot be created with `--provider` until
 they are registered again (step 3b).
 
+The provider's credentials are stored encrypted, with a key the chart keeps in
+the Secret `<fullname>-credential-storage-key-encryption-key` (upstream's
+default). The chart generates it on the first install, reuses it on every
+upgrade and leaves it behind on uninstall; losing it makes every stored
+credential undecryptable, so back it up with the DB. `helm template` (GitOps)
+cannot reuse it; there, create your own Secret with a key `key-encryption-key`
+holding a base64-encoded 32-byte value (`head -c 32 /dev/urandom | base64`) and
+name it in `gateway.credentialStorage.existingSecret`.
+
 **NetworkPolicies.** Upstream fences sandboxes per namespace
 (`openshell-sandbox-workloads` and `openshell-sandbox-supervisors`, created by
 the driver). Kubernetes NetworkPolicies are additive, so the chart adds none
