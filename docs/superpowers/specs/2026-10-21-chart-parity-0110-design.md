@@ -294,6 +294,11 @@ explains which. One helper decides the name for both the gateway and the
 driver, so they can never diverge. The `ods` rc test runs with the private
 values unchanged; no `gateway.name` is added to them.
 
+**Source check done (2026-10-21, v0.1.4):** the name feeds only the OCSF
+identity, the OTel resource and the in-process driver build context; our driver
+uses it only for its OTel resource. Nothing persists it, so the fullname
+default applies to all installs and no `lookup` fallback is built.
+
 ## 6. Behaviour changes for existing installs
 
 | Change | Who is affected | Mitigation |
