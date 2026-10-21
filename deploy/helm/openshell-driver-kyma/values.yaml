@@ -475,6 +475,15 @@ gateway:
     limits:
       cpu: 500m
       memory: 1Gi
+  # The key that encrypts provider credentials in the gateway DB (upstream's
+  # server.credentialStorage). By default the chart generates it once as the Secret
+  # <fullname>-credential-storage-key-encryption-key, reuses it on every upgrade and
+  # keeps it on uninstall: losing it makes every stored credential undecryptable.
+  # `helm template` (GitOps) cannot reuse it and renders a new key each time; name a
+  # pre-created Secret instead, with a key "key-encryption-key" holding a
+  # base64-encoded 32-byte value.
+  credentialStorage:
+    existingSecret: ""
   # Gateway DB persistence. The gateway stores provider profiles and providers
   # in its DB (set via gRPC by the post-install Job, not via TOML). Without
   # persistence, a gateway pod restart wipes them, and sandboxes cannot be

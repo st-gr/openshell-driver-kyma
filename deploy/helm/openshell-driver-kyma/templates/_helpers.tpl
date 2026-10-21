@@ -112,6 +112,30 @@ gateway container (to mount it at /etc/openshell-jwt).
 {{- end }}
 
 {{/*
+Secret holding the gateway's credential storage key-encryption key (upstream's
+server.credentialStorage): gateway.credentialStorage.existingSecret when set, else the
+chart-generated Secret. Its key, and the gateway environment variable the TOML names,
+are upstream's.
+*/}}
+{{- define "openshell-driver-kyma.kekSecretName" -}}
+{{- $existing := .Values.gateway.credentialStorage.existingSecret -}}
+{{- if and (ne $existing nil) (ne $existing "") -}}
+{{- if not (kindIs "string" $existing) -}}
+{{- fail (printf "gateway.credentialStorage.existingSecret must be a Kubernetes Secret name, got %s" (kindOf $existing)) -}}
+{{- end -}}
+{{- if gt (len $existing) 253 -}}
+{{- fail "gateway.credentialStorage.existingSecret must be no more than 253 characters" -}}
+{{- end -}}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $existing) -}}
+{{- fail "gateway.credentialStorage.existingSecret must be a valid Kubernetes Secret name" -}}
+{{- end -}}
+{{- $existing -}}
+{{- else -}}
+{{- printf "%s-credential-storage-key-encryption-key" (include "openshell-driver-kyma.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 Server TLS Secret name (auto-created by `generate-certs`, unused when --disable-tls).
 */}}
 {{- define "openshell-driver-kyma.serverTlsSecretName" -}}
