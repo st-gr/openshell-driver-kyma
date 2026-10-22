@@ -1,0 +1,60 @@
+{{- if and .Values.gateway.enabled .Values.gateway.certManager.enabled (eq (toString .Values.gateway.certManager.api) "cert.gardener.cloud") -}}
+# The gateway's PKI from Gardener's certificate service (gateway.certManager.api,
+# cert.gardener.cloud, available on Kyma): the same five objects as cert-manager-pki.yaml
+# and the same Secrets, in Gardener's schema. An issuer reference names the Issuer and its
+# namespace (no kind or group), and the CA Issuer names the CA's private-key Secret in
+# privateKeySecretRef. Gardener refuses a certificate that outlives its CA and a duration
+# under twice the renewal window (certManagerGuards).
+{{- $fullname := include "openshell-driver-kyma.fullname" . }}
+{{- /* The fields both APIs share are openshell-driver-kyma.pkiCertSpec. */}}
+apiVersion: cert.gardener.cloud/v1alpha1
+kind: Issuer
+metadata:
+  name: {{ $fullname }}-selfsigned
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+spec:
+  selfSigned: {}
+---
+apiVersion: cert.gardener.cloud/v1alpha1
+kind: Certificate
+metadata:
+  name: {{ $fullname }}-ca
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+spec:
+  {{- include "openshell-driver-kyma.pkiCertSpec" (dict "ctx" . "role" "ca") | nindent 2 }}
+  issuerRef:
+    name: {{ $fullname }}-selfsigned
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: cert.gardener.cloud/v1alpha1
+kind: Issuer
+metadata:
+  name: {{ $fullname }}-ca-issuer
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+spec:
+  ca:
+    privateKeySecretRef:
+      name: {{ include "openshell-driver-kyma.caSecretName" . | quote }}
+      namespace: {{ .Release.Namespace }}
+{{- range $role := list "server" "client" }}
+---
+apiVersion: cert.gardener.cloud/v1alpha1
+kind: Certificate
+metadata:
+  name: {{ $fullname }}-{{ $role }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" $ | nindent 4 }}
+spec:
+  {{- include "openshell-driver-kyma.pkiCertSpec" (dict "ctx" $ "role" $role) | nindent 2 }}
+  issuerRef:
+    name: {{ $fullname }}-ca-issuer
+    namespace: {{ $.Release.Namespace }}
+{{- end }}
+{{- end }}

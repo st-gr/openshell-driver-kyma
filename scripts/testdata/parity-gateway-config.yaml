@@ -1,0 +1,7 @@
+# gatewayConfig fixture for scripts/check-gateway-config.sh: TOML-only gateway
+# settings, merged into the chart's [openshell.gateway] table.
+gatewayConfig:
+  openshell.gateway:
+    policy_validation_failure_mode: retain_last_valid
+    ssh_session_ttl_secs: 600
+    image_preparation_timeout_seconds: 300

@@ -1,0 +1,72 @@
+name: parity-smoke
+
+# Proves the chart's cert-manager, Vault and SPIFFE options on a kind cluster,
+# one mode per job: scripts/parity-smoke.sh installs the mode's prerequisites
+# (pinned in its header), runs scripts/interop-smoke.sh with the mode's values
+# file, then asserts what the option changed.
+#
+# SECURITY: this workflow holds NO secrets and takes no inputs. It runs on
+# pull_request, which forks can reach; there is nothing here to exfiltrate.
+# Do not add secrets to this file.
+on:
+  pull_request:
+    paths:
+      - deploy/helm/openshell-driver-kyma/**
+      - scripts/**
+      # The driver image the smoke builds.
+      - crates/**
+      - Cargo.toml
+      - Cargo.lock
+      - deploy/Dockerfile
+      - .github/workflows/parity-smoke.yml
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+# A newer push to the same ref makes an in-progress run moot.
+concurrency:
+  group: parity-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: parity smoke (${{ matrix.mode }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [cert-manager, vault, spiffe]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing here pushes; keep the token out of .git/config.
+          persist-credentials: false
+
+      - name: Create kind cluster
+        uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
+        with:
+          cluster_name: parity
+          # The kind release the smoke was verified with (the action's own
+          # default moves with the action).
+          version: v0.31.0
+
+      - name: Build the driver image
+        run: docker build -f deploy/Dockerfile -t openshell-driver-kyma:smoke .
+
+      - name: Load the driver image into kind
+        run: kind load docker-image openshell-driver-kyma:smoke --name parity
+
+      - name: Run the parity smoke
+        env:
+          DRIVER_IMAGE: openshell-driver-kyma:smoke
+          MODE: ${{ matrix.mode }}
+        run: ./scripts/parity-smoke.sh "$MODE"
+
+      - name: Tear down
+        if: always()
+        run: kind delete cluster --name parity || true

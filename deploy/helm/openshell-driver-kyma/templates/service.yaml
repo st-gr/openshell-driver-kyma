@@ -1,3 +1,14 @@
+{{- $type := default "ClusterIP" .Values.gatewayService.type -}}
+{{- if not (has $type (list "ClusterIP" "NodePort" "LoadBalancer")) -}}
+{{- fail "gatewayService.type must be ClusterIP, NodePort or LoadBalancer" -}}
+{{- end -}}
+{{- if and (not (kindIs "invalid" .Values.gatewayService.nodePort)) (ne $type "NodePort") -}}
+{{- fail "gatewayService.nodePort requires gatewayService.type=NodePort" -}}
+{{- end -}}
+{{- if and (ne $type "ClusterIP") (not .Values.gatewayService.enabled) -}}
+{{- fail (printf "gatewayService.type=%s requires gatewayService.enabled=true" $type) -}}
+{{- end -}}
+{{- $split := ne $type "ClusterIP" -}}
 apiVersion: v1
 kind: Service
 metadata:
@@ -6,20 +17,25 @@ metadata:
   labels:
     {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
 spec:
-  type: ClusterIP
+  type: {{ $type }}
   selector:
     {{- include "openshell-driver-kyma.selectorLabels" . | nindent 4 }}
   ports:
+    {{- if not $split }}
     - name: health
       port: {{ .Values.driver.healthPort }}
       targetPort: health
       protocol: TCP
+    {{- end }}
     {{- if .Values.gatewayService.enabled }}
     - name: grpc
       port: {{ .Values.gateway.grpcPort }}
       targetPort: grpc
       protocol: TCP
-    {{- if include "openshell-driver-kyma.serviceHostsEnabled" . }}
+      {{- if and (eq $type "NodePort") (not (kindIs "invalid" .Values.gatewayService.nodePort)) }}
+      nodePort: {{ .Values.gatewayService.nodePort }}
+      {{- end }}
+    {{- if and (not $split) (include "openshell-driver-kyma.serviceHostsEnabled" .) }}
     # The same gateway listener under an http-* name: Istio then speaks HTTP/1.1 to
     # it for sandbox service URLs, which lets WebSocket upgrades through.
     - name: http-services
@@ -36,3 +52,31 @@ spec:
       targetPort: gw-metrics
       protocol: TCP
     {{- end }}
+{{- if $split }}
+---
+# A LoadBalancer or NodePort Service is reachable from outside the cluster, so it
+# carries only the gateway's own ports. The driver's health port and the http-services
+# port (the ingress gateway's route for sandbox service URLs) stay cluster-internal.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "openshell-driver-kyma.internalServiceName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "openshell-driver-kyma.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: health
+      port: {{ .Values.driver.healthPort }}
+      targetPort: health
+      protocol: TCP
+    {{- if include "openshell-driver-kyma.serviceHostsEnabled" . }}
+    - name: http-services
+      port: 80
+      targetPort: grpc
+      protocol: TCP
+    {{- end }}
+{{- end }}

@@ -108,12 +108,15 @@ helm template check "$CHART" --set gateway.enabled=true --set gateway.sandboxJwt
   --set gatewayService.enabled=true --set gatewayIngress.enabled=true --set gatewayIngress.domain=example.org \
   --set gateway.tls.enabled=true --set gateway.oidc.issuer=https://issuer.example \
   --set gateway.oidc.audience=osh-client --set gateway.oidc.clientId=osh-client \
+  --set 'gateway.sandboxJwt.serverDnsNames={gw.example.org}' --set 'gateway.sandboxJwt.serverIpAddresses={10.0.0.5}' \
   --show-only templates/gateway-jwt-pki-hook.yaml > "$WORK/pki-hook.yaml"
 python3 - "$WORK/pki-hook.yaml" > "$WORK/pki-args.txt" <<'PY'
 import sys, yaml
 job = next(d for d in yaml.safe_load_all(open(sys.argv[1])) if d and d.get("kind") == "Job")
 print("\n".join(a.replace("$(POD_NAMESPACE)", "check") for a in job["spec"]["template"]["spec"]["containers"][0]["args"]))
 PY
+grep -q -- '--server-san=10.0.0.5' "$WORK/pki-args.txt" \
+  || { echo "ERROR: the PKI hook render has no extra --server-san; nothing to test" >&2; exit 1; }
 grep -q -- '--backend-ca-configmap-name=' "$WORK/pki-args.txt" \
   || { echo "ERROR: the PKI hook render has no --backend-ca-configmap-name; nothing to test" >&2; exit 1; }
 pki_args=()
@@ -126,6 +129,36 @@ if [ "$rc" -ne 0 ]; then
   exit 1
 fi
 echo "GATEWAY_ARGS_ACCEPTED (pki-hook, ${#pki_args[@]} args)"
+# With certificates from cert-manager the PKI hook runs --jwt-only, and with remote access
+# a post-install Job copies the issued CA with the --backend-ca-* flags. Both run the same
+# image's generate-certs, so their rendered arguments must be known too.
+check_job_args() { # label template job-name-suffix required-flag
+  local label=$1 template=$2 suffix=$3 required=$4 rc=0 out line job_args=()
+  helm template check "$CHART" --set gateway.enabled=true --set gateway.sandboxJwt.enabled=true \
+    --set gatewayService.enabled=true --set gatewayIngress.enabled=true --set gatewayIngress.domain=example.org \
+    --set gateway.tls.enabled=true --set gateway.oidc.issuer=https://issuer.example \
+    --set gateway.oidc.audience=osh-client --set gateway.oidc.clientId=osh-client \
+    --set gateway.certManager.enabled=true \
+    --show-only "$template" > "$WORK/job-$label.yaml"
+  python3 - "$WORK/job-$label.yaml" "$suffix" > "$WORK/job-$label-args.txt" <<'PY'
+import sys, yaml
+job = next(d for d in yaml.safe_load_all(open(sys.argv[1]))
+           if d and d.get("kind") == "Job" and d["metadata"]["name"].endswith(sys.argv[2]))
+print("\n".join(a.replace("$(POD_NAMESPACE)", "check") for a in job["spec"]["template"]["spec"]["containers"][0]["args"]))
+PY
+  grep -qx -- "$required" "$WORK/job-$label-args.txt" \
+    || { echo "ERROR: the $label render has no $required; nothing to test" >&2; exit 1; }
+  while IFS= read -r line; do job_args+=("$line"); done < "$WORK/job-$label-args.txt"
+  out="$(docker run --rm --entrypoint openshell-gateway "$IMAGE" "${job_args[@]}" --help 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "GATEWAY_ARGS_REJECTED ($label, exit $rc)"
+    head -5 <<<"$out"
+    exit 1
+  fi
+  echo "GATEWAY_ARGS_ACCEPTED ($label, ${#job_args[@]} args)"
+}
+check_job_args pki-hook-jwt-only templates/gateway-jwt-pki-hook.yaml -jwt-pki-hook --jwt-only
+check_job_args backend-ca templates/gateway-backend-ca-job.yaml -backend-ca --backend-ca-fail-on-timeout
 check_args remote-access \
   --set gatewayIngress.enabled=true \
   --set gatewayIngress.domain=example.org \
@@ -143,12 +176,51 @@ check_args operator-auth \
   --set gateway.tls.enabled=true \
   --set gateway.tls.clientCa.enabled=true \
   --set-json 'gateway.extraArgs=["--enable-operator-auth=true"]'
+# Extra server SANs reach the gateway as one comma-separated --server-san (with the
+# service-host wildcard too), and the client CA from its own Secret's path.
+check_args sans-client-ca \
+  --set 'gateway.sandboxJwt.serverDnsNames={gw.example.org}' \
+  --set 'gateway.sandboxJwt.serverIpAddresses={10.0.0.5}' \
+  --set gatewayIngress.enabled=true --set gatewayIngress.domain=example.org \
+  --set gatewayIngress.serviceHosts.enabled=true \
+  --set-json 'gatewayIngress.allowedCidrs=["203.0.113.0/24"]' \
+  --set gateway.oidc.issuer=https://issuer.example \
+  --set gateway.oidc.audience=osh-client --set gateway.oidc.clientId=osh-client \
+  --set gateway.oidc.authOnly=true \
+  --set gateway.tls.enabled=true
+check_args sans-client-ca-secret \
+  --set 'gateway.sandboxJwt.serverDnsNames={gw.example.org}' \
+  --set 'gateway.sandboxJwt.serverIpAddresses={10.0.0.5}' \
+  --set gateway.tls.enabled=true --set gateway.tls.clientCa.enabled=true \
+  --set gateway.tls.clientCa.secretName=user-ca
 check_args rbac-roles \
   --set gateway.oidc.issuer=https://issuer.example \
   --set gateway.oidc.audience=osh-client \
   --set gateway.oidc.rolesClaim=groups \
   --set gateway.oidc.adminRole=osh-admin \
   --set gateway.oidc.userRole=osh-user
+check_args oidc-extras \
+  --set gateway.oidc.issuer=https://issuer.example.org \
+  --set gateway.oidc.audience=a \
+  --set gateway.oidc.jwksTtl=600 \
+  --set gateway.oidc.scopesClaim=scp \
+  --set 'gateway.oidc.jwksAllowedOrigins={https://keys.example.org,https://k2.example.org}' \
+  --set gateway.oidc.dangerouslyAllowInsecureHttp=true
+
+# gateway.dbPersistence.externalDbSecret hands the database URL over as OPENSHELL_DB_URL
+# (no --db-url flag). Positive evidence that the pinned gateway reads it: a URL with an
+# unknown scheme is rejected with that URL in the error, which a gateway that ignored the
+# variable could not produce (it would stop at the unrelated state-directory failure).
+check_args external-db-secret --set gateway.dbPersistence.externalDbSecret=osh-db
+rc=0
+out="$(docker run --rm -e OPENSHELL_DB_URL=bogus://example/db --entrypoint openshell-gateway "$IMAGE" \
+  --compute-driver kyma --compute-driver-socket /run/openshell/driver.sock --disable-tls 2>&1)" || rc=$?
+if ! grep -q "unsupported database URL scheme: bogus://example/db" <<<"$out"; then
+  echo "GATEWAY_DB_URL_ENV_NOT_READ (exit $rc); output:" >&2
+  head -10 <<<"$out" >&2
+  exit 1
+fi
+echo "GATEWAY_DB_URL_ENV_READ"
 
 # check_config LABEL TOML: run the gateway with that config. Config parsing happens before
 # anything else, so a schema error is told apart from the runtime failure that follows
@@ -213,4 +285,95 @@ PY
     || { echo "ERROR: the OCSF render has no [openshell.gateway.ocsf_log] table; nothing to test" >&2; exit 1; }
   check_config "ocsf-$variant" "$WORK/gateway-ocsf-$variant.toml"
 done
+# gatewayConfig, upstream's TOML passthrough, merged into the chart's tables.
+render templates/gateway-config.yaml -f scripts/testdata/parity-gateway-config.yaml \
+  > "$WORK/rendered-gateway-config.yaml"
+python3 - "$WORK/rendered-gateway-config.yaml" "$WORK/gateway-passthrough.toml" <<'PY'
+import sys, yaml
+doc = yaml.safe_load(open(sys.argv[1]))
+open(sys.argv[2], "w").write(doc["data"]["gateway.toml"])
+PY
+grep -q '^ *image_preparation_timeout_seconds = 300$' "$WORK/gateway-passthrough.toml" \
+  || { echo "ERROR: the gatewayConfig render has no image_preparation_timeout_seconds; nothing to test" >&2; exit 1; }
+check_config gateway-config-passthrough "$WORK/gateway-passthrough.toml"
+# The gateway's OTLP trace export (gateway.otlp).
+render templates/gateway-config.yaml --set gateway.otlp.endpoint=http://otel.example.org:4318 \
+  --set gateway.otlp.serviceName=osh-gw > "$WORK/rendered-otlp.yaml"
+python3 - "$WORK/rendered-otlp.yaml" "$WORK/gateway-otlp.toml" <<'PY'
+import sys, yaml
+doc = yaml.safe_load(open(sys.argv[1]))
+open(sys.argv[2], "w").write(doc["data"]["gateway.toml"])
+PY
+grep -q '^\[openshell.gateway.otlp\]' "$WORK/gateway-otlp.toml" \
+  || { echo "ERROR: the OTLP render has no [openshell.gateway.otlp] table; nothing to test" >&2; exit 1; }
+check_config otlp "$WORK/gateway-otlp.toml"
+# mTLS-only authentication: a client CA without OIDC (allow_unauthenticated_users = false).
+render templates/gateway-config.yaml --set gateway.tls.enabled=true \
+  --set gateway.tls.clientCa.enabled=true > "$WORK/rendered-mtls-auth.yaml"
+python3 - "$WORK/rendered-mtls-auth.yaml" "$WORK/gateway-mtls-auth.toml" <<'PY'
+import sys, yaml
+doc = yaml.safe_load(open(sys.argv[1]))
+open(sys.argv[2], "w").write(doc["data"]["gateway.toml"])
+PY
+grep -q '^ *allow_unauthenticated_users = false$' "$WORK/gateway-mtls-auth.toml" \
+  || { echo "ERROR: the mTLS render has no allow_unauthenticated_users = false; nothing to test" >&2; exit 1; }
+check_config mtls-auth "$WORK/gateway-mtls-auth.toml"
+# The Kubernetes Secrets credential driver (gateway.credentialDrivers.kubernetesSecrets):
+# credential_drivers and the driver's table, with no credential_storage table.
+render templates/gateway-config.yaml --set gateway.credentialDrivers.kubernetesSecrets.enabled=true \
+  --set gateway.credentialDrivers.kubernetesSecrets.namespace=osh-creds > "$WORK/rendered-k8s-secrets.yaml"
+python3 - "$WORK/rendered-k8s-secrets.yaml" "$WORK/gateway-k8s-secrets.toml" <<'PY'
+import sys, yaml
+doc = yaml.safe_load(open(sys.argv[1]))
+open(sys.argv[2], "w").write(doc["data"]["gateway.toml"])
+PY
+grep -q '^\[openshell.credential_drivers.kubernetes-secrets\]' "$WORK/gateway-k8s-secrets.toml" \
+  || { echo "ERROR: the k8s-secrets render has no [openshell.credential_drivers.kubernetes-secrets]; nothing to test" >&2; exit 1; }
+check_config k8s-secrets "$WORK/gateway-k8s-secrets.toml"
+# check_config stops at the state directory, before the gateway builds the credential
+# driver, which is where the driver's own table is parsed. With a writable HOME it gets
+# that far: positive evidence that the table was accepted is the driver failing to find
+# a cluster (an unknown field fails earlier, naming the table). The sandbox-JWT table is
+# left out: its key files are not mounted here, and the gateway reads them first.
+awk '/^\[/ { skip = ($0 == "[openshell.gateway.gateway_jwt]") } !skip' "$WORK/gateway-k8s-secrets.toml" \
+  > "$WORK/gateway-k8s-secrets-driver.toml"
+rc=0
+out="$(docker run --rm -e HOME=/tmp -v "$WORK/gateway-k8s-secrets-driver.toml:/etc/openshell/gateway.toml:ro" \
+  --entrypoint openshell-gateway "$IMAGE" --config /etc/openshell/gateway.toml --compute-driver kyma \
+  --compute-driver-socket /run/openshell/driver.sock --disable-tls --db-url sqlite::memory: 2>&1)" || rc=$?
+if ! grep -q "failed to configure kubernetes-secrets credential" <<<"$out"; then
+  echo "GATEWAY_CREDENTIAL_DRIVER_NOT_BUILT (k8s-secrets, exit $rc); output:" >&2
+  head -10 <<<"$out" >&2
+  exit 1
+fi
+echo "GATEWAY_CREDENTIAL_DRIVER_ACCEPTED (k8s-secrets)"
+# The Vault credential driver (gateway.credentialDrivers.vault): its table with every key
+# the chart renders, including ca_bundle and an integer timeout_secs.
+render templates/gateway-config.yaml --set gateway.credentialDrivers.vault.enabled=true \
+  --set gateway.credentialDrivers.vault.address=https://vault.example.org \
+  --set gateway.credentialDrivers.vault.role=osh --set gateway.credentialDrivers.vault.timeoutSecs=30 \
+  --set gateway.credentialDrivers.vault.caConfigMapName=vault-ca > "$WORK/rendered-vault.yaml"
+python3 - "$WORK/rendered-vault.yaml" "$WORK/gateway-vault.toml" <<'PY'
+import sys, yaml
+doc = yaml.safe_load(open(sys.argv[1]))
+open(sys.argv[2], "w").write(doc["data"]["gateway.toml"])
+PY
+grep -q '^\[openshell.credential_drivers.vault\]' "$WORK/gateway-vault.toml" \
+  || { echo "ERROR: the Vault render has no [openshell.credential_drivers.vault]; nothing to test" >&2; exit 1; }
+check_config vault "$WORK/gateway-vault.toml"
+# As for k8s-secrets: the driver builds from its table, and reads the CA bundle first,
+# at the path the chart renders and mounts. The file is not mounted here, so its absence,
+# named with that path, is the positive evidence that the table was accepted up to it.
+awk '/^\[/ { skip = ($0 == "[openshell.gateway.gateway_jwt]") } !skip' "$WORK/gateway-vault.toml" \
+  > "$WORK/gateway-vault-driver.toml"
+rc=0
+out="$(docker run --rm -e HOME=/tmp -v "$WORK/gateway-vault-driver.toml:/etc/openshell/gateway.toml:ro" \
+  --entrypoint openshell-gateway "$IMAGE" --config /etc/openshell/gateway.toml --compute-driver kyma \
+  --compute-driver-socket /run/openshell/driver.sock --disable-tls --db-url sqlite::memory: 2>&1)" || rc=$?
+if ! tr -d '\n│ ' <<<"$out" | grep -q "failedtoreadVaultCAbundle'/etc/openshell-tls/vault-ca/ca.crt'"; then
+  echo "GATEWAY_CREDENTIAL_DRIVER_NOT_BUILT (vault, exit $rc); output:" >&2
+  head -10 <<<"$out" >&2
+  exit 1
+fi
+echo "GATEWAY_CREDENTIAL_DRIVER_ACCEPTED (vault)"
 echo "GATEWAY_CONFIG_ACCEPTED"

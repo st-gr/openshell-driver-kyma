@@ -2,7 +2,7 @@
 {{- if not (kindIs "bool" $cluster.create) -}}
 {{- fail (printf "rbac.clusterScoped.create must be a boolean (true or false), got the %s %q." (kindOf $cluster.create) (toString $cluster.create)) -}}
 {{- end -}}
-{{- if $cluster.create }}
+{{- if and .Values.rbac.create $cluster.create }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:

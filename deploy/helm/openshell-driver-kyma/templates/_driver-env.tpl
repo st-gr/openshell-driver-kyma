@@ -38,14 +38,12 @@ scripts/check-chart-render.sh fails CI when an upstream option is missing here.
 - name: OPENSHELL_COMPUTE_DRIVER_BIND
   value: {{ . | quote }}
 {{- end }}
-{{- with $d.otlpEndpoint }}
+{{- with include "openshell-driver-kyma.driverOtlpEndpoint" . }}
 - name: OPENSHELL_OTLP_ENDPOINT
   value: {{ . | quote }}
 {{- end }}
-{{- with $d.gatewayName }}
 - name: OPENSHELL_GATEWAY_NAME
-  value: {{ . | quote }}
-{{- end }}
+  value: {{ default (include "openshell-driver-kyma.gatewayName" .) $d.gatewayName | quote }}
 {{- with $d.operatorNamespaceLabel }}
 - name: OPENSHELL_OPERATOR_NAMESPACE_LABEL
   value: {{ . | quote }}
@@ -131,7 +129,7 @@ scripts/check-chart-render.sh fails CI when an upstream option is missing here.
 - name: OPENSHELL_ENABLE_USER_NAMESPACES
   value: "true"
 {{- end }}
-{{- with $d.providerSpiffeWorkloadApiSocket }}
+{{- with $d.providerSpiffeWorkloadApiSocket | default (include "openshell-driver-kyma.gatewaySpiffeSocket" .) }}
 - name: OPENSHELL_PROVIDER_SPIFFE_WORKLOAD_API_SOCKET
   value: {{ . | quote }}
 {{- end }}

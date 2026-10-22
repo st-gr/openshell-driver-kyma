@@ -1,0 +1,15 @@
+# scripts/parity-smoke.sh vault: provider credentials in the dev-mode Vault the
+# script installs in namespace vault. It serves HTTPS with its own CA
+# (vault server -dev-tls), which the script copies into the ConfigMap named
+# here: the chart refuses plain HTTP to a non-loopback Vault. The port is
+# explicit, so the NetworkPolicy opens 8200 rather than 443.
+gateway:
+  credentialDrivers:
+    vault:
+      enabled: true
+      address: https://vault.vault.svc:8200
+      caConfigMapName: parity-smoke-vault-ca
+      mount: secret
+      kvVersion: "2"
+      authMethod: kubernetes
+      role: openshell-gateway

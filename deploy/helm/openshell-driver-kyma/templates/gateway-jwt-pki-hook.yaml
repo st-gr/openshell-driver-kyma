@@ -17,6 +17,11 @@
 # before-hook-creation,hook-succeeded. On reinstall the prior Job is
 # deleted; if the JWT Secret already exists from a prior install, certgen
 # detects that (K8sAction::SkipExists) and does nothing.
+{{- /* With gateway.certManager.enabled, cert-manager (cert-manager-pki.yaml) owns the
+  server and client Secrets: the hook runs `generate-certs --jwt-only` and creates
+  only the JWT keys, and the ingress gateway's CA ConfigMap is written after install
+  by gateway-backend-ca-job.yaml, once the issued Secret exists. */}}
+{{- $certManager := .Values.gateway.certManager.enabled }}
 {{- $hookName := printf "%s-jwt-pki-hook" (include "openshell-driver-kyma.fullname" .) }}
 apiVersion: v1
 kind: ServiceAccount
@@ -45,7 +50,7 @@ rules:
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "create"]
-  {{- if .Values.gatewayIngress.enabled }}
+  {{- if and .Values.gatewayIngress.enabled (not $certManager) }}
   # The chart CA's public certificate for the ingress gateway (gateway-destinationrule.yaml),
   # as upstream's chart grants it for its backendTLSPolicy.
   - apiGroups: [""]
@@ -123,23 +128,26 @@ spec:
           args:
             - generate-certs
             - --namespace=$(POD_NAMESPACE)
+            {{- if $certManager }}
+            - --jwt-only
+            - --jwt-secret-name={{ include "openshell-driver-kyma.jwtSecretName" . }}
+            {{- else }}
             - --server-secret-name={{ include "openshell-driver-kyma.serverTlsSecretName" . }}
             - --client-secret-name={{ include "openshell-driver-kyma.clientTlsSecretName" . }}
             - --jwt-secret-name={{ include "openshell-driver-kyma.jwtSecretName" . }}
             # The names clients verify the gateway under: this release's Service
             # (sandboxes, the provider hook, the ingress gateway) and loopback (a
             # port-forward). Upstream's own defaults name a release called "openshell".
-            {{- $service := include "openshell-driver-kyma.fullname" . }}
-            - --server-san={{ $service }}
-            - --server-san={{ $service }}.{{ .Release.Namespace }}
-            - --server-san={{ $service }}.{{ .Release.Namespace }}.svc
-            - --server-san={{ $service }}.{{ .Release.Namespace }}.svc.cluster.local
-            - --server-san=localhost
-            - --server-san=127.0.0.1
+            {{- /* The names are openshell-driver-kyma.pkiServerNames (an IPv6 address is a --server-san as is). */}}
+            {{- $names := include "openshell-driver-kyma.pkiServerNames" . | fromJson }}
+            {{- range concat $names.base (list $names.loopbackIp) $names.dnsNames $names.ipAddresses }}
+            - --server-san={{ . }}
+            {{- end }}
             {{- if .Values.gatewayIngress.enabled }}
             # The chart CA's public certificate as a ConfigMap (key ca.crt), which the
             # ingress gateway verifies the gateway pod against. Upstream's generator
             # creates it, and updates it whenever the CA changed, on every run.
             - --backend-ca-configmap-name={{ include "openshell-driver-kyma.gatewayCaConfigMapName" . }}
+            {{- end }}
             {{- end }}
 {{- end }}

@@ -1,0 +1,119 @@
+{{- if and .Values.gateway.enabled .Values.gateway.sandboxJwt.enabled .Values.gateway.certManager.enabled .Values.gatewayIngress.enabled -}}
+# Post-install / post-upgrade hook (upstream's <fullname>-certgen-backend-ca Job):
+# with certificates from gateway.certManager, polls for the issued server Secret and
+# copies its ca.crt into the ConfigMap the ingress gateway verifies the gateway pod
+# against (gateway-destinationrule.yaml). It runs after the release's resources,
+# Certificates included, are applied, so issuing has started before the poll does.
+# Without cert-manager the pre-install PKI hook writes that ConfigMap itself.
+# A renewed CA reaches the ConfigMap on the next helm upgrade.
+{{- $name := printf "%s-backend-ca" (include "openshell-driver-kyma.fullname" .) }}
+{{- $timeout := .Values.gateway.sandboxJwt.timeoutSeconds | int }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation
+rules:
+  # get only: the issued server Secret is read, and the JWT keys the pre-install PKI
+  # hook created are found and left alone (--jwt-only creates them only when missing).
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: {{ add $timeout 30 }}
+  ttlSecondsAfterFinished: 300
+  template:
+    metadata:
+      labels:
+        {{- include "openshell-driver-kyma.selectorLabels" . | nindent 8 }}
+        # No Istio sidecar: the pod only talks to the local apiserver.
+        sidecar.istio.io/inject: "false"
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: {{ $name }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: certgen
+          image: {{ include "openshell-driver-kyma.gatewayImage" . | quote }}
+          imagePullPolicy: {{ .Values.gateway.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          args:
+            - generate-certs
+            - --namespace=$(POD_NAMESPACE)
+            - --jwt-only
+            - --jwt-secret-name={{ include "openshell-driver-kyma.jwtSecretName" . }}
+            - --backend-ca-configmap-name={{ include "openshell-driver-kyma.gatewayCaConfigMapName" . }}
+            - --backend-ca-source-secret={{ include "openshell-driver-kyma.serverTlsSecretName" . }}
+            - --backend-ca-poll-timeout-seconds={{ $timeout }}
+            {{- if .Values.gateway.sandboxJwt.failOnTimeout }}
+            - --backend-ca-fail-on-timeout
+            {{- end }}
+{{- end }}

@@ -28,4 +28,29 @@ spec:
       sni: {{ $service }}
       subjectAltNames:
         - {{ $service }}
+{{- $internal := include "openshell-driver-kyma.internalServiceName" . -}}
+{{- if and (ne $internal (include "openshell-driver-kyma.fullname" .)) (include "openshell-driver-kyma.serviceHostsEnabled" .) }}
+---
+# The same TLS for the -internal Service, which serves the sandbox-services route
+# (http-services) when gatewayService.type is not ClusterIP. The certificate names the
+# release's Service, so SNI and the verified name stay that one.
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: {{ include "openshell-driver-kyma.fullname" . }}-gateway-tls-internal
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+spec:
+  host: {{ printf "%s.%s.svc.cluster.local" $internal .Release.Namespace }}
+  exportTo:
+    - {{ .Values.gatewayIngress.ingressNamespace | quote }}
+  trafficPolicy:
+    tls:
+      mode: SIMPLE
+      credentialName: {{ printf "configmap://%s/%s" .Release.Namespace (include "openshell-driver-kyma.gatewayCaConfigMapName" .) | quote }}
+      sni: {{ $service }}
+      subjectAltNames:
+        - {{ $service }}
+{{- end }}
 {{- end }}

@@ -1,0 +1,8 @@
+# scripts/parity-smoke.sh cert-manager: the gateway's TLS certificates from
+# cert-manager (gateway.certManager), which requires the gateway to serve TLS.
+gateway:
+  tls:
+    enabled: true
+  certManager:
+    enabled: true
+    api: cert-manager.io

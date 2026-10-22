@@ -23,9 +23,14 @@ image:
 # Role/RoleBinding (and the ClusterRole/Binding when sandboxJwt.enabled)
 # pointing at whatever SA name `serviceAccount.name` resolves to, so
 # the existing SA gets the same scoped permissions.
+#
+# `annotations` lands on that SA, for example a cloud workload-identity
+# annotation. There is one SA for the whole pod, so it applies to the driver
+# container as well as the gateway.
 serviceAccount:
   create: true
   name: openshell-driver
+  annotations: {}
 
 # Cluster-scoped RBAC of the driver (upstream's rbac.clusterScoped, since v0.1.3). Set
 # create=false for a namespace-admin install: a cluster admin then applies the
@@ -36,7 +41,16 @@ serviceAccount:
 # matching. The pre-install CRD check has a ClusterRole of its own: set
 # crdPreInstallCheck.enabled=false too. The names default to
 # <fullname>-driver-<release namespace>.
+#
+# rbac.create=false renders none of the chart's own Roles, RoleBindings, ClusterRole
+# or ClusterRoleBinding: the operator must supply equivalent RBAC, out of band, for
+# the driver's ServiceAccount, serviceAccount.name (default "openshell-driver", in
+# the release namespace), which every RoleBinding and the ClusterRoleBinding bind
+# to; the sandbox ServiceAccount has no RBAC. Helm hook objects (the gateway JWT PKI
+# hook, the inference provider hook and the CRD pre-install check) keep their own
+# Roles, because the hooks cannot run without them.
 rbac:
+  create: true
   clusterScoped:
     create: true
     clusterRoleName: ""
@@ -50,6 +64,7 @@ rbac:
 sandboxServiceAccount:
   create: true
   name: openshell-sandbox
+  annotations: {}
 
 # Driver configuration. The driver container takes no command-line arguments:
 # every key below renders as an environment variable in
@@ -201,8 +216,9 @@ driver:
   # http://collector.observability:4317. Plain http:// (upstream v0.1.4 builds
   # its exporter without TLS). With networkPolicy.enabled the driver pod may
   # then reach that port (80 when none is given), on any address.
+  # Empty defaults to gateway.otlp.endpoint.
   otlpEndpoint: ""
-  gatewayName: ""
+  gatewayName: ""            # "" = gateway.name, else the chart fullname
   # Secret with the client certificate sandboxes present to a TLS gateway
   # (OPENSHELL_CLIENT_TLS_SECRET_NAME). Empty defaults, when gateway.tls.enabled,
   # to the one the chart's PKI hook creates (gateway.sandboxJwt.
@@ -211,6 +227,8 @@ driver:
   # it to the release namespace, where shared-mode sandboxes find it only if
   # `namespace` is the release namespace.
   clientTlsSecretName: ""
+  # IP the sandboxes reach the gateway host on. Also the pod's hostAliases entry
+  # for host.docker.internal and host.openshell.internal.
   hostGatewayIp: ""
   providerSpiffeWorkloadApiSocket: ""
   # Operator mode: select namespaces by label, or by a file of names mounted
@@ -359,6 +377,26 @@ podLabels: {}
 # single source of truth.
 gateway:
   enabled: false
+  # Grace period of the whole pod (gateway and driver) on shutdown.
+  terminationGracePeriodSeconds: 30
+  # Gateway container probes (upstream's timings). Each map is merged over the
+  # defaults shown, so set only the keys you change. The driver container's
+  # probes are not configurable.
+  probes:
+    startup:
+      periodSeconds: 2
+      timeoutSeconds: 1
+      failureThreshold: 30
+    liveness:
+      initialDelaySeconds: 2
+      periodSeconds: 5
+      timeoutSeconds: 1
+      failureThreshold: 3
+    readiness:
+      initialDelaySeconds: 1
+      periodSeconds: 2
+      timeoutSeconds: 1
+      failureThreshold: 3
   image:
     # Pinned by digest to the gateway image upstream published for `v0.1.4`,
     # the same release as `upstream.version`, the Cargo.toml tag, the
@@ -370,10 +408,46 @@ gateway:
     repository: ghcr.io/nvidia/openshell/gateway
     tag: "sha256:bdb4fe248070032c88be78f029dad9325cb698480e90486e1413a674a5d8edc8"
     pullPolicy: IfNotPresent
+  # The gateway's name: its OCSF identity, its OTel resource and the in-process
+  # driver build context. "" = the chart fullname. driver.gatewayName, the
+  # driver's own OTel name, defaults to it.
+  name: ""
+  # What the gateway does when a policy update fails validation: fail_closed
+  # rejects it, retain_last_valid keeps the last valid policy.
+  policyValidationFailureMode: fail_closed
+  # The gateway's HTTP listener on the loopback interface (enable_loopback_service_http).
+  enableLoopbackServiceHttp: true
+  # Accept WebSocket tunnels on the gateway's HTTP listener. The ingress does not
+  # authenticate them, the gateway does. The gatewayIngress VirtualService sets
+  # nothing on its route that blocks HTTP/1.1 upgrades, and Istio passes them by
+  # default, so the tunnel works through gatewayIngress without a template change.
+  enableWebsocketTunnel: false
+  # OpenShell's usage telemetry (OPENSHELL_TELEMETRY_ENABLED on the gateway
+  # container), off here although upstream's chart defaults it on. true affects
+  # the gateway only: sandboxes never send telemetry and the driver is built
+  # without the feature. driver.disableClaudeTelemetry is separate (Anthropic's
+  # telemetry inside sandboxes).
+  telemetryEnabled: false
+  # OTLP/gRPC trace export of the gateway ([openshell.gateway.otlp]). An empty
+  # endpoint writes no table. A tonic endpoint needs a scheme, as for
+  # driver.otlpEndpoint, which defaults to this endpoint. With
+  # networkPolicy.enabled the pod may reach the endpoint's port on any address.
+  otlp:
+    endpoint: ""      # e.g. http://collector.observability:4317
+    serviceName: ""   # "" = the gateway's own default
   grpcPort: 8080
   metricsPort: 9091
   healthPort: 9092
   extraArgs: []      # extra flags passed to `openshell-gateway run`
+  auth:
+    # Whether callers without credentials may make user calls. null = computed:
+    # true only with neither an OIDC issuer nor gateway.tls.clientCa.enabled. With
+    # a client CA and no issuer the gateway requires a client certificate itself
+    # (upstream v0.1.4); true is then refused. With a client CA and no OIDC, every
+    # caller must present a certificate signed by the CA. Sandboxes hold such a
+    # certificate (the client TLS Secret), so anyone who can read it inside a
+    # sandbox can act as a user; use OIDC where that matters (upstream's model).
+    allowUnauthenticatedUsers: null
   # OIDC for client auth (the openshell CLI authenticates via OIDC).
   # Independent of TLS: configure both, neither, or either alone. With an
   # issuer every caller needs a bearer token, the chart's provider hook
@@ -398,6 +472,21 @@ gateway:
     rolesClaim: ""
     adminRole: ""
     userRole: ""
+    # How long (seconds) the gateway caches the issuer's signing keys (JWKS). Must be > 0.
+    jwksTtl: 3600
+    # The token claim holding the scopes. Empty = upstream's default.
+    scopesClaim: ""
+    # Origins (scheme://host[:port], no path or query) the gateway may fetch the
+    # JWKS from when the issuer's discovery document names another host.
+    jwksAllowedOrigins: []
+    # Lets the gateway fetch discovery and JWKS over plain http. For tests only:
+    # tokens are then verified against keys an attacker on the path could replace.
+    dangerouslyAllowInsecureHttp: false
+    # A ConfigMap in .Release.Namespace whose ca.crt signs the issuer's TLS
+    # certificate. Mounted into the gateway and set as SSL_CERT_FILE, which
+    # REPLACES the trust store for ALL outbound TLS of the gateway. Used only
+    # with an issuer.
+    caConfigMapName: ""
     # A Secret you manage in .Release.Namespace holding the OIDC client secret,
     # for the provider hook's client-credentials grant. The chart never reads it.
     clientCredentialsSecret:
@@ -428,8 +517,11 @@ gateway:
   #
   # When `tls.clientCa.enabled: true` (mTLS), the chart additionally
   # passes `--tls-client-ca /etc/openshell-tls/server/ca.crt` so the
-  # gateway requires + verifies a client cert signed by the same self-
-  # signed CA. Use this when fronting the gateway with an mTLS-enforcing
+  # gateway verifies a client cert signed by the same self-signed CA.
+  # Without an OIDC issuer the gateway then also authenticates users by
+  # that certificate, and the chart no longer sets allow_unauthenticated_users
+  # (gateway.auth.allowUnauthenticatedUsers). Use this when fronting the
+  # gateway with an mTLS-enforcing
   # reverse proxy, OR when distributing the chart's client-tls Secret to
   # a small set of admins as a simple SPIFFE-ish auth model. Not with
   # gatewayIngress: the ingress gateway presents no client certificate.
@@ -437,6 +529,11 @@ gateway:
     enabled: false
     clientCa:
       enabled: false
+      # A Secret in the release namespace holding the CA (key ca.crt) the gateway
+      # verifies client certificates against, instead of the chart's own CA. Mounted
+      # at /etc/openshell-tls/client-ca; only used while tls.enabled and
+      # clientCa.enabled are both true. Empty = the server-tls Secret's ca.crt.
+      secretName: ""
   # Gateway-wide gRPC request rate limit (upstream's server.grpcRateLimit), rendered
   # into the gateway TOML as grpc_rate_limit_requests/_window_seconds. Applies to gRPC
   # API traffic only, not to health, metrics or loopback service HTTP. Both values
@@ -467,6 +564,16 @@ gateway:
   # container only (upstream's server.extraVolumes / extraVolumeMounts).
   extraVolumes: []
   extraVolumeMounts: []
+  # SPIFFE Workload API for dynamic provider token grants (upstream's
+  # server.providerTokenGrants.spiffe). Enabled, the gateway pod mounts the SPIFFE CSI
+  # driver's volume (csi.spiffe.io, which needs a SPIRE agent on the node) read-only at
+  # the socket's directory and points OPENSHELL_GATEWAY_SPIFFE_WORKLOAD_API_SOCKET at
+  # the socket; the driver passes the same path to the sandboxes unless
+  # driver.providerSpiffeWorkloadApiSocket sets another.
+  providerTokenGrants:
+    spiffe:
+      enabled: false
+      workloadApiSocketPath: /spiffe-workload-api/spire-agent.sock
   # Gateway pod-level resources, separate from the driver's.
   resources:
     requests:
@@ -484,6 +591,65 @@ gateway:
   # base64-encoded 32-byte value.
   credentialStorage:
     existingSecret: ""
+  # An external store for provider credentials instead of the gateway DB (upstream's
+  # server.credentialDrivers). One backend at most; gatewayConfig can select it as
+  # well, with openshell.gateway.credential_drivers: ["kubernetes-secrets"].
+  # While a driver is selected the chart renders no credentialStorage KEK: no Secret,
+  # no environment variable and no [openshell.gateway.credential_storage] table.
+  # Switching an install from the default store orphans the credentials already
+  # stored: they stay in the gateway DB, unread, and must be created again. The
+  # generated KEK Secret has helm.sh/resource-policy: keep, so Helm leaves it in
+  # place; switching back reuses it, and the old credentials decrypt again if the DB
+  # was persisted.
+  credentialDrivers:
+    # Provider credentials as Secrets in one namespace, read and written by the
+    # gateway through the Kubernetes API.
+    # WARNING: the Role grants get/create/patch/delete on ALL Secrets in that
+    # namespace (their names are generated at runtime), and it binds the
+    # ServiceAccount the driver shares with the gateway, so the driver gains the same
+    # access. Use a dedicated namespace; the sandbox namespace (top-level namespace),
+    # where the driver keeps sandbox bootstrap Secrets, is refused.
+    kubernetesSecrets:
+      enabled: false
+      # "" = the release namespace.
+      namespace: ""
+      # Create the namespace, kept on uninstall so that removing the gateway cannot
+      # delete stored credentials. An existing Namespace is adopted only when this
+      # release created it. Needs a namespace other than the release namespace.
+      createNamespace: false
+      # The credential-secrets Role and RoleBinding; rbac.create=false drops them too.
+      rbac:
+        create: true
+    # Provider credentials in HashiCorp Vault or OpenBao (upstream's in-tree Vault
+    # driver). Enabled with kubernetesSecrets is refused: one backend at most. A key
+    # set in gatewayConfig's [openshell.credential_drivers.vault] wins over these
+    # values. Keys the gateway needs and the chart cannot know (a Vault policy, the
+    # Kubernetes auth role's binding) are the operator's to set up in Vault.
+    vault:
+      enabled: false
+      # Vault base URL. Non-loopback endpoints must use HTTPS, for example
+      # https://vault.example.org:8200. The pod's NetworkPolicy opens egress to its port
+      # (443 for https, 8200 for http when the URL names none).
+      address: ""
+      # ConfigMap with the private Vault CA certificate in its ca.crt key; mounted at
+      # /etc/openshell-tls/vault-ca and set as ca_bundle. Empty = platform trust roots.
+      caConfigMapName: ""
+      # Default KV mount name.
+      mount: secret
+      # KV engine version, "1" or "2".
+      kvVersion: "2"
+      # "kubernetes" in-cluster, or "token_file" for local and development validation.
+      authMethod: kubernetes
+      # Vault Kubernetes auth role (authMethod kubernetes).
+      role: ""
+      # Vault Kubernetes auth mount.
+      kubernetesAuthMount: kubernetes
+      # ServiceAccount token path used for Kubernetes auth.
+      serviceAccountTokenPath: /var/run/secrets/kubernetes.io/serviceaccount/token
+      # Mounted token file path (authMethod token_file).
+      tokenPath: ""
+      # HTTP request timeout in seconds. Empty = the driver's default.
+      timeoutSecs: ""
   # Gateway DB persistence. The gateway stores provider profiles and providers
   # in its DB (set via gRPC by the post-install Job, not via TOML). Without
   # persistence, a gateway pod restart wipes them, and sandboxes cannot be
@@ -495,9 +661,18 @@ gateway:
   #     gateway uses sqlite:///var/lib/openshell/openshell.db.
   #   - External database (enabled=true, dbUrl=postgres://…): no PVC,
   #     gateway uses the operator-supplied URL.
+  #   - External database from a Secret (externalDbSecret): no PVC, no flag;
+  #     the gateway reads the URL from OPENSHELL_DB_URL. Implies persistence.
   dbPersistence:
     enabled: false
-    dbUrl: ""               # e.g. postgresql://user:pass@host:5432/openshell — when empty AND enabled, use PVC-SQLite
+    # e.g. postgresql://user:pass@host:5432/openshell — when empty AND enabled, use PVC-SQLite.
+    # Prefer externalDbSecret: this URL, with its password, ends up in the pod args
+    # and in the release values.
+    dbUrl: ""
+    # Name of an Opaque Secret whose key "uri" holds the database URL (for example
+    # a PostgreSQL URI). Mutually exclusive with dbUrl. Postgres egress from the
+    # gateway pod needs networkPolicy.extraEgress.
+    externalDbSecret: ""
     storageSize: 1Gi
     storageClassName: ""    # "" = cluster default StorageClass
   # Sandbox-JWT signing & validation. Required for the supervisor inside
@@ -529,6 +704,79 @@ gateway:
     # namespace name (openshell-<gatewayId>-<workspace>).
     gatewayId: ""               # default: <fullname>
     ttlSecs: 3600               # gateway-minted sandbox JWT lifetime
+    # File mode of the keys Secret mounted into the gateway pod: a string such
+    # as "0440" (read as octal) or an integer (288 is 0440). Empty = 0400.
+    secretDefaultMode: ""
+    # Extra names and addresses the gateway's server certificate is valid for, on top
+    # of the release's Service names, localhost and 127.0.0.1 (and, with
+    # gatewayIngress.serviceHosts, the wildcard of the service domain). The PKI hook
+    # passes them as --server-san, and the gateway as one comma-separated --server-san.
+    # The hook never rewrites an existing Secret: for a new name to reach the
+    # certificate, delete the three PKI Secrets (server, client, JWT keys) before the
+    # upgrade.
+    serverDnsNames: []          # DNS names, e.g. [gw.example.org]; "*." prefix allowed
+    serverIpAddresses: []       # IP addresses, e.g. [10.0.0.5]
+    # With gateway.certManager and gatewayIngress: how long the post-install Job waits
+    # for the issued server Secret before it copies its ca.crt into the ingress
+    # gateway's CA ConfigMap (the Job's deadline is 30 seconds longer), and whether
+    # running out of time fails the Job (upstream's pkiInitJob.timeoutSeconds and
+    # failOnTimeout).
+    timeoutSeconds: 120
+    failOnTimeout: true
+
+  # Certificates from cert-manager instead of the PKI hook (upstream's certManager).
+  # Requires gateway.tls.enabled. cert-manager must already be installed in the
+  # cluster (Kyma does not ship it): without its CRDs Helm refuses the release on
+  # the unknown Issuer and Certificate kinds. The chart creates, in the release
+  # namespace, a self-signed Issuer, a CA Certificate, a CA Issuer, and server and
+  # client Certificates that write the Secrets the PKI hook would have created
+  # (gateway.sandboxJwt.serverTlsSecretName / clientTlsSecretName), so the gateway
+  # and sandboxes mount the same names. The PKI hook then creates only the sandbox
+  # JWT keys. With gatewayIngress, a post-install Job copies the CA into the
+  # ingress gateway's CA ConfigMap; a renewed CA reaches it on the next helm upgrade.
+  # Switching an existing install to or from cert-manager: delete the server,
+  # client and JWT-keys Secrets, helm upgrade, then restart the gateway and the
+  # running sandboxes (they keep their copy of the old CA).
+  certManager:
+    enabled: false
+    # cert-manager.io (cert-manager) or cert.gardener.cloud (Gardener's
+    # certificate service).
+    api: cert-manager.io
+    caSecretName: ""            # default: <fullname>-ca-tls
+    # Go durations in hours, minutes and seconds (e.g. 8760h, 1h30m). The CA must
+    # outlive a leaf: caDuration must exceed certificateDuration +
+    # certificateRenewBefore.
+    # certificateDuration must be at least twice certificateRenewBefore (Gardener
+    # refuses less). With api cert.gardener.cloud the Gardener certificate service
+    # (on Kyma) must be enabled in the cluster, as cert-manager must be otherwise.
+    caDuration: 87600h
+    certificateDuration: 8760h
+    certificateRenewBefore: 720h
+    # true: the gateway verifies client certificates (gateway.tls.clientCa.enabled)
+    # against the server Secret's ca.crt, the chart CA that also signs the client
+    # Certificate. false: against gateway.tls.clientCa.secretName, which must then
+    # be set (e.g. to the caSecretName above).
+    clientCaFromServerTlsSecret: true
+    # Extra names and addresses on the server Certificate, on top of the release's
+    # Service names, localhost and 127.0.0.1; they replace
+    # gateway.sandboxJwt.serverDnsNames / serverIpAddresses, which must stay empty.
+    serverDnsNames: []          # DNS names, e.g. [gw.example.org]; "*." prefix allowed
+    serverIpAddresses: []       # IP addresses, e.g. [10.0.0.5]
+
+# Non-secret gateway settings as TOML, upstream's gatewayConfig: top-level keys
+# name TOML tables (dotted, such as "openshell.gateway"; a nested map is the same
+# table), and a list renders an array of tables. Reaches the settings that have no
+# flag or chart value, for example:
+#   gatewayConfig:
+#     openshell.gateway:
+#       policy_validation_failure_mode: retain_last_valid
+# Merged with the chart's own tables: a chart value fills only the keys left out
+# here. Refused with a message naming the value to use instead: the
+# openshell.drivers.kyma and openshell.gateway.tls tables, openshell.drivers.kubernetes
+# (this chart's driver reads its environment), and the keys the gateway takes as
+# flags (bind addresses, compute_driver, server_sans, the OIDC settings). Secrets
+# never go here: inline private keys, URL credentials and database_url are refused.
+gatewayConfig: {}
 
 # ClusterIP Service exposing the gateway's gRPC + metrics ports.
 # Requires .Values.gateway.enabled. When false, only the driver's
@@ -536,8 +784,23 @@ gateway:
 # unless driver.gatewayEndpoint names another address sandboxes reach the
 # gateway at: by default they dial this Service. inferenceProvider.enabled
 # requires it too: the provider hook reaches the gateway through it.
+#
+# type: ClusterIP (default), NodePort or LoadBalancer. A LoadBalancer or NodePort
+# Service bypasses gatewayIngress and its allowedCidrs fence: anyone who can reach
+# the address reaches the gateway, which then relies on its own authentication alone.
+# Either type therefore requires gateway.oidc.issuer, or gateway.tls.enabled with
+# gateway.tls.clientCa.enabled, and refuses allow_unauthenticated_users = true
+# (gateway.auth.allowUnauthenticatedUsers or gatewayConfig); the render fails otherwise.
+# With either, this Service carries only the gRPC, gw-health and gw-metrics ports;
+# the driver's health port and http-services move to a second, ClusterIP Service,
+# <fullname>-internal, so they are never public. gw-health and gw-metrics are NOT
+# moved: on a LoadBalancer or NodePort Service they are public too, along with gRPC.
+# Requires enabled: true.
+# nodePort pins the gRPC port's node port (type NodePort only); null lets Kubernetes pick.
 gatewayService:
   enabled: false
+  type: ClusterIP
+  nodePort: null
 
 # Remote access: publish the gateway through the cluster's Istio ingress gateway
 # (the Kyma gateway), so the openshell CLI and sandbox service URLs work without a

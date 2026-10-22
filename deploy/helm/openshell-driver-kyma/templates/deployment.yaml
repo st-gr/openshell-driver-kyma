@@ -1,12 +1,16 @@
 {{/* Pre-flight validation: check required fields when opt-in features are enabled. */ -}}
 {{- include "openshell-driver-kyma.inferenceProviderGuards" . -}}
 {{- include "openshell-driver-kyma.gatewayTlsGuards" . -}}
+{{- include "openshell-driver-kyma.certManagerGuards" . -}}
 {{- include "openshell-driver-kyma.gatewayGuards" . -}}
 {{- include "openshell-driver-kyma.gatewayOidcGuards" . -}}
+{{- include "openshell-driver-kyma.gatewayArgGuards" . -}}
+{{- include "openshell-driver-kyma.credentialDriverGuards" . -}}
 {{- include "openshell-driver-kyma.gatewayIngressGuards" . -}}
 {{- include "openshell-driver-kyma.workspaceGuards" . -}}
 {{- include "openshell-driver-kyma.sandboxEnvGuards" . -}}
 {{- include "openshell-driver-kyma.driverValueGuards" . -}}
+{{- $dbMode := ternary (include "openshell-driver-kyma.gatewayDbMode" .) "" .Values.gateway.enabled -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -39,6 +43,14 @@ spec:
         {{- end }}
     spec:
       serviceAccountName: {{ include "openshell-driver-kyma.serviceAccountName" . }}
+      terminationGracePeriodSeconds: {{ .Values.gateway.terminationGracePeriodSeconds | int }}
+      {{- with .Values.driver.hostGatewayIp }}
+      hostAliases:
+        - ip: {{ . | quote }}
+          hostnames:
+            - host.docker.internal
+            - host.openshell.internal
+      {{- end }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -104,12 +116,37 @@ spec:
           image: {{ include "openshell-driver-kyma.gatewayImage" . | quote }}
           imagePullPolicy: {{ .Values.gateway.image.pullPolicy }}
           env:
-            # The key the TOML's [openshell.gateway.credential_storage] names.
+            # Usage telemetry: off unless gateway.telemetryEnabled (gateway only).
+            - name: OPENSHELL_TELEMETRY_ENABLED
+              value: {{ .Values.gateway.telemetryEnabled | toString | quote }}
+            {{- with include "openshell-driver-kyma.gatewaySpiffeSocket" . }}
+            - name: OPENSHELL_GATEWAY_SPIFFE_WORKLOAD_API_SOCKET
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if not (include "openshell-driver-kyma.credentialDriver" .) }}
+            # The key the TOML's [openshell.gateway.credential_storage] names; none
+            # while an external credential driver holds the credentials.
             - name: OPENSHELL_GATEWAY_CREDENTIAL_KEY_ENCRYPTION_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ include "openshell-driver-kyma.kekSecretName" . }}
                   key: key-encryption-key
+            {{- end }}
+            {{- if eq $dbMode "secret" }}
+            # The database URL, with its password, from the Secret; a --db-url flag
+            # would beat this variable, so none is rendered.
+            - name: OPENSHELL_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.gateway.dbPersistence.externalDbSecret | quote }}
+                  key: uri
+            {{- end }}
+            {{- if and .Values.gateway.oidc.issuer .Values.gateway.oidc.caConfigMapName }}
+            # Trusts the issuer's CA (replaces the trust store for ALL outbound
+            # TLS of the gateway).
+            - name: SSL_CERT_FILE
+              value: /etc/openshell-tls/oidc-ca/ca.crt
+            {{- end }}
           # The gateway has no `run` subcommand; the default action is to
           # run the server. Listing flags directly under args is correct.
           args:
@@ -121,10 +158,10 @@ spec:
             # anything in the file.
             - --config
             - /etc/openshell/gateway.toml
-            {{- if and .Values.gateway.dbPersistence.enabled .Values.gateway.dbPersistence.dbUrl }}
+            {{- if eq $dbMode "url" }}
             - --db-url
             - {{ .Values.gateway.dbPersistence.dbUrl | quote }}
-            {{- else if .Values.gateway.dbPersistence.enabled }}
+            {{- else if eq $dbMode "sqlite" }}
             - --db-url
             - "sqlite:///var/lib/openshell/openshell.db"
             {{- end }}
@@ -147,7 +184,7 @@ spec:
             - /etc/openshell-tls/server/tls.key
             {{- if .Values.gateway.tls.clientCa.enabled }}
             - --tls-client-ca
-            - /etc/openshell-tls/server/ca.crt
+            - {{ include "openshell-driver-kyma.clientCaPath" . }}
             {{- end }}
             {{- else }}
             - --disable-tls
@@ -178,12 +215,23 @@ spec:
             - {{ . | quote }}
             {{- end }}
             {{- end }}
+            - --oidc-jwks-ttl={{ $.Values.gateway.oidc.jwksTtl | int }}
+            {{- with $.Values.gateway.oidc.scopesClaim }}
+            - --oidc-scopes-claim={{ . }}
             {{- end }}
-            {{- if include "openshell-driver-kyma.serviceHostsEnabled" . }}
-            # A wildcard SAN is how upstream learns the domain of sandbox service
-            # URLs (its default, openshell.localhost, stays available).
+            {{- with $.Values.gateway.oidc.jwksAllowedOrigins }}
+            - --oidc-jwks-allowed-origins={{ join "," . }}
+            {{- end }}
+            {{- if $.Values.gateway.oidc.dangerouslyAllowInsecureHttp }}
+            - --oidc-dangerously-allow-insecure-http=true
+            {{- end }}
+            {{- end }}
+            {{- /* Upstream takes one comma-separated --server-san: the wildcard that tells it the
+                 domain of sandbox service URLs (its default, openshell.localhost, stays
+                 available), plus the chart's extra names. */}}
+            {{- with include "openshell-driver-kyma.runtimeServerSans" . }}
             - --server-san
-            - {{ printf "*.%s" .Values.gatewayIngress.domain | quote }}
+            - {{ . | quote }}
             {{- end }}
             {{- with .Values.gateway.extraArgs }}
               {{- toYaml . | nindent 12 }}
@@ -198,18 +246,21 @@ spec:
             - name: gw-metrics
               containerPort: {{ .Values.gateway.metricsPort }}
               protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: gw-health
+            {{- toYaml (merge (deepCopy ($.Values.gateway.probes.startup | default dict)) (dict "periodSeconds" 2 "timeoutSeconds" 1 "failureThreshold" 30)) | nindent 12 }}
           livenessProbe:
             httpGet:
               path: /healthz
               port: gw-health
-            initialDelaySeconds: 5
-            periodSeconds: 10
+            {{- toYaml (merge (deepCopy ($.Values.gateway.probes.liveness | default dict)) (dict "initialDelaySeconds" 2 "periodSeconds" 5 "timeoutSeconds" 1 "failureThreshold" 3)) | nindent 12 }}
           readinessProbe:
             httpGet:
               path: /readyz
               port: gw-health
-            initialDelaySeconds: 2
-            periodSeconds: 5
+            {{- toYaml (merge (deepCopy ($.Values.gateway.probes.readiness | default dict)) (dict "initialDelaySeconds" 1 "periodSeconds" 2 "timeoutSeconds" 1 "failureThreshold" 3)) | nindent 12 }}
           resources:
             {{- toYaml .Values.gateway.resources | nindent 12 }}
           securityContext:
@@ -235,7 +286,7 @@ spec:
               mountPath: /home/nonroot/.local/state
             - name: gateway-tmp
               mountPath: /tmp
-            {{- if and .Values.gateway.dbPersistence.enabled (not .Values.gateway.dbPersistence.dbUrl) }}
+            {{- if eq $dbMode "sqlite" }}
             - name: gateway-db
               mountPath: /var/lib/openshell
             {{- end }}
@@ -263,6 +314,28 @@ spec:
             - name: gateway-tls
               mountPath: /etc/openshell-tls/server
               readOnly: true
+            {{- if .Values.gateway.tls.clientCa.secretName }}
+            {{- if .Values.gateway.tls.clientCa.enabled }}
+            - name: tls-client-ca
+              mountPath: /etc/openshell-tls/client-ca
+              readOnly: true
+            {{- end }}
+            {{- end }}
+            {{- end }}
+            {{- if and .Values.gateway.oidc.issuer .Values.gateway.oidc.caConfigMapName }}
+            - name: oidc-ca
+              mountPath: /etc/openshell-tls/oidc-ca
+              readOnly: true
+            {{- end }}
+            {{- if include "openshell-driver-kyma.vaultCaConfigMapName" . }}
+            - name: vault-ca
+              mountPath: /etc/openshell-tls/vault-ca
+              readOnly: true
+            {{- end }}
+            {{- with include "openshell-driver-kyma.gatewaySpiffeSocket" . }}
+            - name: spiffe-workload-api
+              mountPath: {{ dir . | quote }}
+              readOnly: true
             {{- end }}
             {{- with .Values.gateway.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
@@ -288,7 +361,7 @@ spec:
           emptyDir: {}
         - name: gateway-tmp
           emptyDir: {}
-        {{- if and .Values.gateway.dbPersistence.enabled (not .Values.gateway.dbPersistence.dbUrl) }}
+        {{- if eq $dbMode "sqlite" }}
         - name: gateway-db
           persistentVolumeClaim:
             claimName: {{ include "openshell-driver-kyma.fullname" . }}-gateway-db
@@ -300,13 +373,42 @@ spec:
         - name: sandbox-jwt
           secret:
             secretName: {{ include "openshell-driver-kyma.jwtSecretName" . }}
-            defaultMode: 0o400
+            defaultMode: {{ include "openshell-driver-kyma.secretDefaultMode" . }}
         {{- end }}
         {{- if .Values.gateway.tls.enabled }}
         - name: gateway-tls
           secret:
             secretName: {{ include "openshell-driver-kyma.serverTlsSecretName" . }}
-            defaultMode: 0o400
+            defaultMode: {{ include "openshell-driver-kyma.secretDefaultMode" . }}
+        {{- if .Values.gateway.tls.clientCa.secretName }}
+        {{- if .Values.gateway.tls.clientCa.enabled }}
+        - name: tls-client-ca
+          secret:
+            secretName: {{ .Values.gateway.tls.clientCa.secretName | quote }}
+            items:
+              - key: ca.crt
+                path: ca.crt
+        {{- end }}
+        {{- end }}
+        {{- end }}
+        {{- if and .Values.gateway.oidc.issuer .Values.gateway.oidc.caConfigMapName }}
+        - name: oidc-ca
+          configMap:
+            name: {{ .Values.gateway.oidc.caConfigMapName }}
+        {{- end }}
+        {{- with include "openshell-driver-kyma.vaultCaConfigMapName" . }}
+        - name: vault-ca
+          configMap:
+            name: {{ . }}
+            items:
+              - key: ca.crt
+                path: ca.crt
+        {{- end }}
+        {{- if include "openshell-driver-kyma.gatewaySpiffeSocket" . }}
+        - name: spiffe-workload-api
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true
         {{- end }}
         {{- with .Values.gateway.extraVolumes }}
         {{- toYaml . | nindent 8 }}
