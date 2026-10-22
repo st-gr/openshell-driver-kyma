@@ -80,7 +80,22 @@ capability can work on Kyma.
   rendered (30). The gateway ConfigMap's TOML is regenerated sorted and without
   comments, so the pod rolls once on upgrade.
 - **`gateway.extraArgs` flags that values now own fail the render.** The message
-  names the value to use instead.
+  names the value to use instead. Two of them were the 0.10.x way to do something:
+  - `--db-url` used an external database without the PVC. Set
+    `gateway.dbPersistence.enabled: true` with `gateway.dbPersistence.dbUrl`, or
+    `gateway.dbPersistence.externalDbSecret` (the URL from a Secret). `dbUrl`
+    without `enabled: true` now fails the render instead of being ignored.
+  - `--server-san` added service-URL SANs without `gatewayIngress.serviceHosts`.
+    Set `gateway.sandboxJwt.serverDnsNames` / `serverIpAddresses`
+    (`gateway.certManager.serverDnsNames` / `serverIpAddresses` with
+    `gateway.certManager`); the chart passes them as `--server-san`.
+- **Publishing an unauthenticated gateway fails the render.** With
+  `gatewayIngress.enabled` or a `gatewayService.type` of LoadBalancer or NodePort,
+  an effective `allow_unauthenticated_users = true` (from
+  `gateway.auth.allowUnauthenticatedUsers` or `gatewayConfig`) is refused.
+- **A LoadBalancer or NodePort `gatewayService` needs authentication.** Set
+  `gateway.oidc.issuer`, or `gateway.tls.enabled` with `gateway.tls.clientCa.enabled`;
+  the render fails otherwise.
 - **`certificateDuration` must be at least twice `certificateRenewBefore`** if you
   use `gateway.certManager`.
 

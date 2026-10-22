@@ -100,9 +100,9 @@ ING8=(--set gatewayIngress.enabled=true --set gatewayIngress.domain=example.org
 	--set gateway.oidc.clientId=osh-client --set gateway.oidc.authOnly=true --set gateway.tls.enabled=true
 	--set gatewayIngress.serviceHosts.enabled=true --set-json 'gatewayIngress.allowedCidrs=["203.0.113.0/24"]')
 try good-p8-default '' t
-try good-p8-lb '' t --set gatewayService.type=LoadBalancer
+try good-p8-lb '' t --set gatewayService.type=LoadBalancer "${OIDC5[@]}"
 try good-p8-lb-ingress '' t --set gatewayService.type=LoadBalancer "${ING8[@]}"
-try good-p8-nodeport '' t --set gatewayService.type=NodePort --set gatewayService.nodePort=30443
+try good-p8-nodeport '' t --set gatewayService.type=NodePort --set gatewayService.nodePort=30443 "${OIDC5[@]}"
 try bad-p8-nodeport-clusterip 'gatewayService.nodePort requires gatewayService.type=NodePort' t \
 	--set gatewayService.nodePort=30443
 try bad-p8-nodeport-lb 'gatewayService.nodePort requires gatewayService.type=NodePort' t \
@@ -111,6 +111,24 @@ try bad-p8-type 'gatewayService.type must be ClusterIP, NodePort or LoadBalancer
 try bad-p8-lb-no-service 'gatewayService.type=LoadBalancer requires gatewayService.enabled' t \
 	--set gatewayService.enabled=false --set driver.gatewayEndpoint=http://gateway.example:8080 \
 	--set gatewayService.type=LoadBalancer
+# Publishing the gateway (gatewayIngress, or a LoadBalancer/NodePort Service) refuses an
+# effective allow_unauthenticated_users = true, and a published Service needs OIDC or a client CA.
+UNAUTH8='REFUSING to publish an unauthenticated gateway: allow_unauthenticated_users is true while'
+NOAUTH8='publishes the gateway; set gateway.oidc.issuer or enable gateway.tls with gateway.tls.clientCa'
+try bad-p8-ingress-unauth "$UNAUTH8 gatewayIngress.enabled publishes it" t "${ING8[@]}" \
+	--set gateway.auth.allowUnauthenticatedUsers=true
+try bad-p8-ingress-config-unauth "$UNAUTH8 gatewayIngress.enabled publishes it" t "${ING8[@]}" \
+	--set-json 'gatewayConfig={"openshell.gateway.auth":{"allow_unauthenticated_users":true}}'
+try bad-p8-ingress-nested-unauth "$UNAUTH8 gatewayIngress.enabled publishes it" t "${ING8[@]}" \
+	--set-json 'gatewayConfig={"openshell":{"gateway":{"auth":{"allow_unauthenticated_users":true}}}}'
+try bad-p8-lb-no-auth "gatewayService.type=LoadBalancer $NOAUTH8" t --set gatewayService.type=LoadBalancer
+try bad-p8-nodeport-no-auth "gatewayService.type=NodePort $NOAUTH8" t --set gatewayService.type=NodePort
+try bad-p8-lb-oidc-unauth "$UNAUTH8 gatewayService.type=LoadBalancer publishes it" t \
+	--set gatewayService.type=LoadBalancer "${OIDC5[@]}" --set gateway.auth.allowUnauthenticatedUsers=true
+try good-p8-lb-oidc '' t --set gatewayService.type=LoadBalancer "${OIDC5[@]}"
+try good-p8-lb-client-ca '' t --set gatewayService.type=LoadBalancer --set gateway.tls.enabled=true \
+	--set gateway.tls.clientCa.enabled=true
+try good-p8-clusterip-unauth '' t --set gateway.auth.allowUnauthenticatedUsers=true
 # 9. External database Secret: the URL comes from a Secret key, never from args or values.
 try good-p9-db '' t --set gateway.dbPersistence.enabled=true --set gateway.dbPersistence.externalDbSecret=osh-db
 try good-p9-db-without-enabled '' t --set gateway.dbPersistence.externalDbSecret=osh-db
@@ -127,9 +145,11 @@ try bad-p9-both 'gateway.dbPersistence.externalDbSecret and gateway.dbPersistenc
 	--set gateway.dbPersistence.externalDbSecret=osh-db --set gateway.dbPersistence.dbUrl=postgresql://u@h/d
 try bad-p9-name 'gateway.dbPersistence.externalDbSecret must be a valid Kubernetes Secret name' t \
 	--set gateway.dbPersistence.externalDbSecret=Bad_Name
+try bad-p9-url-without-enabled 'gateway.dbPersistence.dbUrl requires gateway.dbPersistence.enabled=true (or use gateway.dbPersistence.externalDbSecret)' t \
+	--set gateway.dbPersistence.dbUrl=postgresql://u@h/d
 try bad-p9-long 'gateway.dbPersistence.externalDbSecret must be no more than 253 characters' t \
 	--set "gateway.dbPersistence.externalDbSecret=$(printf 'a%.0s' $(seq 254))"
-try bad-p9-extra-db-url 'gateway.extraArgs sets --db-url; use gateway.dbPersistence.dbUrl instead' t \
+try bad-p9-extra-db-url 'gateway.extraArgs sets --db-url; use gateway.dbPersistence.enabled=true with dbUrl, or externalDbSecret instead' t \
 	--set-json 'gateway.extraArgs=["--db-url=sqlite:x"]'
 
 try bad-p5-ttl 'gateway.oidc.jwksTtl must be greater than zero' t "${OIDC5[@]}" --set gateway.oidc.jwksTtl=0

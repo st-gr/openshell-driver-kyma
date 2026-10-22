@@ -146,6 +146,7 @@ sandbox-JWT issuer. */ -}}
 {{- end -}}
 {{- include "openshell-driver-kyma.tomlDefault" (dict "config" $config "table" "openshell.gateway.auth" "key" "allow_unauthenticated_users" "value" $allowUnauth) -}}
 {{- include "openshell-driver-kyma.mtlsAuthGuard" (dict "config" $config "root" . "fromConfig" $fromConfig) -}}
+{{- include "openshell-driver-kyma.publishAuthGuard" (dict "config" $config "root" .) -}}
 {{- /* Provider credentials: an external credential driver
 (gateway.credentialDrivers, or gatewayConfig's credential_drivers) owns its storage,
 so, as upstream's chart, no credential_storage table then: its KEK variable is not

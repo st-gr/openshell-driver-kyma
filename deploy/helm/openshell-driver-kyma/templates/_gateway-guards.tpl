@@ -21,7 +21,7 @@ of openshell-driver-kyma.gatewayArgGuards.
 {{- define "openshell-driver-kyma.gatewayArgGuards" -}}
 {{- if .Values.gateway.enabled -}}
 {{- include "openshell-driver-kyma.extraArgsGuard" (dict "args" .Values.gateway.extraArgs "flags" (dict
-  "--db-url" "gateway.dbPersistence.dbUrl"
+  "--db-url" "gateway.dbPersistence.enabled=true with dbUrl, or externalDbSecret"
   "--tls-cert" "gateway.tls.enabled"
   "--tls-key" "gateway.tls.enabled"
   "--disable-tls" "gateway.tls.enabled"
@@ -51,6 +51,34 @@ dict, gatewayConfig merged and the chart's value applied), `root`, and `fromConf
 {{- end -}}
 
 {{/*
+Refuses publishing a gateway that admits unauthenticated callers. Published means
+gatewayIngress.enabled or a gatewayService.type other than ClusterIP. A published
+Service also needs an OIDC issuer or an effective client CA: no ingress fences it.
+Takes a dict with `config` (the gateway TOML dict, gatewayConfig merged and the
+chart's value applied) and `root`. A ClusterIP-only gateway (local development)
+may stay unauthenticated.
+*/}}
+{{- define "openshell-driver-kyma.publishAuthGuard" -}}
+{{- $v := .root.Values -}}
+{{- $type := toString $v.gatewayService.type -}}
+{{- $published := "" -}}
+{{- if $v.gatewayIngress.enabled -}}
+{{- $published = "gatewayIngress.enabled" -}}
+{{- else if and $type (ne $type "ClusterIP") -}}
+{{- $published = printf "gatewayService.type=%s" $type -}}
+{{- end -}}
+{{- if $published -}}
+{{- if and $type (ne $type "ClusterIP") (not $v.gateway.oidc.issuer) (not (and $v.gateway.tls.enabled $v.gateway.tls.clientCa.enabled)) -}}
+{{- fail (printf "gatewayService.type=%s publishes the gateway; set gateway.oidc.issuer or enable gateway.tls with gateway.tls.clientCa" $type) -}}
+{{- end -}}
+{{- $auth := get .config "openshell.gateway.auth" | default dict -}}
+{{- if eq (toJson (get $auth "allow_unauthenticated_users")) "true" -}}
+{{- fail (printf "REFUSING to publish an unauthenticated gateway: allow_unauthenticated_users is true while %s publishes it" $published) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 Where the gateway's database lives: "secret" (URL from gateway.dbPersistence.externalDbSecret,
 which implies persistence), "url" (dbUrl in the args), "sqlite" (PVC-backed) or "" (ephemeral).
 Refuses a Secret next to dbUrl and an invalid Secret name; the name check mirrors upstream's
@@ -70,6 +98,8 @@ validateSecretReference (a DNS-1123 subdomain of at most 253 characters).
 {{- fail "gateway.dbPersistence.externalDbSecret must be a valid Kubernetes Secret name" -}}
 {{- end -}}
 secret
+{{- else if and $db.dbUrl (not $db.enabled) -}}
+{{- fail "gateway.dbPersistence.dbUrl requires gateway.dbPersistence.enabled=true (or use gateway.dbPersistence.externalDbSecret)" -}}
 {{- else if and $db.enabled $db.dbUrl -}}
 url
 {{- else if $db.enabled -}}
