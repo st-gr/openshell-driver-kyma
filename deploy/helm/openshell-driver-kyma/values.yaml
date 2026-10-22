@@ -41,7 +41,16 @@ serviceAccount:
 # matching. The pre-install CRD check has a ClusterRole of its own: set
 # crdPreInstallCheck.enabled=false too. The names default to
 # <fullname>-driver-<release namespace>.
+#
+# rbac.create=false renders none of the chart's own Roles, RoleBindings, ClusterRole
+# or ClusterRoleBinding: the operator must supply equivalent RBAC, out of band, for
+# the driver's ServiceAccount, serviceAccount.name (default "openshell-driver", in
+# the release namespace), which every RoleBinding and the ClusterRoleBinding bind
+# to; the sandbox ServiceAccount has no RBAC. Helm hook objects (the gateway JWT PKI
+# hook, the inference provider hook and the CRD pre-install check) keep their own
+# Roles, because the hooks cannot run without them.
 rbac:
+  create: true
   clusterScoped:
     create: true
     clusterRoleName: ""

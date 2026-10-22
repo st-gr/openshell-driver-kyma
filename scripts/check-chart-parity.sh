@@ -115,6 +115,14 @@ try bad-p8-lb-no-service 'gatewayService.type=LoadBalancer requires gatewayServi
 try good-p9-db '' t --set gateway.dbPersistence.enabled=true --set gateway.dbPersistence.externalDbSecret=osh-db
 try good-p9-db-without-enabled '' t --set gateway.dbPersistence.externalDbSecret=osh-db
 try good-p9-sqlite '' t --set gateway.dbPersistence.enabled=true
+# 10. rbac.create=false drops the chart's own RBAC; the helm hooks' RBAC stays.
+try good-p10-default '' t
+try good-p10-shared-true '' t --set driver.workspaceMode=shared --set driver.allowDriverConfig=true
+try good-p10-no-rbac '' t --set rbac.create=false
+try good-p10-managed '' t --set driver.workspaceMode=managed --set gateway.sandboxJwt.gatewayId=gw \
+	--set 'driver.sandboxImagePullSecrets={pull}'
+try good-p10-no-rbac-sources '' t --set rbac.create=false --set driver.workspaceMode=managed \
+	--set gateway.sandboxJwt.gatewayId=gw --set 'driver.sandboxImagePullSecrets={pull}'
 try bad-p9-both 'gateway.dbPersistence.externalDbSecret and gateway.dbPersistence.dbUrl are mutually exclusive' t \
 	--set gateway.dbPersistence.externalDbSecret=osh-db --set gateway.dbPersistence.dbUrl=postgresql://u@h/d
 try bad-p9-name 'gateway.dbPersistence.externalDbSecret must be a valid Kubernetes Secret name' t \
@@ -576,6 +584,33 @@ if "OPENSHELL_DB_URL" in env_of(sq) or "--db-url" not in gw_args("good-p9-sqlite
     failures.append("good-p9-sqlite: SQLite mode lost its --db-url arg or gained OPENSHELL_DB_URL")
 if not any(d.get("kind") == "PersistentVolumeClaim" for d in docs("good-p9-sqlite")):
     failures.append("good-p9-sqlite: no PersistentVolumeClaim was rendered")
+
+# 10. rbac.create.
+RBAC_KINDS = ("Role", "RoleBinding", "ClusterRole", "ClusterRoleBinding")
+
+def rbac_objects(case, hooks):
+    """(kind, name) of the RBAC objects of a render: the ones with a helm.sh/hook
+    annotation when hooks is True, the others when it is False."""
+    return sorted((d["kind"], d["metadata"]["name"]) for d in docs(case) if d.get("kind") in RBAC_KINDS
+                  and ("helm.sh/hook" in (d["metadata"].get("annotations") or {})) == hooks)
+
+if not rbac_objects("good-p10-default", False):
+    failures.append("good-p10-default: no chart RBAC rendered")
+if rbac_objects("good-p10-default", False) != rbac_objects("good-p10-shared-true", False):
+    failures.append("good-p10-default: RBAC differs from render-shared-true: "
+                    f"{rbac_objects('good-p10-default', False)} vs {rbac_objects('good-p10-shared-true', False)}")
+if ("Role", "t-openshell-driver-kyma-workspace-secret-source") not in rbac_objects("good-p10-managed", False):
+    failures.append("good-p10-managed: no workspace-secret-source Role rendered; the sources case tests nothing")
+for case in ("good-p10-no-rbac", "good-p10-no-rbac-sources"):
+    left = rbac_objects(case, False)
+    if left:
+        failures.append(f"{case}: rbac.create=false still renders {left}")
+    want = rbac_objects("good-p10-managed" if case.endswith("sources") else "good-p10-default", True)
+    if rbac_objects(case, True) != want or not want:
+        failures.append(f"{case}: hook RBAC changed: {rbac_objects(case, True)} vs {want}")
+hook_kinds = {k for k, _ in rbac_objects("good-p10-no-rbac", True)}
+if not {"Role", "RoleBinding"} <= hook_kinds:
+    failures.append(f"good-p10-no-rbac: the PKI and provider hook Roles are missing: {hook_kinds}")
 
 if failures:
     print("CHART_PARITY_FAIL:")

@@ -1,4 +1,4 @@
-{{- if eq .Values.driver.workspaceMode "shared" }}
+{{- if and .Values.rbac.create (eq .Values.driver.workspaceMode "shared") }}
 # The driver's rights in the shared sandbox namespace: the Role upstream's
 # chart binds to the same driver in shared mode (deploy/helm/openshell/
 # templates/role.yaml at the pinned tag). The other workspace modes get these
