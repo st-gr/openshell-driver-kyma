@@ -474,16 +474,81 @@ or NodePort those ports move to <fullname>-internal, which stays ClusterIP.
 
 {{/*
 The gateway's runtime --server-san value, comma-joined: the wildcard of the sandbox
-service domain when gatewayIngress.serviceHosts is on, then
-gateway.sandboxJwt.serverDnsNames and serverIpAddresses. Empty when there is none.
+service domain when gatewayIngress.serviceHosts is on, then the extra names and
+addresses (openshell-driver-kyma.extraServerSans). Empty when there is none.
 */}}
 {{- define "openshell-driver-kyma.runtimeServerSans" -}}
 {{- $sans := list -}}
 {{- if include "openshell-driver-kyma.serviceHostsEnabled" . -}}
 {{- $sans = append $sans (printf "*.%s" .Values.gatewayIngress.domain) -}}
 {{- end -}}
-{{- $sans = concat $sans (.Values.gateway.sandboxJwt.serverDnsNames | default list) (.Values.gateway.sandboxJwt.serverIpAddresses | default list) -}}
+{{- $extra := include "openshell-driver-kyma.extraServerSans" . | fromJson -}}
+{{- $sans = concat $sans $extra.dnsNames $extra.ipAddresses -}}
 {{- join "," $sans -}}
+{{- end }}
+
+{{/*
+The operator's extra server names, as JSON {"dnsNames": [...], "ipAddresses": [...]}:
+gateway.certManager's while it issues the certificates, else gateway.sandboxJwt's
+(the PKI hook's).
+*/}}
+{{- define "openshell-driver-kyma.extraServerSans" -}}
+{{- $src := ternary .Values.gateway.certManager .Values.gateway.sandboxJwt (eq (toString .Values.gateway.certManager.enabled) "true") -}}
+{{- dict "dnsNames" ($src.serverDnsNames | default list) "ipAddresses" ($src.serverIpAddresses | default list) | toJson -}}
+{{- end }}
+
+{{/*
+The DNS names on a server certificate the chart has issued (cert-manager or Gardener),
+as a YAML list: the names the PKI hook gives its certificate (this release's Service,
+short to fully qualified, and localhost), then the extra names. pkiServerIps: 127.0.0.1,
+then the extra addresses.
+*/}}
+{{- define "openshell-driver-kyma.pkiServerSans" -}}
+{{- $service := include "openshell-driver-kyma.fullname" . -}}
+{{- $ns := .Release.Namespace -}}
+{{- $base := list $service (printf "%s.%s" $service $ns) (printf "%s.%s.svc" $service $ns) (printf "%s.%s.svc.cluster.local" $service $ns) "localhost" -}}
+{{- concat $base (include "openshell-driver-kyma.extraServerSans" . | fromJson).dnsNames | toYaml -}}
+{{- end }}
+
+{{- define "openshell-driver-kyma.pkiServerIps" -}}
+{{- concat (list "127.0.0.1") (include "openshell-driver-kyma.extraServerSans" . | fromJson).ipAddresses | toYaml -}}
+{{- end }}
+
+{{/*
+The Secret holding the chart CA that cert-manager or Gardener issues:
+gateway.certManager.caSecretName, else <fullname>-ca-tls.
+*/}}
+{{- define "openshell-driver-kyma.caSecretName" -}}
+{{- default (printf "%s-ca-tls" (include "openshell-driver-kyma.fullname" .)) .Values.gateway.certManager.caSecretName -}}
+{{- end }}
+
+{{/*
+A Go duration limited to hours, minutes and seconds with integer parts ("8760h",
+"1h30m", "45m", "90s"), in seconds. Takes a dict with `key` (the value's name, for
+the message), `value` and `example`; anything else fails the render.
+*/}}
+{{- define "openshell-driver-kyma.durationSeconds" -}}
+{{- $v := toString .value -}}
+{{- if or (eq $v "") (not (regexMatch "^([0-9]+h)?([0-9]+m)?([0-9]+s)?$" $v)) -}}
+{{- fail (printf "%s must be a Go duration in hours (e.g. %s), got %q." .key .example $v) -}}
+{{- end -}}
+{{- $total := 0 -}}
+{{- range $part := regexFindAll "[0-9]+[hms]" $v -1 -}}
+{{- $n := trimSuffix "h" (trimSuffix "m" (trimSuffix "s" $part)) | atoi -}}
+{{- $unit := get (dict "h" 3600 "m" 60 "s" 1) (regexFind "[hms]$" $part) -}}
+{{- $total = add $total (mul $n $unit) -}}
+{{- end -}}
+{{- $total -}}
+{{- end }}
+
+{{/* Seconds as a Go duration in hours, minutes and seconds, zero parts left out ("9480h", "2h15m"). */}}
+{{- define "openshell-driver-kyma.formatDuration" -}}
+{{- $s := int . -}}
+{{- $out := "" -}}
+{{- if ge $s 3600 -}}{{- $out = printf "%dh" (div $s 3600) -}}{{- end -}}
+{{- if mod (div $s 60) 60 -}}{{- $out = printf "%s%dm" $out (mod (div $s 60) 60) -}}{{- end -}}
+{{- if or (mod $s 60) (eq $s 0) -}}{{- $out = printf "%s%ds" $out (mod $s 60) -}}{{- end -}}
+{{- $out -}}
 {{- end }}
 
 {{/*

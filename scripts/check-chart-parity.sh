@@ -283,6 +283,52 @@ try good-p14-spiffe-driver-override '' t "${SPIFFE14[@]}" --set driver.providerS
 try bad-p14-relative-path 'gateway.providerTokenGrants.spiffe.workloadApiSocketPath must be an absolute path' t "${SPIFFE14[@]}" \
 	--set gateway.providerTokenGrants.spiffe.workloadApiSocketPath=spire-agent.sock
 
+# 15. Certificates from cert-manager (gateway.certManager, api cert-manager.io).
+CM15=(--set gateway.tls.enabled=true --set gateway.certManager.enabled=true)
+ING15=(--set gatewayIngress.enabled=true --set gatewayIngress.domain=example.org
+	--set gateway.oidc.issuer=https://issuer.example --set gateway.oidc.audience=osh-client
+	--set gateway.oidc.clientId=osh-client --set gateway.oidc.authOnly=true)
+try good-p15-cm '' t "${CM15[@]}"
+try good-p15-cm-ingress '' t "${CM15[@]}" "${ING15[@]}"
+try good-p15-cm-separate-ca '' t "${CM15[@]}" --set gateway.certManager.clientCaFromServerTlsSecret=false \
+	--set gateway.tls.clientCa.enabled=true --set gateway.tls.clientCa.secretName=t-openshell-driver-kyma-ca-tls
+try good-p15-cm-sans '' t "${CM15[@]}" --set 'gateway.certManager.serverDnsNames={gw.example.org}' \
+	--set 'gateway.certManager.serverIpAddresses={10.0.0.5}' --set gateway.certManager.caSecretName=own-ca \
+	--set gateway.certManager.caDuration=9481h
+try good-p15-cm-mixed-durations '' t "${CM15[@]}" --set gateway.certManager.certificateDuration=1h30m \
+	--set gateway.certManager.certificateRenewBefore=45m --set gateway.certManager.caDuration=2h15m1s
+try bad-p15-no-tls 'gateway.certManager.enabled requires gateway.tls.enabled' t --set gateway.certManager.enabled=true
+try bad-p15-separate-ca-no-secret 'gateway.certManager.clientCaFromServerTlsSecret is false but gateway.tls.clientCa.secretName is empty' t \
+	"${CM15[@]}" --set gateway.certManager.clientCaFromServerTlsSecret=false --set gateway.tls.clientCa.enabled=true
+try bad-p15-secret-from-server 'gateway.tls.clientCa.secretName is set but gateway.certManager.clientCaFromServerTlsSecret is true' t \
+	"${CM15[@]}" --set gateway.tls.clientCa.enabled=true --set gateway.tls.clientCa.secretName=user-ca
+try bad-p15-ca-duration 'gateway.certManager.caDuration (8760h) must exceed certificateDuration + certificateRenewBefore (9480h)' t \
+	"${CM15[@]}" --set gateway.certManager.caDuration=8760h
+try bad-p15-ca-duration-equal 'gateway.certManager.caDuration (9480h) must exceed certificateDuration + certificateRenewBefore (9480h)' t \
+	"${CM15[@]}" --set gateway.certManager.caDuration=9480h
+try bad-p15-api 'gateway.certManager.api must be cert-manager.io or cert.gardener.cloud' t \
+	"${CM15[@]}" --set gateway.certManager.api=example.io
+try bad-p15-duration 'gateway.certManager.certificateDuration must be a Go duration in hours (e.g. 8760h)' t \
+	"${CM15[@]}" --set gateway.certManager.certificateDuration=bad
+for v in 1d 1.5h h 30; do
+	try "bad-p15-renew-$v" 'gateway.certManager.certificateRenewBefore must be a Go duration in hours (e.g. 720h)' t \
+		"${CM15[@]}" --set-string "gateway.certManager.certificateRenewBefore=$v"
+done
+try bad-p15-ca-duration-format 'gateway.certManager.caDuration must be a Go duration in hours (e.g. 87600h)' t \
+	"${CM15[@]}" --set gateway.certManager.caDuration=10y
+try bad-p15-pki-sans 'gateway.sandboxJwt.serverDnsNames and serverIpAddresses name the PKI hook certificate' t \
+	"${CM15[@]}" --set 'gateway.sandboxJwt.serverDnsNames={gw.example.org}'
+try bad-p15-cm-dns 'gateway.certManager.serverDnsNames entries must be DNS names' t \
+	"${CM15[@]}" --set 'gateway.certManager.serverDnsNames={Bad_Name}'
+try good-p15-cm-no-fail '' t "${CM15[@]}" "${ING15[@]}" --set gateway.sandboxJwt.timeoutSeconds=60 \
+	--set gateway.sandboxJwt.failOnTimeout=false
+try bad-p15-timeout 'gateway.sandboxJwt.timeoutSeconds must be a positive integer' t "${CM15[@]}" \
+	--set gateway.sandboxJwt.timeoutSeconds=0
+try bad-p15-enabled-string 'gateway.certManager.enabled must be a boolean' t --set gateway.tls.enabled=true \
+	--set-string gateway.certManager.enabled=false
+try bad-p15-cm-ip 'gateway.certManager.serverIpAddresses entries must be IP addresses' t \
+	"${CM15[@]}" --set 'gateway.certManager.serverIpAddresses={300.1.1.1}'
+
 uv run --quiet --no-project --python 3.12 --with pyyaml==6.0.2 python - "$WORK" "$CHART" <<'PY'
 import pathlib, sys, tomllib
 import yaml
@@ -900,6 +946,120 @@ for case, gw_sock, drv_sock, mount in (
         failures.append(f"{case}: the spiffe-workload-api mount is {mounts}, want readOnly at {mount}")
     if driver_mounts:
         failures.append(f"{case}: the driver container mounts the SPIFFE socket: {driver_mounts}")
+
+# 15. Certificates from cert-manager.
+FN = "t-openshell-driver-kyma"
+CM_API = "cert-manager.io/v1"
+CA_ISSUER_REF = {"name": f"{FN}-ca-issuer", "kind": "Issuer", "group": "cert-manager.io"}
+ECDSA = {"algorithm": "ECDSA", "size": 256}
+HOOK_SANS = [FN, f"{FN}.default", f"{FN}.default.svc", f"{FN}.default.svc.cluster.local", "localhost"]
+
+def cm_objects(case):
+    return {(d["kind"], d["metadata"]["name"]): d for d in docs(case) if d.get("apiVersion") == CM_API}
+
+def want_cm(ca_secret=f"{FN}-ca-tls", ca_duration="87600h", dns=(), ips=(), duration="8760h", renew="720h"):
+    leaf = {"duration": duration, "renewBefore": renew, "privateKey": ECDSA, "issuerRef": CA_ISSUER_REF}
+    return {
+        ("Issuer", f"{FN}-selfsigned"): {"selfSigned": {}},
+        ("Certificate", f"{FN}-ca"): {
+            "isCA": True, "commonName": "openshell-ca", "secretName": ca_secret, "duration": ca_duration,
+            "privateKey": ECDSA, "issuerRef": {"name": f"{FN}-selfsigned", "kind": "Issuer", "group": "cert-manager.io"}},
+        ("Issuer", f"{FN}-ca-issuer"): {"ca": {"secretName": ca_secret}},
+        ("Certificate", f"{FN}-server"): {
+            **leaf, "secretName": f"{FN}-server-tls", "commonName": FN, "dnsNames": HOOK_SANS + list(dns),
+            "ipAddresses": ["127.0.0.1"] + list(ips),
+            "usages": ["server auth", "digital signature", "key encipherment"]},
+        ("Certificate", f"{FN}-client"): {
+            **leaf, "secretName": f"{FN}-client-tls", "commonName": "openshell-client",
+            "usages": ["client auth", "digital signature", "key encipherment"]},
+    }
+
+for case, want in (("good-p15-cm", want_cm()), ("good-p15-cm-ingress", want_cm()),
+                   ("good-p15-cm-sans", want_cm(ca_secret="own-ca", ca_duration="9481h", dns=["gw.example.org"],
+                                                ips=["10.0.0.5"])),
+                   ("good-p15-cm-mixed-durations", want_cm(ca_duration="2h15m1s", duration="1h30m", renew="45m"))):
+    got = cm_objects(case)
+    if {k: v.get("spec") for k, v in got.items()} != want:
+        failures.append(f"{case}: the cert-manager objects are {[(k, v.get('spec')) for k, v in got.items()]}, "
+                        f"want exactly {want}")
+    for (kind, name), d in got.items():
+        if d["metadata"].get("namespace") != "default":
+            failures.append(f"{case}: {kind} {name} is not in the release namespace")
+for case in ("good-p1-defaults", "good-p7-tls", "good-p8-lb-ingress"):
+    if cm_objects(case):
+        failures.append(f"{case}: cert-manager objects rendered without gateway.certManager.enabled")
+
+def jobs(case):
+    return {d["metadata"]["name"]: d for d in docs(case) if d.get("kind") == "Job"}
+
+def job_args(case, name):
+    job = jobs(case).get(name)
+    if job is None:
+        failures.append(f"{case}: no Job {name} was rendered")
+        return None
+    return job["spec"]["template"]["spec"]["containers"][0]["args"]
+
+JWT_ONLY = ["generate-certs", "--namespace=$(POD_NAMESPACE)", "--jwt-only", f"--jwt-secret-name={FN}-jwt-keys"]
+BACKEND_CA = f"{FN}-backend-ca"
+for case in ("good-p15-cm", "good-p15-cm-ingress", "good-p15-cm-separate-ca"):
+    got = job_args(case, f"{FN}-jwt-pki-hook")
+    if got is not None and got != JWT_ONLY:
+        failures.append(f"{case}: the PKI hook args are {got}, want {JWT_ONLY}")
+    pki_role = next((d for d in objects(case, "Role") if d["metadata"]["name"] == f"{FN}-jwt-pki-hook"), {})
+    if pki_role.get("rules") != [{"apiGroups": [""], "resources": ["secrets"], "verbs": ["get", "create"]}]:
+        failures.append(f"{case}: the PKI hook Role rules are {pki_role.get('rules')}, want secrets get/create only")
+for case in ("good-p15-cm", "good-p15-cm-separate-ca", "good-p1-defaults", "good-p8-lb-ingress"):
+    if BACKEND_CA in jobs(case) or any(d["metadata"]["name"] == BACKEND_CA for d in docs(case)):
+        failures.append(f"{case}: backend-CA objects rendered without cert-manager and gatewayIngress")
+want_backend_args = JWT_ONLY + [f"--backend-ca-configmap-name={FN}-gateway-ca",
+                                f"--backend-ca-source-secret={FN}-server-tls",
+                                "--backend-ca-poll-timeout-seconds=120", "--backend-ca-fail-on-timeout"]
+got = job_args("good-p15-cm-ingress", BACKEND_CA)
+if got is not None and got != want_backend_args:
+    failures.append(f"good-p15-cm-ingress: the backend-CA Job args are {got}, want {want_backend_args}")
+want = want_backend_args[:-2] + ["--backend-ca-poll-timeout-seconds=60"]
+if job_args("good-p15-cm-no-fail", BACKEND_CA) != want or \
+        jobs("good-p15-cm-no-fail").get(BACKEND_CA, {}).get("spec", {}).get("activeDeadlineSeconds") != 90:
+    failures.append(f"good-p15-cm-no-fail: the backend-CA Job args are {job_args('good-p15-cm-no-fail', BACKEND_CA)}, "
+                    f"want {want} and a 90 s deadline")
+job = jobs("good-p15-cm-ingress").get(BACKEND_CA, {"metadata": {}, "spec": {"template": {"spec": {}}}})
+ann = job["metadata"].get("annotations") or {}
+if (ann.get("helm.sh/hook"), ann.get("helm.sh/hook-weight")) != ("post-install,post-upgrade", "0"):
+    failures.append(f"good-p15-cm-ingress: the backend-CA Job hook annotations are {ann}")
+if job["spec"].get("activeDeadlineSeconds") != 150:
+    failures.append(f"good-p15-cm-ingress: the backend-CA Job activeDeadlineSeconds is "
+                    f"{job['spec'].get('activeDeadlineSeconds')}, want 150")
+if job["spec"]["template"]["spec"].get("serviceAccountName") != BACKEND_CA:
+    failures.append(f"good-p15-cm-ingress: the backend-CA Job runs as "
+                    f"{job['spec']['template']['spec'].get('serviceAccountName')}, want {BACKEND_CA}")
+role = next((d for d in objects("good-p15-cm-ingress", "Role") if d["metadata"]["name"] == BACKEND_CA), {})
+want_rules = [{"apiGroups": [""], "resources": ["secrets"], "verbs": ["get"]},
+              {"apiGroups": [""], "resources": ["configmaps"], "verbs": ["get", "create", "update"]}]
+if role.get("rules") != want_rules:
+    failures.append(f"good-p15-cm-ingress: the backend-CA Role rules are {role.get('rules')}, want {want_rules}")
+binding = next((d for d in objects("good-p15-cm-ingress", "RoleBinding") if d["metadata"]["name"] == BACKEND_CA), {})
+if binding.get("roleRef", {}).get("name") != BACKEND_CA or \
+        binding.get("subjects") != [{"kind": "ServiceAccount", "name": BACKEND_CA, "namespace": "default"}]:
+    failures.append(f"good-p15-cm-ingress: the backend-CA RoleBinding is {binding}")
+if not any(d["metadata"]["name"] == BACKEND_CA for d in objects("good-p15-cm-ingress", "ServiceAccount")):
+    failures.append("good-p15-cm-ingress: no backend-CA ServiceAccount was rendered")
+# Without cert-manager the PKI hook still writes the CA ConfigMap itself.
+got = job_args("good-p8-lb-ingress", f"{FN}-jwt-pki-hook") or []
+if f"--backend-ca-configmap-name={FN}-gateway-ca" not in got:
+    failures.append(f"good-p8-lb-ingress: the PKI hook lost --backend-ca-configmap-name: {got}")
+# The gateway reads the client CA from the separate Secret.
+gw = gateway_container("good-p15-cm-separate-ca")
+args = gw.get("args", [])
+got = args[args.index("--tls-client-ca") + 1] if "--tls-client-ca" in args else None
+if got != "/etc/openshell-tls/client-ca/ca.crt":
+    failures.append(f"good-p15-cm-separate-ca: --tls-client-ca is {got!r}, want /etc/openshell-tls/client-ca/ca.crt")
+vols = [v for v in pod_spec("good-p15-cm-separate-ca").get("volumes", []) if v["name"] == "tls-client-ca"]
+if [v.get("secret", {}).get("secretName") for v in vols] != [f"{FN}-ca-tls"]:
+    failures.append(f"good-p15-cm-separate-ca: the tls-client-ca volume is {vols}, want Secret {FN}-ca-tls")
+# Extra cert-manager names also reach the gateway's runtime --server-san.
+if gateway_sans("good-p15-cm-sans") != ["gw.example.org,10.0.0.5"]:
+    failures.append(f"good-p15-cm-sans: the gateway's --server-san is {gateway_sans('good-p15-cm-sans')}, "
+                    "want ['gw.example.org,10.0.0.5']")
 
 if failures:
     print("CHART_PARITY_FAIL:")

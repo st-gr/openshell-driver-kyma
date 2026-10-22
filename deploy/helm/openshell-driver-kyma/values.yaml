@@ -716,6 +716,49 @@ gateway:
     # upgrade.
     serverDnsNames: []          # DNS names, e.g. [gw.example.org]; "*." prefix allowed
     serverIpAddresses: []       # IP addresses, e.g. [10.0.0.5]
+    # With gateway.certManager and gatewayIngress: how long the post-install Job waits
+    # for the issued server Secret before it copies its ca.crt into the ingress
+    # gateway's CA ConfigMap (the Job's deadline is 30 seconds longer), and whether
+    # running out of time fails the Job (upstream's pkiInitJob.timeoutSeconds and
+    # failOnTimeout).
+    timeoutSeconds: 120
+    failOnTimeout: true
+
+  # Certificates from cert-manager instead of the PKI hook (upstream's certManager).
+  # Requires gateway.tls.enabled. cert-manager must already be installed in the
+  # cluster (Kyma does not ship it): without its CRDs Helm refuses the release on
+  # the unknown Issuer and Certificate kinds. The chart creates, in the release
+  # namespace, a self-signed Issuer, a CA Certificate, a CA Issuer, and server and
+  # client Certificates that write the Secrets the PKI hook would have created
+  # (gateway.sandboxJwt.serverTlsSecretName / clientTlsSecretName), so the gateway
+  # and sandboxes mount the same names. The PKI hook then creates only the sandbox
+  # JWT keys. With gatewayIngress, a post-install Job copies the CA into the
+  # ingress gateway's CA ConfigMap; a renewed CA reaches it on the next helm upgrade.
+  # Switching an existing install to or from cert-manager: delete the server,
+  # client and JWT-keys Secrets, helm upgrade, then restart the gateway and the
+  # running sandboxes (they keep their copy of the old CA).
+  certManager:
+    enabled: false
+    # cert-manager.io (cert-manager) or cert.gardener.cloud (Gardener's
+    # certificate service).
+    api: cert-manager.io
+    caSecretName: ""            # default: <fullname>-ca-tls
+    # Go durations in hours, minutes and seconds (e.g. 8760h, 1h30m). The CA must
+    # outlive a leaf: caDuration must exceed certificateDuration +
+    # certificateRenewBefore.
+    caDuration: 87600h
+    certificateDuration: 8760h
+    certificateRenewBefore: 720h
+    # true: the gateway verifies client certificates (gateway.tls.clientCa.enabled)
+    # against the server Secret's ca.crt, the chart CA that also signs the client
+    # Certificate. false: against gateway.tls.clientCa.secretName, which must then
+    # be set (e.g. to the caSecretName above).
+    clientCaFromServerTlsSecret: true
+    # Extra names and addresses on the server Certificate, on top of the release's
+    # Service names, localhost and 127.0.0.1; they replace
+    # gateway.sandboxJwt.serverDnsNames / serverIpAddresses, which must stay empty.
+    serverDnsNames: []          # DNS names, e.g. [gw.example.org]; "*." prefix allowed
+    serverIpAddresses: []       # IP addresses, e.g. [10.0.0.5]
 
 # Non-secret gateway settings as TOML, upstream's gatewayConfig: top-level keys
 # name TOML tables (dotted, such as "openshell.gateway"; a nested map is the same

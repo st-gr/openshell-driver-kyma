@@ -129,6 +129,36 @@ if [ "$rc" -ne 0 ]; then
   exit 1
 fi
 echo "GATEWAY_ARGS_ACCEPTED (pki-hook, ${#pki_args[@]} args)"
+# With certificates from cert-manager the PKI hook runs --jwt-only, and with remote access
+# a post-install Job copies the issued CA with the --backend-ca-* flags. Both run the same
+# image's generate-certs, so their rendered arguments must be known too.
+check_job_args() { # label template job-name-suffix required-flag
+  local label=$1 template=$2 suffix=$3 required=$4 rc=0 out line job_args=()
+  helm template check "$CHART" --set gateway.enabled=true --set gateway.sandboxJwt.enabled=true \
+    --set gatewayService.enabled=true --set gatewayIngress.enabled=true --set gatewayIngress.domain=example.org \
+    --set gateway.tls.enabled=true --set gateway.oidc.issuer=https://issuer.example \
+    --set gateway.oidc.audience=osh-client --set gateway.oidc.clientId=osh-client \
+    --set gateway.certManager.enabled=true \
+    --show-only "$template" > "$WORK/job-$label.yaml"
+  python3 - "$WORK/job-$label.yaml" "$suffix" > "$WORK/job-$label-args.txt" <<'PY'
+import sys, yaml
+job = next(d for d in yaml.safe_load_all(open(sys.argv[1]))
+           if d and d.get("kind") == "Job" and d["metadata"]["name"].endswith(sys.argv[2]))
+print("\n".join(a.replace("$(POD_NAMESPACE)", "check") for a in job["spec"]["template"]["spec"]["containers"][0]["args"]))
+PY
+  grep -qx -- "$required" "$WORK/job-$label-args.txt" \
+    || { echo "ERROR: the $label render has no $required; nothing to test" >&2; exit 1; }
+  while IFS= read -r line; do job_args+=("$line"); done < "$WORK/job-$label-args.txt"
+  out="$(docker run --rm --entrypoint openshell-gateway "$IMAGE" "${job_args[@]}" --help 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "GATEWAY_ARGS_REJECTED ($label, exit $rc)"
+    head -5 <<<"$out"
+    exit 1
+  fi
+  echo "GATEWAY_ARGS_ACCEPTED ($label, ${#job_args[@]} args)"
+}
+check_job_args pki-hook-jwt-only templates/gateway-jwt-pki-hook.yaml -jwt-pki-hook --jwt-only
+check_job_args backend-ca templates/gateway-backend-ca-job.yaml -backend-ca --backend-ca-fail-on-timeout
 check_args remote-access \
   --set gatewayIngress.enabled=true \
   --set gatewayIngress.domain=example.org \

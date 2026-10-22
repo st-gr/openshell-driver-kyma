@@ -114,3 +114,48 @@ message, our keys).
 {{- end -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+gateway.certManager: cert-manager (or Gardener) issues the gateway's certificates.
+Refuses it without gateway.tls.enabled, an unknown api, durations that are not Go
+durations in h/m/s, a CA that would not outlive a leaf (Gardener refuses such a leaf,
+cert-manager cuts it short), the PKI hook's extra names (gateway.certManager has its
+own), and a client CA source that is not unambiguous: clientCaFromServerTlsSecret=true
+takes the server Secret's ca.crt, false takes gateway.tls.clientCa.secretName.
+*/}}
+{{- define "openshell-driver-kyma.certManagerGuards" -}}
+{{- $cm := .Values.gateway.certManager -}}
+{{- range $key, $v := dict "gateway.certManager.enabled" $cm.enabled "gateway.certManager.clientCaFromServerTlsSecret" $cm.clientCaFromServerTlsSecret "gateway.sandboxJwt.failOnTimeout" .Values.gateway.sandboxJwt.failOnTimeout -}}
+{{- if not (kindIs "bool" $v) -}}
+{{- fail (printf "%s must be a boolean (true or false), got the %s %q." $key (kindOf $v) (toString $v)) -}}
+{{- end -}}
+{{- end -}}
+{{- if and .Values.gateway.enabled $cm.enabled -}}
+{{- if not .Values.gateway.tls.enabled -}}
+{{- fail "gateway.certManager.enabled requires gateway.tls.enabled: the certificates it issues are the gateway's TLS certificates." -}}
+{{- end -}}
+{{- if not (has (toString $cm.api) (list "cert-manager.io" "cert.gardener.cloud")) -}}
+{{- fail (printf "gateway.certManager.api must be cert-manager.io or cert.gardener.cloud, got %q." (toString $cm.api)) -}}
+{{- end -}}
+{{- $ca := include "openshell-driver-kyma.durationSeconds" (dict "key" "gateway.certManager.caDuration" "value" $cm.caDuration "example" "87600h") | int64 -}}
+{{- $leaf := include "openshell-driver-kyma.durationSeconds" (dict "key" "gateway.certManager.certificateDuration" "value" $cm.certificateDuration "example" "8760h") | int64 -}}
+{{- $renew := include "openshell-driver-kyma.durationSeconds" (dict "key" "gateway.certManager.certificateRenewBefore" "value" $cm.certificateRenewBefore "example" "720h") | int64 -}}
+{{- if le $ca (add $leaf $renew) -}}
+{{- fail (printf "gateway.certManager.caDuration (%s) must exceed certificateDuration + certificateRenewBefore (%s): Gardener refuses a certificate that outlives its CA, and cert-manager cuts it short." (toString $cm.caDuration) (include "openshell-driver-kyma.formatDuration" (add $leaf $renew))) -}}
+{{- end -}}
+{{- if not (regexMatch "^[1-9][0-9]*$" (toString .Values.gateway.sandboxJwt.timeoutSeconds)) -}}
+{{- fail "gateway.sandboxJwt.timeoutSeconds must be a positive integer" -}}
+{{- end -}}
+{{- if or .Values.gateway.sandboxJwt.serverDnsNames .Values.gateway.sandboxJwt.serverIpAddresses -}}
+{{- fail "gateway.sandboxJwt.serverDnsNames and serverIpAddresses name the PKI hook certificate, which gateway.certManager replaces: move them to gateway.certManager.serverDnsNames and serverIpAddresses." -}}
+{{- end -}}
+{{- if and .Values.gateway.tls.enabled .Values.gateway.tls.clientCa.enabled -}}
+{{- if and $cm.clientCaFromServerTlsSecret .Values.gateway.tls.clientCa.secretName -}}
+{{- fail "gateway.tls.clientCa.secretName is set but gateway.certManager.clientCaFromServerTlsSecret is true, which takes the client CA from the server TLS Secret. Set gateway.certManager.clientCaFromServerTlsSecret=false to verify client certificates against the Secret, or leave gateway.tls.clientCa.secretName empty." -}}
+{{- end -}}
+{{- if and (not $cm.clientCaFromServerTlsSecret) (not .Values.gateway.tls.clientCa.secretName) -}}
+{{- fail (printf "gateway.certManager.clientCaFromServerTlsSecret is false but gateway.tls.clientCa.secretName is empty, and nothing else provides a client CA when cert-manager owns TLS. Set gateway.tls.clientCa.secretName to the secret containing the client CA (e.g. the value of gateway.certManager.caSecretName, here %s), or set gateway.tls.clientCa.enabled=false to disable mTLS client verification." (include "openshell-driver-kyma.caSecretName" .)) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
