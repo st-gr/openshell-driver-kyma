@@ -252,6 +252,19 @@ try bad-p13-two-backends 'only one external gateway.credentialDrivers backend ca
 	"${K8S12[@]}"
 try bad-p13-two-backends-config 'only one external gateway.credentialDrivers backend can be enabled at a time' t "${VAULT13[@]}" \
 	"${K8S12[@]}" --set-json 'gatewayConfig={"openshell.gateway":{"credential_drivers":["vault"]}}'
+try good-p13-timeout-string '' t "${VAULT13[@]}" --set-string gateway.credentialDrivers.vault.timeoutSecs=45
+try good-p13-timeout-empty '' t "${VAULT13[@]}" --set-string gateway.credentialDrivers.vault.timeoutSecs=
+i=0
+for v in abc 30s 1.5 0 -5; do
+	i=$((i + 1))
+	try "bad-p13-timeout-str$i" 'gateway.credentialDrivers.vault.timeoutSecs must be a positive integer' t "${VAULT13[@]}" \
+		--set-string "gateway.credentialDrivers.vault.timeoutSecs=$v"
+done
+for v in 1.5 0 -5; do
+	i=$((i + 1))
+	try "bad-p13-timeout-num$i" 'gateway.credentialDrivers.vault.timeoutSecs must be a positive integer' t "${VAULT13[@]}" \
+		--set "gateway.credentialDrivers.vault.timeoutSecs=$v"
+done
 try bad-p13-no-address 'gateway.credentialDrivers.vault.address is required' t \
 	--set gateway.credentialDrivers.vault.enabled=true
 try bad-p13-no-address-config 'gateway.credentialDrivers.vault.address is required' t \
@@ -811,6 +824,7 @@ VAULT_BASE = {"address": "https://vault.example.org", "auth_method": "kubernetes
 VAULT_CA = "/etc/openshell-tls/vault-ca/ca.crt"
 for case, want_table, want_ports in (
         ("good-p13-vault", {**VAULT_BASE, "timeout_secs": 30, "ca_bundle": VAULT_CA}, [443]),
+        ("good-p13-timeout-string", {**VAULT_BASE, "role": "", "timeout_secs": 45}, [443]),
         ("good-p13-vault-port", {**VAULT_BASE, "address": "https://vault.example.org:8200", "role": ""}, [443, 8200]),
         ("good-p13-vault-loopback-http", {**VAULT_BASE, "address": "http://localhost", "role": ""}, [443, 8200]),
         ("good-p13-vault-no-np", {**VAULT_BASE, "role": ""}, None),

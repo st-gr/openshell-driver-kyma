@@ -78,7 +78,7 @@ sqlite
 {{- end -}}
 
 {{/*
-Refuses a Vault address that is missing, or plain HTTP to a non-loopback host.
+Refuses a Vault timeoutSecs that is not a positive integer, and an address that is missing, or plain HTTP to a non-loopback host.
 Refuses a Kubernetes Secrets credential driver namespace that is the sandbox
 namespace (the driver keeps sandbox bootstrap Secrets there, and the Role would hand
 the gateway all of them), and createNamespace for the release namespace (upstream's
@@ -93,6 +93,11 @@ message, our keys).
 {{- if and .Values.gateway.credentialDrivers.kubernetesSecrets.createNamespace (eq $namespace .Release.Namespace) -}}
 {{- fail "gateway.credentialDrivers.kubernetesSecrets.createNamespace requires gateway.credentialDrivers.kubernetesSecrets.namespace to name a namespace other than the release namespace" -}}
 {{- end -}}
+{{- end -}}
+{{- /* Empty (the driver's default) or a positive integer, as a number or a numeric string; upstream's driver refuses anything else when the gateway starts. */ -}}
+{{- $timeout := .Values.gateway.credentialDrivers.vault.timeoutSecs -}}
+{{- if and .Values.gateway.enabled (not (kindIs "invalid" $timeout)) (ne (toString $timeout) "") (not (regexMatch "^[1-9][0-9]*$" (toString $timeout))) -}}
+{{- fail "gateway.credentialDrivers.vault.timeoutSecs must be a positive integer" -}}
 {{- end -}}
 {{- if and .Values.gateway.enabled (eq (include "openshell-driver-kyma.credentialDriver" .) "vault") -}}
 {{- /* Upstream's Vault driver checks the same at start-up; here the release fails instead. */ -}}
