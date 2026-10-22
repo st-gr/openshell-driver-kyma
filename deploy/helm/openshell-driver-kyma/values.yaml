@@ -426,6 +426,21 @@ gateway:
     rolesClaim: ""
     adminRole: ""
     userRole: ""
+    # How long (seconds) the gateway caches the issuer's signing keys (JWKS). Must be > 0.
+    jwksTtl: 3600
+    # The token claim holding the scopes. Empty = upstream's default.
+    scopesClaim: ""
+    # Origins (scheme://host[:port], no path or query) the gateway may fetch the
+    # JWKS from when the issuer's discovery document names another host.
+    jwksAllowedOrigins: []
+    # Lets the gateway fetch discovery and JWKS over plain http. For tests only:
+    # tokens are then verified against keys an attacker on the path could replace.
+    dangerouslyAllowInsecureHttp: false
+    # A ConfigMap in .Release.Namespace whose ca.crt signs the issuer's TLS
+    # certificate. Mounted into the gateway and set as SSL_CERT_FILE, which
+    # REPLACES the trust store for ALL outbound TLS of the gateway. Used only
+    # with an issuer.
+    caConfigMapName: ""
     # A Secret you manage in .Release.Namespace holding the OIDC client secret,
     # for the provider hook's client-credentials grant. The chart never reads it.
     clientCredentialsSecret:

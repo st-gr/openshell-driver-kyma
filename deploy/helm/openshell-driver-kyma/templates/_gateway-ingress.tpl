@@ -81,6 +81,17 @@ openshell-user and rejects a gateway with exactly one of them empty
 {{- if ne (empty $oidc.adminRole) (empty $oidc.userRole) -}}
 {{- fail "gateway.oidc.adminRole and gateway.oidc.userRole must be set together: upstream refuses a gateway with only one of them (both for RBAC, or neither)." -}}
 {{- end -}}
+{{- if lt (int $oidc.jwksTtl) 1 -}}
+{{- fail (printf "gateway.oidc.jwksTtl must be greater than zero, got %v." $oidc.jwksTtl) -}}
+{{- end -}}
+{{- if not (kindIs "bool" $oidc.dangerouslyAllowInsecureHttp) -}}
+{{- fail (printf "gateway.oidc.dangerouslyAllowInsecureHttp must be a boolean (true or false), got the %s %q." (kindOf $oidc.dangerouslyAllowInsecureHttp) (toString $oidc.dangerouslyAllowInsecureHttp)) -}}
+{{- end -}}
+{{- range $origin := $oidc.jwksAllowedOrigins -}}
+{{- if regexMatch "^[a-zA-Z][a-zA-Z0-9+.-]*://[^/?#]*[/?#]" (toString $origin) -}}
+{{- fail (printf "gateway.oidc.jwksAllowedOrigins entries must not include a path or query, got %q (use scheme://host[:port])." (toString $origin)) -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 
 {{- define "openshell-driver-kyma.gatewayIngressGuards" -}}

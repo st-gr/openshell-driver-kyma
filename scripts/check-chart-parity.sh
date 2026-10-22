@@ -68,6 +68,24 @@ try good-p4-otlp-driver-override '' t --set gateway.otlp.endpoint=http://otel.ex
 try bad-p4-telemetry-string 'gateway.telemetryEnabled must be a boolean' t \
 	--set-string gateway.telemetryEnabled=false
 
+# 5. OIDC JWKS TTL, scopes claim, allowed origins, insecure HTTP and issuer CA.
+OIDC5=(--set gateway.oidc.issuer=https://issuer.example.org --set gateway.oidc.audience=a)
+try good-p5-default "" t "${OIDC5[@]}"
+try good-p5-oidc '' t "${OIDC5[@]}" --set gateway.oidc.jwksTtl=600 --set gateway.oidc.scopesClaim=scp \
+	--set 'gateway.oidc.jwksAllowedOrigins={https://keys.example.org,https://k2.example.org}' \
+	--set gateway.oidc.dangerouslyAllowInsecureHttp=true
+try good-p5-oidc-ca '' t "${OIDC5[@]}" --set gateway.oidc.caConfigMapName=issuer-ca
+try good-p5-ca-no-issuer '' t --set gateway.oidc.caConfigMapName=issuer-ca
+try bad-p5-ttl 'gateway.oidc.jwksTtl must be greater than zero' t "${OIDC5[@]}" --set gateway.oidc.jwksTtl=0
+try bad-p5-origin-path 'gateway.oidc.jwksAllowedOrigins entries must not include a path or query' t "${OIDC5[@]}" \
+	--set 'gateway.oidc.jwksAllowedOrigins={https://k.example.org/path}'
+try bad-p5-insecure-string 'gateway.oidc.dangerouslyAllowInsecureHttp must be a boolean' t "${OIDC5[@]}" \
+	--set-string gateway.oidc.dangerouslyAllowInsecureHttp=false
+try bad-p5-extra-ttl 'gateway.extraArgs sets --oidc-jwks-ttl; use gateway.oidc.jwksTtl instead' t "${OIDC5[@]}" \
+	--set-json 'gateway.extraArgs=["--oidc-jwks-ttl=5"]'
+try bad-p5-extra-scopes 'gateway.extraArgs sets --oidc-scopes-claim; use gateway.oidc.scopesClaim instead' t "${OIDC5[@]}" \
+	--set-json 'gateway.extraArgs=["--oidc-scopes-claim","scp"]'
+
 # 2. gatewayConfig: merged, nested, arrays of tables; then each refusal.
 try good-p2-merge '' t --set-json 'gatewayConfig={"openshell.gateway":{"policy_validation_failure_mode":"retain_last_valid"},"openshell.gateway.auth":{"allow_unauthenticated_users":false}}'
 try good-p2-nested '' t --set-json 'gatewayConfig={"openshell":{"gateway":{"ssh_session_ttl_secs":600}}}'
@@ -302,6 +320,43 @@ arrays = gateway_toml("good-p2-array-tables")
 middleware = arrays.get("openshell", {}).get("supervisor", {}).get("middleware")
 if middleware != [{"name": "m1", "url": "http://m1.example.org"}]:
     failures.append(f"good-p2-array-tables: openshell.supervisor.middleware is {middleware!r}")
+
+# 5. OIDC extras and the issuer CA.
+def gw_args(case):
+    return gateway_container(case).get("args", [])
+
+args = gw_args("good-p5-oidc")
+for want in ("--oidc-jwks-ttl=600", "--oidc-scopes-claim=scp",
+             "--oidc-jwks-allowed-origins=https://keys.example.org,https://k2.example.org",
+             "--oidc-dangerously-allow-insecure-http=true"):
+    if want not in args:
+        failures.append(f"good-p5-oidc: gateway args lack {want}: {args}")
+args = gw_args("good-p5-default")
+if "--oidc-jwks-ttl=3600" not in args:
+    failures.append(f"good-p5-default: gateway args lack --oidc-jwks-ttl=3600: {args}")
+for flag in ("--oidc-scopes-claim", "--oidc-jwks-allowed-origins", "--oidc-dangerously-allow-insecure-http"):
+    if any(a.startswith(flag) for a in args):
+        failures.append(f"good-p5-default: gateway args carry {flag}: {args}")
+
+CA_DIR = "/etc/openshell-tls/oidc-ca"
+def ca_state(case):
+    spec = pod_spec(case)
+    gw = gateway_container(case)
+    return (env_of(gw).get("SSL_CERT_FILE", {}).get("value"),
+            [m for m in gw.get("volumeMounts", []) if m["name"] == "oidc-ca"],
+            [v for v in spec.get("volumes", []) if v["name"] == "oidc-ca"])
+
+env_v, mounts, vols = ca_state("good-p5-oidc-ca")
+if env_v != CA_DIR + "/ca.crt":
+    failures.append(f"good-p5-oidc-ca: SSL_CERT_FILE is {env_v!r}")
+if mounts != [{"name": "oidc-ca", "mountPath": CA_DIR, "readOnly": True}]:
+    failures.append(f"good-p5-oidc-ca: oidc-ca mounts are {mounts}")
+if vols != [{"name": "oidc-ca", "configMap": {"name": "issuer-ca"}}]:
+    failures.append(f"good-p5-oidc-ca: oidc-ca volumes are {vols}")
+if ca_state("good-p5-ca-no-issuer") != (None, [], []):
+    failures.append(f"good-p5-ca-no-issuer: CA wiring rendered without an issuer: {ca_state('good-p5-ca-no-issuer')}")
+if ca_state("good-p5-default") != (None, [], []):
+    failures.append("good-p5-default: CA wiring rendered without caConfigMapName")
 
 if failures:
     print("CHART_PARITY_FAIL:")

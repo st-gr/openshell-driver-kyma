@@ -149,6 +149,13 @@ check_args rbac-roles \
   --set gateway.oidc.rolesClaim=groups \
   --set gateway.oidc.adminRole=osh-admin \
   --set gateway.oidc.userRole=osh-user
+check_args oidc-extras \
+  --set gateway.oidc.issuer=https://issuer.example.org \
+  --set gateway.oidc.audience=a \
+  --set gateway.oidc.jwksTtl=600 \
+  --set gateway.oidc.scopesClaim=scp \
+  --set 'gateway.oidc.jwksAllowedOrigins={https://keys.example.org,https://k2.example.org}' \
+  --set gateway.oidc.dangerouslyAllowInsecureHttp=true
 
 # check_config LABEL TOML: run the gateway with that config. Config parsing happens before
 # anything else, so a schema error is told apart from the runtime failure that follows

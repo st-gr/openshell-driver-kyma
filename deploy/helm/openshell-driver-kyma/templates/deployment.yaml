@@ -3,6 +3,7 @@
 {{- include "openshell-driver-kyma.gatewayTlsGuards" . -}}
 {{- include "openshell-driver-kyma.gatewayGuards" . -}}
 {{- include "openshell-driver-kyma.gatewayOidcGuards" . -}}
+{{- include "openshell-driver-kyma.gatewayArgGuards" . -}}
 {{- include "openshell-driver-kyma.gatewayIngressGuards" . -}}
 {{- include "openshell-driver-kyma.workspaceGuards" . -}}
 {{- include "openshell-driver-kyma.sandboxEnvGuards" . -}}
@@ -113,6 +114,12 @@ spec:
                 secretKeyRef:
                   name: {{ include "openshell-driver-kyma.kekSecretName" . }}
                   key: key-encryption-key
+            {{- if and .Values.gateway.oidc.issuer .Values.gateway.oidc.caConfigMapName }}
+            # Trusts the issuer's CA (replaces the trust store for ALL outbound
+            # TLS of the gateway).
+            - name: SSL_CERT_FILE
+              value: /etc/openshell-tls/oidc-ca/ca.crt
+            {{- end }}
           # The gateway has no `run` subcommand; the default action is to
           # run the server. Listing flags directly under args is correct.
           args:
@@ -180,6 +187,16 @@ spec:
             - --oidc-user-role
             - {{ . | quote }}
             {{- end }}
+            {{- end }}
+            - --oidc-jwks-ttl={{ $.Values.gateway.oidc.jwksTtl | int }}
+            {{- with $.Values.gateway.oidc.scopesClaim }}
+            - --oidc-scopes-claim={{ . }}
+            {{- end }}
+            {{- with $.Values.gateway.oidc.jwksAllowedOrigins }}
+            - --oidc-jwks-allowed-origins={{ join "," . }}
+            {{- end }}
+            {{- if $.Values.gateway.oidc.dangerouslyAllowInsecureHttp }}
+            - --oidc-dangerously-allow-insecure-http=true
             {{- end }}
             {{- end }}
             {{- if include "openshell-driver-kyma.serviceHostsEnabled" . }}
@@ -267,6 +284,11 @@ spec:
               mountPath: /etc/openshell-tls/server
               readOnly: true
             {{- end }}
+            {{- if and .Values.gateway.oidc.issuer .Values.gateway.oidc.caConfigMapName }}
+            - name: oidc-ca
+              mountPath: /etc/openshell-tls/oidc-ca
+              readOnly: true
+            {{- end }}
             {{- with .Values.gateway.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -310,6 +332,11 @@ spec:
           secret:
             secretName: {{ include "openshell-driver-kyma.serverTlsSecretName" . }}
             defaultMode: 0o400
+        {{- end }}
+        {{- if and .Values.gateway.oidc.issuer .Values.gateway.oidc.caConfigMapName }}
+        - name: oidc-ca
+          configMap:
+            name: {{ .Values.gateway.oidc.caConfigMapName }}
         {{- end }}
         {{- with .Values.gateway.extraVolumes }}
         {{- toYaml . | nindent 8 }}
