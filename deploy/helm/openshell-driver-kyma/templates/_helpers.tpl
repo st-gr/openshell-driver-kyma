@@ -333,8 +333,21 @@ The driver's ClusterRole: rbac.clusterScoped.clusterRoleName, else
 {{/*
 File mode of the gateway's mounted Secrets (sandbox JWT keys, server TLS), as a
 decimal integer. gateway.sandboxJwt.secretDefaultMode is a string such as "0440"
-(sprig's int reads the leading 0 as octal) or an integer (288); empty = 0400.
+(sprig's int reads the leading 0 as octal) matching ^0[0-7]{3}$, or an integer
+from 1 to 511 (288); empty = 0400. Anything else is refused.
 */}}
 {{- define "openshell-driver-kyma.secretDefaultMode" -}}
-{{- with .Values.gateway.sandboxJwt.secretDefaultMode }}{{ . | int }}{{ else }}256{{ end -}}
+{{- $m := .Values.gateway.sandboxJwt.secretDefaultMode -}}
+{{- $msg := "gateway.sandboxJwt.secretDefaultMode must be an octal string like \"0440\" or an integer from 1 to 511" -}}
+{{- if or (kindIs "invalid" $m) (and (kindIs "string" $m) (eq $m "")) -}}
+256
+{{- else if kindIs "string" $m -}}
+{{- if not (regexMatch "^0[0-7]{3}$" $m) -}}{{- fail (printf "%s, got %q." $msg $m) -}}{{- end -}}
+{{ $m | int }}
+{{- else if or (kindIs "float64" $m) (kindIs "int" $m) (kindIs "int64" $m) -}}
+{{- if or (ne (float64 $m) (floor (float64 $m))) (lt (float64 $m) 1.0) (gt (float64 $m) 511.0) -}}{{- fail (printf "%s, got %v." $msg $m) -}}{{- end -}}
+{{ $m | int }}
+{{- else -}}
+{{- fail (printf "%s, got the %s %v." $msg (kindOf $m) $m) -}}
+{{- end -}}
 {{- end }}

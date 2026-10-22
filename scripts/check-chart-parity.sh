@@ -83,6 +83,15 @@ try good-p7 '' t --set serviceAccount.annotations.a=b --set sandboxServiceAccoun
 	--set-string gateway.sandboxJwt.secretDefaultMode=0440 --set driver.hostGatewayIp=10.0.0.1
 try good-p7-tls '' t --set gateway.tls.enabled=true
 try good-p7-int-mode '' t --set gateway.sandboxJwt.secretDefaultMode=288
+try good-p7-probes '' t --set gateway.probes.startup.failureThreshold=5 --set gateway.probes.readiness.periodSeconds=7
+MODE_ERR='gateway.sandboxJwt.secretDefaultMode must be an octal string like "0440" or an integer from 1 to 511'
+try bad-p7-mode-abc "$MODE_ERR" t --set-string gateway.sandboxJwt.secretDefaultMode=abc
+try bad-p7-mode-440 "$MODE_ERR" t --set-string gateway.sandboxJwt.secretDefaultMode=440
+try bad-p7-mode-0999 "$MODE_ERR" t --set-string gateway.sandboxJwt.secretDefaultMode=0999
+try bad-p7-mode-zero "$MODE_ERR" t --set gateway.sandboxJwt.secretDefaultMode=0
+try bad-p7-mode-too-big "$MODE_ERR" t --set gateway.sandboxJwt.secretDefaultMode=512
+try bad-p7-mode-float "$MODE_ERR" t --set gateway.sandboxJwt.secretDefaultMode=1.5
+try bad-p7-mode-float-string "$MODE_ERR" t --set-string gateway.sandboxJwt.secretDefaultMode=1.5
 try bad-p5-ttl 'gateway.oidc.jwksTtl must be greater than zero' t "${OIDC5[@]}" --set gateway.oidc.jwksTtl=0
 try bad-p5-origin-path 'gateway.oidc.jwksAllowedOrigins entries must not include a path or query' t "${OIDC5[@]}" \
 	--set 'gateway.oidc.jwksAllowedOrigins={https://k.example.org/path}'
@@ -452,6 +461,12 @@ for case in ("good-p7", "good-p7-tls", "good-p7-int-mode"):
                     if case == "good-p7" else None)
     if aliases != want_aliases:
         failures.append(f"{case}: hostAliases is {aliases}, want {want_aliases}")
+probes = gateway_container("good-p7-probes")
+for key, field, value in (("startupProbe", "failureThreshold", 5), ("readinessProbe", "periodSeconds", 7)):
+    want = {**GW_PROBES[key], field: value}
+    if probes.get(key) != want:
+        failures.append(f"good-p7-probes: gateway {key} is {probes.get(key)}, want {want}")
+
 for case, want in (("good-p7", ({"a": "b"}, {"c": "d"})), ("good-p7-tls", (None, None))):
     sas = service_accounts(case)
     got = (sas.get("openshell-driver"), sas.get("openshell-sandbox"))
