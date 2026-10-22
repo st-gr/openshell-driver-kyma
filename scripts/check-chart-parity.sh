@@ -86,6 +86,15 @@ try bad-p5-extra-ttl 'gateway.extraArgs sets --oidc-jwks-ttl; use gateway.oidc.j
 try bad-p5-extra-scopes 'gateway.extraArgs sets --oidc-scopes-claim; use gateway.oidc.scopesClaim instead' t "${OIDC5[@]}" \
 	--set-json 'gateway.extraArgs=["--oidc-scopes-claim","scp"]'
 
+# 6. mTLS-only authentication: a client CA without OIDC requires the certificate.
+TLS6=(--set gateway.tls.enabled=true --set gateway.tls.clientCa.enabled=true)
+try good-p6-mtls '' t "${TLS6[@]}"
+try good-p6-explicit-false '' t --set gateway.auth.allowUnauthenticatedUsers=false
+try bad-p6-ca-true 'gateway.auth.allowUnauthenticatedUsers=true would admit callers without a client certificate; remove it to require the certificate' t \
+	"${TLS6[@]}" --set gateway.auth.allowUnauthenticatedUsers=true
+try bad-p6-ca-config-true 'gatewayConfig openshell.gateway.auth.allow_unauthenticated_users=true would admit callers without a client certificate; remove it to require the certificate' t \
+	"${TLS6[@]}" --set-json 'gatewayConfig={"openshell.gateway.auth":{"allow_unauthenticated_users":true}}'
+
 # 2. gatewayConfig: merged, nested, arrays of tables; then each refusal.
 try good-p2-merge '' t --set-json 'gatewayConfig={"openshell.gateway":{"policy_validation_failure_mode":"retain_last_valid"},"openshell.gateway.auth":{"allow_unauthenticated_users":false}}'
 try good-p2-nested '' t --set-json 'gatewayConfig={"openshell":{"gateway":{"ssh_session_ttl_secs":600}}}'
@@ -286,6 +295,16 @@ for case, ports in (("good-p4-otlp", [443, 4318]), ("good-p4-otlp-driver-overrid
     got = pod_egress_ports(case)
     if got is None or not set(ports) <= set(got):
         failures.append(f"{case}: the pod NetworkPolicy egress ports are {got!r}, want {ports!r} among them")
+
+# 6. mTLS-only authentication.
+p6 = gateway_toml("good-p6-mtls").get("openshell", {}).get("gateway", {}).get("auth")
+if p6 != {"allow_unauthenticated_users": False}:
+    failures.append(f"good-p6-mtls: the auth table is {p6!r}, want allow_unauthenticated_users = False")
+if any(a.startswith("--enable-mtls-auth") for a in gateway_container("good-p6-mtls").get("args", [])):
+    failures.append("good-p6-mtls: the chart must not pass --enable-mtls-auth (the gateway enables it itself)")
+p6 = gateway_toml("good-p6-explicit-false").get("openshell", {}).get("gateway", {}).get("auth")
+if p6 != {"allow_unauthenticated_users": False}:
+    failures.append(f"good-p6-explicit-false: the auth table is {p6!r}, want allow_unauthenticated_users = False")
 
 # 2. gatewayConfig merged into the chart's tables, each table rendered once.
 def gateway_toml_text(name):

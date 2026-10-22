@@ -27,3 +27,19 @@ of openshell-driver-kyma.gatewayArgGuards.
   "--oidc-dangerously-allow-insecure-http" "gateway.oidc.dangerouslyAllowInsecureHttp")) -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+Refuses allow_unauthenticated_users = true next to a client CA: it would admit
+callers without a client certificate. Takes a dict with `config` (the gateway TOML
+dict, gatewayConfig merged and the chart's value applied), `root`, and `fromConfig`
+(true when gatewayConfig set the key), which picks the subject of the message.
+*/}}
+{{- define "openshell-driver-kyma.mtlsAuthGuard" -}}
+{{- if .root.Values.gateway.tls.clientCa.enabled -}}
+{{- $auth := get .config "openshell.gateway.auth" | default dict -}}
+{{- if eq (toJson (get $auth "allow_unauthenticated_users")) "true" -}}
+{{- $subject := ternary "gatewayConfig openshell.gateway.auth.allow_unauthenticated_users=true" "gateway.auth.allowUnauthenticatedUsers=true" .fromConfig -}}
+{{- fail (printf "%s would admit callers without a client certificate; remove it to require the certificate" $subject) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}

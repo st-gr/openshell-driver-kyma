@@ -127,14 +127,24 @@ key would silently do nothing). database_url is refused by _toml.tpl in every ta
 {{- include "openshell-driver-kyma.tomlDefault" (dict "config" $config "table" "openshell.gateway" "key" "grpc_rate_limit_requests" "value" $rateRequests) -}}
 {{- include "openshell-driver-kyma.tomlDefault" (dict "config" $config "table" "openshell.gateway" "key" "grpc_rate_limit_window_seconds" "value" $rateWindow) -}}
 {{- end -}}
-{{- /* When OIDC is not configured, every gRPC request would otherwise be
-rejected with Unauthenticated/missing-authorization-header — including
-`openshell sandbox create` from the CLI. Allow unauthenticated user
-calls in that case so the chart is usable in-cluster behind a port-
-forward or a Service-mesh-controlled APIRule. This setting covers user
-calls only; supervisor->gateway calls authenticate separately, via the
-driver's AuthenticateSandbox and (when enabled) the sandbox-JWT issuer. */ -}}
-{{- include "openshell-driver-kyma.tomlDefault" (dict "config" $config "table" "openshell.gateway.auth" "key" "allow_unauthenticated_users" "value" (not .Values.gateway.oidc.issuer)) -}}
+{{- /* Who may call as a user. Computed (gateway.auth.allowUnauthenticatedUsers
+null): true only when nothing authenticates callers, that is with neither an OIDC
+issuer nor a client CA. Without it every gRPC request would be rejected with
+Unauthenticated/missing-authorization-header, `openshell sandbox create` from the
+CLI included. With a client CA and no issuer the gateway enables mTLS user
+authentication itself (upstream v0.1.4), so false makes it require the certificate.
+This setting covers user calls only; supervisor->gateway calls authenticate
+separately, via the driver's AuthenticateSandbox and (when enabled) the
+sandbox-JWT issuer. */ -}}
+{{- $fromConfig := hasKey (get $config "openshell.gateway.auth" | default dict) "allow_unauthenticated_users" -}}
+{{- $allowUnauth := .Values.gateway.auth.allowUnauthenticatedUsers -}}
+{{- if kindIs "invalid" $allowUnauth -}}
+{{- $allowUnauth = and (not .Values.gateway.oidc.issuer) (not .Values.gateway.tls.clientCa.enabled) -}}
+{{- else if not (kindIs "bool" $allowUnauth) -}}
+{{- fail (printf "gateway.auth.allowUnauthenticatedUsers must be a boolean (true or false) or null, got the %s %q." (kindOf $allowUnauth) (toString $allowUnauth)) -}}
+{{- end -}}
+{{- include "openshell-driver-kyma.tomlDefault" (dict "config" $config "table" "openshell.gateway.auth" "key" "allow_unauthenticated_users" "value" $allowUnauth) -}}
+{{- include "openshell-driver-kyma.mtlsAuthGuard" (dict "config" $config "root" . "fromConfig" $fromConfig) -}}
 {{- /* The provider credentials' key-encryption key, from the Secret the gateway
 container takes this variable from (gateway.credentialStorage). */ -}}
 {{- include "openshell-driver-kyma.tomlDefault" (dict "config" $config "table" "openshell.gateway.credential_storage" "key" "key_encryption_key_env" "value" "OPENSHELL_GATEWAY_CREDENTIAL_KEY_ENCRYPTION_KEY") -}}

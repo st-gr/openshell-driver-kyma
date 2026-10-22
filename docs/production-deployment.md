@@ -293,6 +293,19 @@ from any namespace, because it holds only a public certificate. The ConfigMap
 is created by a hook, so `helm uninstall` leaves it behind; delete it by hand
 if you remove the release for good.
 
+### Client certificate (mTLS) authentication
+
+With `gateway.tls.clientCa.enabled` and no OIDC issuer, the gateway
+authenticates users by client certificate and the chart no longer sets
+`allow_unauthenticated_users` (`gateway.auth.allowUnauthenticatedUsers`, null =
+computed). The chart refuses `true` next to a client CA. Before 0.11.0 such an
+install admitted callers without a certificate; upgrading now requires one.
+
+With a client CA and no OIDC, every caller must present a certificate signed by
+the CA. Sandboxes hold such a certificate (the client TLS Secret), so anyone who
+can read it inside a sandbox can act as a user; use OIDC where that matters
+(upstream's model).
+
 ### Upgrading to gateway TLS
 
 An install from before 0.10.0 has a gateway certificate that does not name the

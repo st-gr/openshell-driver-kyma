@@ -242,4 +242,15 @@ PY
 grep -q '^\[openshell.gateway.otlp\]' "$WORK/gateway-otlp.toml" \
   || { echo "ERROR: the OTLP render has no [openshell.gateway.otlp] table; nothing to test" >&2; exit 1; }
 check_config otlp "$WORK/gateway-otlp.toml"
+# mTLS-only authentication: a client CA without OIDC (allow_unauthenticated_users = false).
+render templates/gateway-config.yaml --set gateway.tls.enabled=true \
+  --set gateway.tls.clientCa.enabled=true > "$WORK/rendered-mtls-auth.yaml"
+python3 - "$WORK/rendered-mtls-auth.yaml" "$WORK/gateway-mtls-auth.toml" <<'PY'
+import sys, yaml
+doc = yaml.safe_load(open(sys.argv[1]))
+open(sys.argv[2], "w").write(doc["data"]["gateway.toml"])
+PY
+grep -q '^ *allow_unauthenticated_users = false$' "$WORK/gateway-mtls-auth.toml" \
+  || { echo "ERROR: the mTLS render has no allow_unauthenticated_users = false; nothing to test" >&2; exit 1; }
+check_config mtls-auth "$WORK/gateway-mtls-auth.toml"
 echo "GATEWAY_CONFIG_ACCEPTED"
