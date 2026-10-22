@@ -578,9 +578,18 @@ gateway:
   #     gateway uses sqlite:///var/lib/openshell/openshell.db.
   #   - External database (enabled=true, dbUrl=postgres://…): no PVC,
   #     gateway uses the operator-supplied URL.
+  #   - External database from a Secret (externalDbSecret): no PVC, no flag;
+  #     the gateway reads the URL from OPENSHELL_DB_URL. Implies persistence.
   dbPersistence:
     enabled: false
-    dbUrl: ""               # e.g. postgresql://user:pass@host:5432/openshell — when empty AND enabled, use PVC-SQLite
+    # e.g. postgresql://user:pass@host:5432/openshell — when empty AND enabled, use PVC-SQLite.
+    # Prefer externalDbSecret: this URL, with its password, ends up in the pod args
+    # and in the release values.
+    dbUrl: ""
+    # Name of an Opaque Secret whose key "uri" holds the database URL (for example
+    # a PostgreSQL URI). Mutually exclusive with dbUrl. Postgres egress from the
+    # gateway pod needs networkPolicy.extraEgress.
+    externalDbSecret: ""
     storageSize: 1Gi
     storageClassName: ""    # "" = cluster default StorageClass
   # Sandbox-JWT signing & validation. Required for the supervisor inside

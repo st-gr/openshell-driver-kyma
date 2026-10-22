@@ -8,6 +8,7 @@
 {{- include "openshell-driver-kyma.workspaceGuards" . -}}
 {{- include "openshell-driver-kyma.sandboxEnvGuards" . -}}
 {{- include "openshell-driver-kyma.driverValueGuards" . -}}
+{{- $dbMode := ternary (include "openshell-driver-kyma.gatewayDbMode" .) "" .Values.gateway.enabled -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -122,6 +123,15 @@ spec:
                 secretKeyRef:
                   name: {{ include "openshell-driver-kyma.kekSecretName" . }}
                   key: key-encryption-key
+            {{- if eq $dbMode "secret" }}
+            # The database URL, with its password, from the Secret; a --db-url flag
+            # would beat this variable, so none is rendered.
+            - name: OPENSHELL_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.gateway.dbPersistence.externalDbSecret | quote }}
+                  key: uri
+            {{- end }}
             {{- if and .Values.gateway.oidc.issuer .Values.gateway.oidc.caConfigMapName }}
             # Trusts the issuer's CA (replaces the trust store for ALL outbound
             # TLS of the gateway).
@@ -139,10 +149,10 @@ spec:
             # anything in the file.
             - --config
             - /etc/openshell/gateway.toml
-            {{- if and .Values.gateway.dbPersistence.enabled .Values.gateway.dbPersistence.dbUrl }}
+            {{- if eq $dbMode "url" }}
             - --db-url
             - {{ .Values.gateway.dbPersistence.dbUrl | quote }}
-            {{- else if .Values.gateway.dbPersistence.enabled }}
+            {{- else if eq $dbMode "sqlite" }}
             - --db-url
             - "sqlite:///var/lib/openshell/openshell.db"
             {{- end }}
@@ -266,7 +276,7 @@ spec:
               mountPath: /home/nonroot/.local/state
             - name: gateway-tmp
               mountPath: /tmp
-            {{- if and .Values.gateway.dbPersistence.enabled (not .Values.gateway.dbPersistence.dbUrl) }}
+            {{- if eq $dbMode "sqlite" }}
             - name: gateway-db
               mountPath: /var/lib/openshell
             {{- end }}
@@ -324,7 +334,7 @@ spec:
           emptyDir: {}
         - name: gateway-tmp
           emptyDir: {}
-        {{- if and .Values.gateway.dbPersistence.enabled (not .Values.gateway.dbPersistence.dbUrl) }}
+        {{- if eq $dbMode "sqlite" }}
         - name: gateway-db
           persistentVolumeClaim:
             claimName: {{ include "openshell-driver-kyma.fullname" . }}-gateway-db

@@ -1,4 +1,4 @@
-{{- if and .Values.gateway.enabled .Values.gateway.dbPersistence.enabled (not .Values.gateway.dbPersistence.dbUrl) -}}
+{{- if and .Values.gateway.enabled (eq (include "openshell-driver-kyma.gatewayDbMode" .) "sqlite") -}}
 # PVC for the gateway's SQLite DB. The gateway writes
 # /var/lib/openshell/openshell.db; without this PVC, every pod restart
 # wipes the provider/inference configs.

@@ -21,6 +21,7 @@ of openshell-driver-kyma.gatewayArgGuards.
 {{- define "openshell-driver-kyma.gatewayArgGuards" -}}
 {{- if .Values.gateway.enabled -}}
 {{- include "openshell-driver-kyma.extraArgsGuard" (dict "args" .Values.gateway.extraArgs "flags" (dict
+  "--db-url" "gateway.dbPersistence.dbUrl"
   "--tls-cert" "gateway.tls.enabled"
   "--tls-key" "gateway.tls.enabled"
   "--disable-tls" "gateway.tls.enabled"
@@ -45,5 +46,32 @@ dict, gatewayConfig merged and the chart's value applied), `root`, and `fromConf
 {{- $subject := ternary "gatewayConfig openshell.gateway.auth.allow_unauthenticated_users=true" "gateway.auth.allowUnauthenticatedUsers=true" .fromConfig -}}
 {{- fail (printf "%s would admit callers without a client certificate; remove it to require the certificate" $subject) -}}
 {{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Where the gateway's database lives: "secret" (URL from gateway.dbPersistence.externalDbSecret,
+which implies persistence), "url" (dbUrl in the args), "sqlite" (PVC-backed) or "" (ephemeral).
+Refuses a Secret next to dbUrl and an invalid Secret name; the name check mirrors upstream's
+validateSecretReference (a DNS-1123 subdomain of at most 253 characters).
+*/}}
+{{- define "openshell-driver-kyma.gatewayDbMode" -}}
+{{- $db := .Values.gateway.dbPersistence -}}
+{{- if $db.externalDbSecret -}}
+{{- $name := toString $db.externalDbSecret -}}
+{{- if $db.dbUrl -}}
+{{- fail "gateway.dbPersistence.externalDbSecret and gateway.dbPersistence.dbUrl are mutually exclusive" -}}
+{{- end -}}
+{{- if gt (len $name) 253 -}}
+{{- fail "gateway.dbPersistence.externalDbSecret must be no more than 253 characters" -}}
+{{- end -}}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $name) -}}
+{{- fail "gateway.dbPersistence.externalDbSecret must be a valid Kubernetes Secret name" -}}
+{{- end -}}
+secret
+{{- else if and $db.enabled $db.dbUrl -}}
+url
+{{- else if $db.enabled -}}
+sqlite
 {{- end -}}
 {{- end -}}

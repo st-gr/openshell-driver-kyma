@@ -157,6 +157,21 @@ check_args oidc-extras \
   --set 'gateway.oidc.jwksAllowedOrigins={https://keys.example.org,https://k2.example.org}' \
   --set gateway.oidc.dangerouslyAllowInsecureHttp=true
 
+# gateway.dbPersistence.externalDbSecret hands the database URL over as OPENSHELL_DB_URL
+# (no --db-url flag). Positive evidence that the pinned gateway reads it: a URL with an
+# unknown scheme is rejected with that URL in the error, which a gateway that ignored the
+# variable could not produce (it would stop at the unrelated state-directory failure).
+check_args external-db-secret --set gateway.dbPersistence.externalDbSecret=osh-db
+rc=0
+out="$(docker run --rm -e OPENSHELL_DB_URL=bogus://example/db --entrypoint openshell-gateway "$IMAGE" \
+  --compute-driver kyma --compute-driver-socket /run/openshell/driver.sock --disable-tls 2>&1)" || rc=$?
+if ! grep -q "unsupported database URL scheme: bogus://example/db" <<<"$out"; then
+  echo "GATEWAY_DB_URL_ENV_NOT_READ (exit $rc); output:" >&2
+  head -10 <<<"$out" >&2
+  exit 1
+fi
+echo "GATEWAY_DB_URL_ENV_READ"
+
 # check_config LABEL TOML: run the gateway with that config. Config parsing happens before
 # anything else, so a schema error is told apart from the runtime failure that follows
 # outside Kubernetes. Prints GATEWAY_CONFIG_ACCEPTED (LABEL) or exits non-zero.

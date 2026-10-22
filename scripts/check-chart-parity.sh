@@ -111,6 +111,19 @@ try bad-p8-type 'gatewayService.type must be ClusterIP, NodePort or LoadBalancer
 try bad-p8-lb-no-service 'gatewayService.type=LoadBalancer requires gatewayService.enabled' t \
 	--set gatewayService.enabled=false --set driver.gatewayEndpoint=http://gateway.example:8080 \
 	--set gatewayService.type=LoadBalancer
+# 9. External database Secret: the URL comes from a Secret key, never from args or values.
+try good-p9-db '' t --set gateway.dbPersistence.enabled=true --set gateway.dbPersistence.externalDbSecret=osh-db
+try good-p9-db-without-enabled '' t --set gateway.dbPersistence.externalDbSecret=osh-db
+try good-p9-sqlite '' t --set gateway.dbPersistence.enabled=true
+try bad-p9-both 'gateway.dbPersistence.externalDbSecret and gateway.dbPersistence.dbUrl are mutually exclusive' t \
+	--set gateway.dbPersistence.externalDbSecret=osh-db --set gateway.dbPersistence.dbUrl=postgresql://u@h/d
+try bad-p9-name 'gateway.dbPersistence.externalDbSecret must be a valid Kubernetes Secret name' t \
+	--set gateway.dbPersistence.externalDbSecret=Bad_Name
+try bad-p9-long 'gateway.dbPersistence.externalDbSecret must be no more than 253 characters' t \
+	--set "gateway.dbPersistence.externalDbSecret=$(printf 'a%.0s' $(seq 254))"
+try bad-p9-extra-db-url 'gateway.extraArgs sets --db-url; use gateway.dbPersistence.dbUrl instead' t \
+	--set-json 'gateway.extraArgs=["--db-url=sqlite:x"]'
+
 try bad-p5-ttl 'gateway.oidc.jwksTtl must be greater than zero' t "${OIDC5[@]}" --set gateway.oidc.jwksTtl=0
 try bad-p5-origin-path 'gateway.oidc.jwksAllowedOrigins entries must not include a path or query' t "${OIDC5[@]}" \
 	--set 'gateway.oidc.jwksAllowedOrigins={https://k.example.org/path}'
@@ -545,6 +558,24 @@ grpc = next((p for p in services("good-p8-nodeport").get("t-openshell-driver-kym
              if p["name"] == "grpc"), {})
 if grpc.get("nodePort") != 30443:
     failures.append(f"good-p8-nodeport: grpc port is {grpc}, want nodePort 30443")
+
+# 9. External database Secret.
+for case in ("good-p9-db", "good-p9-db-without-enabled"):
+    gw = gateway_container(case)
+    want = {"name": "OPENSHELL_DB_URL", "valueFrom": {"secretKeyRef": {"name": "osh-db", "key": "uri"}}}
+    if env_of(gw).get("OPENSHELL_DB_URL") != want:
+        failures.append(f"{case}: OPENSHELL_DB_URL is {env_of(gw).get('OPENSHELL_DB_URL')}")
+    if any(a.startswith("--db-url") for a in gw_args(case)):
+        failures.append(f"{case}: gateway args carry --db-url: {gw_args(case)}")
+    if any(d.get("kind") == "PersistentVolumeClaim" for d in docs(case)):
+        failures.append(f"{case}: a PersistentVolumeClaim was rendered")
+    if any(v["name"] == "gateway-db" for v in pod_spec(case).get("volumes", [])):
+        failures.append(f"{case}: the gateway-db volume was rendered")
+sq = gateway_container("good-p9-sqlite")
+if "OPENSHELL_DB_URL" in env_of(sq) or "--db-url" not in gw_args("good-p9-sqlite"):
+    failures.append("good-p9-sqlite: SQLite mode lost its --db-url arg or gained OPENSHELL_DB_URL")
+if not any(d.get("kind") == "PersistentVolumeClaim" for d in docs("good-p9-sqlite")):
+    failures.append("good-p9-sqlite: no PersistentVolumeClaim was rendered")
 
 if failures:
     print("CHART_PARITY_FAIL:")
