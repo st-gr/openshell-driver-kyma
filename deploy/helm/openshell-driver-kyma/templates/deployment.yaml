@@ -104,6 +104,9 @@ spec:
           image: {{ include "openshell-driver-kyma.gatewayImage" . | quote }}
           imagePullPolicy: {{ .Values.gateway.image.pullPolicy }}
           env:
+            # Usage telemetry: off unless gateway.telemetryEnabled (gateway only).
+            - name: OPENSHELL_TELEMETRY_ENABLED
+              value: {{ .Values.gateway.telemetryEnabled | toString | quote }}
             # The key the TOML's [openshell.gateway.credential_storage] names.
             - name: OPENSHELL_GATEWAY_CREDENTIAL_KEY_ENCRYPTION_KEY
               valueFrom:

@@ -59,6 +59,15 @@ try bad-p3-loopback-string 'gateway.enableLoopbackServiceHttp must be a boolean'
 	--set-string gateway.enableLoopbackServiceHttp=false
 try bad-p3-empty-name 'gateway.name must not be empty' t --set-string 'gateway.name= '
 
+# 4. Telemetry (off by default, gateway only) and the gateway's OTLP export.
+try good-p4-telemetry-on '' t --set gateway.telemetryEnabled=true
+try good-p4-otlp '' t --set gateway.otlp.endpoint=http://otel.example.org:4318 --set gateway.otlp.serviceName=osh-gw
+try good-p4-otlp-no-name '' t --set gateway.otlp.endpoint=http://otel.example.org:4318
+try good-p4-otlp-driver-override '' t --set gateway.otlp.endpoint=http://otel.example.org:4318 \
+	--set driver.otlpEndpoint=http://other.example.org:4317
+try bad-p4-telemetry-string 'gateway.telemetryEnabled must be a boolean' t \
+	--set-string gateway.telemetryEnabled=false
+
 # 2. gatewayConfig: merged, nested, arrays of tables; then each refusal.
 try good-p2-merge '' t --set-json 'gatewayConfig={"openshell.gateway":{"policy_validation_failure_mode":"retain_last_valid"},"openshell.gateway.auth":{"allow_unauthenticated_users":false}}'
 try good-p2-nested '' t --set-json 'gatewayConfig={"openshell":{"gateway":{"ssh_session_ttl_secs":600}}}'
@@ -218,6 +227,47 @@ for case, want in (("good-p3-values", "gw1"), ("good-p1-defaults", "t-openshell-
 got = gateway_toml("good-p3-driver-name").get("openshell", {}).get("gateway", {}).get("name")
 if got != "t-openshell-driver-kyma":
     failures.append(f"good-p3-driver-name: the TOML name is {got!r}, want 't-openshell-driver-kyma'")
+
+# 4. Telemetry: always rendered on the gateway, never on the driver; the OTLP table and egress.
+def telemetry_env(case):
+    return env_of(gateway_container(case)).get("OPENSHELL_TELEMETRY_ENABLED")
+
+for case, want in (("good-p1-defaults", "false"), ("good-p4-telemetry-on", "true")):
+    got = telemetry_env(case)
+    if got != {"name": "OPENSHELL_TELEMETRY_ENABLED", "value": want}:
+        failures.append(f"{case}: the gateway's OPENSHELL_TELEMETRY_ENABLED is {got!r}, want {want!r}")
+    if "OPENSHELL_TELEMETRY_ENABLED" in env_of(driver_container(case)):
+        failures.append(f"{case}: the driver container must not get OPENSHELL_TELEMETRY_ENABLED")
+
+def otlp_table(case):
+    return gateway_toml(case).get("openshell", {}).get("gateway", {}).get("otlp")
+
+def pod_egress_ports(case):
+    for d in docs(case):
+        if d.get("kind") == "NetworkPolicy" and d["metadata"]["name"].endswith("-driver"):
+            return sorted(p["port"] for r in d["spec"]["egress"] for p in r.get("ports", [])
+                          if p.get("protocol") == "TCP")
+    return None
+
+if otlp_table("good-p1-defaults") is not None:
+    failures.append(f"good-p1-defaults: unexpected [openshell.gateway.otlp]: {otlp_table('good-p1-defaults')}")
+if otlp_table("good-p4-telemetry-on") is not None:
+    failures.append("good-p4-telemetry-on: telemetry alone must not write an otlp table")
+endpoint = "http://otel.example.org:4318"
+for case, want_table in (("good-p4-otlp", {"endpoint": endpoint, "service_name": "osh-gw"}),
+                         ("good-p4-otlp-no-name", {"endpoint": endpoint}),
+                         ("good-p4-otlp-driver-override", {"endpoint": endpoint})):
+    if otlp_table(case) != want_table:
+        failures.append(f"{case}: the otlp table is {otlp_table(case)!r}, want {want_table!r}")
+for case, want in (("good-p1-defaults", None), ("good-p4-otlp", endpoint),
+                   ("good-p4-otlp-driver-override", "http://other.example.org:4317")):
+    got = env_of(driver_container(case)).get("OPENSHELL_OTLP_ENDPOINT", {}).get("value")
+    if got != want:
+        failures.append(f"{case}: the driver's OPENSHELL_OTLP_ENDPOINT is {got!r}, want {want!r}")
+for case, ports in (("good-p4-otlp", [443, 4318]), ("good-p4-otlp-driver-override", [443, 4317, 4318])):
+    got = pod_egress_ports(case)
+    if got is None or not set(ports) <= set(got):
+        failures.append(f"{case}: the pod NetworkPolicy egress ports are {got!r}, want {ports!r} among them")
 
 # 2. gatewayConfig merged into the chart's tables, each table rendered once.
 def gateway_toml_text(name):

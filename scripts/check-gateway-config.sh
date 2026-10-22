@@ -224,4 +224,15 @@ PY
 grep -q '^ *image_preparation_timeout_seconds = 300$' "$WORK/gateway-passthrough.toml" \
   || { echo "ERROR: the gatewayConfig render has no image_preparation_timeout_seconds; nothing to test" >&2; exit 1; }
 check_config gateway-config-passthrough "$WORK/gateway-passthrough.toml"
+# The gateway's OTLP trace export (gateway.otlp).
+render templates/gateway-config.yaml --set gateway.otlp.endpoint=http://otel.example.org:4318 \
+  --set gateway.otlp.serviceName=osh-gw > "$WORK/rendered-otlp.yaml"
+python3 - "$WORK/rendered-otlp.yaml" "$WORK/gateway-otlp.toml" <<'PY'
+import sys, yaml
+doc = yaml.safe_load(open(sys.argv[1]))
+open(sys.argv[2], "w").write(doc["data"]["gateway.toml"])
+PY
+grep -q '^\[openshell.gateway.otlp\]' "$WORK/gateway-otlp.toml" \
+  || { echo "ERROR: the OTLP render has no [openshell.gateway.otlp] table; nothing to test" >&2; exit 1; }
+check_config otlp "$WORK/gateway-otlp.toml"
 echo "GATEWAY_CONFIG_ACCEPTED"

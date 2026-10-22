@@ -150,6 +150,13 @@ from the JWT Secret) so the gateway can mint per-sandbox JWTs in IssueSandboxTok
 {{- include "openshell-driver-kyma.tomlDefault" (dict "config" $config "table" "openshell.gateway.gateway_jwt" "key" $key "value" $value) -}}
 {{- end -}}
 {{- end -}}
+{{- /* gateway.otlp: the gateway's OTLP trace export; no table without an endpoint. */ -}}
+{{- with .Values.gateway.otlp.endpoint -}}
+{{- include "openshell-driver-kyma.tomlDefault" (dict "config" $config "table" "openshell.gateway.otlp" "key" "endpoint" "value" .) -}}
+{{- with $.Values.gateway.otlp.serviceName -}}
+{{- include "openshell-driver-kyma.tomlDefault" (dict "config" $config "table" "openshell.gateway.otlp" "key" "service_name" "value" .) -}}
+{{- end -}}
+{{- end -}}
 {{- /* gateway.ocsfLog: the gateway's OCSF audit events as JSONL. */ -}}
 {{- $ocsf := .Values.gateway.ocsfLog -}}
 {{- if $ocsf.enabled -}}

@@ -26,7 +26,7 @@ OcsfLogConfig). A string is always true in a template, so "false" would enable i
 {{- if not (has .Values.gateway.policyValidationFailureMode (list "fail_closed" "retain_last_valid")) -}}
 {{- fail (printf "gateway.policyValidationFailureMode must be fail_closed or retain_last_valid, got %q." (toString .Values.gateway.policyValidationFailureMode)) -}}
 {{- end -}}
-{{- range $key := list "enableLoopbackServiceHttp" "enableWebsocketTunnel" -}}
+{{- range $key := list "enableLoopbackServiceHttp" "enableWebsocketTunnel" "telemetryEnabled" -}}
 {{- if not (kindIs "bool" (get $.Values.gateway $key)) -}}
 {{- fail (printf "gateway.%s must be a boolean (true or false), got the %s %q." $key (kindOf (get $.Values.gateway $key)) (toString (get $.Values.gateway $key))) -}}
 {{- end -}}

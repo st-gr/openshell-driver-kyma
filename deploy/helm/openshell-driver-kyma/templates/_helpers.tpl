@@ -241,8 +241,8 @@ read this, so they follow one effective value.
 {{- end -}}
 
 {{/*
-The TCP port the driver's OTLP trace export dials, for its NetworkPolicy egress;
-empty without driver.otlpEndpoint. Upstream parses the endpoint as a URI and
+The TCP port an OTLP trace export to the given endpoint dials, for the
+NetworkPolicy egress; empty without an endpoint. Upstream parses the endpoint as a URI and
 hands it to tonic's OTLP/gRPC exporter (openshell-otel src/lib.rs build_provider
 at the pinned tag), which dials an explicit port, else its scheme's: 443 for
 https, 80 for http. An endpoint without an http(s) scheme (for example a bare
@@ -250,12 +250,36 @@ host:4317) gives no port: tonic refuses every request to an endpoint with no
 scheme, so upstream exports nothing there and there is no port to open.
 */}}
 {{- define "openshell-driver-kyma.otlpPort" -}}
-{{- with .Values.driver.otlpEndpoint -}}
+{{- with . -}}
 {{- $url := urlParse . -}}
 {{- if and (has $url.scheme (list "http" "https")) $url.host -}}
 {{- default (ternary "443" "80" (eq $url.scheme "https")) (trimPrefix ":" (regexFind ":[0-9]+$" $url.host)) -}}
 {{- end -}}
 {{- end -}}
+{{- end -}}
+
+{{/* The driver's OTLP endpoint: driver.otlpEndpoint, else gateway.otlp.endpoint. */}}
+{{- define "openshell-driver-kyma.driverOtlpEndpoint" -}}
+{{- default .Values.gateway.otlp.endpoint .Values.driver.otlpEndpoint -}}
+{{- end -}}
+
+{{/*
+The de-duplicated TCP ports the pod's OTLP trace exports dial, as a JSON array of
+numbers: the driver's endpoint, and the gateway's when the in-pod gateway runs.
+Each endpoint's port comes from openshell-driver-kyma.otlpPort (given the endpoint).
+*/}}
+{{- define "openshell-driver-kyma.egressPorts" -}}
+{{- $endpoints := list (include "openshell-driver-kyma.driverOtlpEndpoint" .) -}}
+{{- if .Values.gateway.enabled -}}
+{{- $endpoints = prepend $endpoints .Values.gateway.otlp.endpoint -}}
+{{- end -}}
+{{- $ports := list -}}
+{{- range $endpoints -}}
+{{- with include "openshell-driver-kyma.otlpPort" . -}}
+{{- $ports = append $ports (int .) -}}
+{{- end -}}
+{{- end -}}
+{{- $ports | uniq | toJson -}}
 {{- end -}}
 
 {{/*

@@ -201,6 +201,7 @@ driver:
   # http://collector.observability:4317. Plain http:// (upstream v0.1.4 builds
   # its exporter without TLS). With networkPolicy.enabled the driver pod may
   # then reach that port (80 when none is given), on any address.
+  # Empty defaults to gateway.otlp.endpoint.
   otlpEndpoint: ""
   gatewayName: ""            # "" = gateway.name, else the chart fullname
   # Secret with the client certificate sandboxes present to a TLS gateway
@@ -384,6 +385,19 @@ gateway:
   # nothing on its route that blocks HTTP/1.1 upgrades, and Istio passes them by
   # default, so the tunnel works through gatewayIngress without a template change.
   enableWebsocketTunnel: false
+  # OpenShell's usage telemetry (OPENSHELL_TELEMETRY_ENABLED on the gateway
+  # container), off here although upstream's chart defaults it on. true affects
+  # the gateway only: sandboxes never send telemetry and the driver is built
+  # without the feature. driver.disableClaudeTelemetry is separate (Anthropic's
+  # telemetry inside sandboxes).
+  telemetryEnabled: false
+  # OTLP/gRPC trace export of the gateway ([openshell.gateway.otlp]). An empty
+  # endpoint writes no table. A tonic endpoint needs a scheme, as for
+  # driver.otlpEndpoint, which defaults to this endpoint. With
+  # networkPolicy.enabled the pod may reach the endpoint's port on any address.
+  otlp:
+    endpoint: ""      # e.g. http://collector.observability:4317
+    serviceName: ""   # "" = the gateway's own default
   grpcPort: 8080
   metricsPort: 9091
   healthPort: 9092

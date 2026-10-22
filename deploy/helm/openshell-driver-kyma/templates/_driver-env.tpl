@@ -38,7 +38,7 @@ scripts/check-chart-render.sh fails CI when an upstream option is missing here.
 - name: OPENSHELL_COMPUTE_DRIVER_BIND
   value: {{ . | quote }}
 {{- end }}
-{{- with $d.otlpEndpoint }}
+{{- with include "openshell-driver-kyma.driverOtlpEndpoint" . }}
 - name: OPENSHELL_OTLP_ENDPOINT
   value: {{ . | quote }}
 {{- end }}
