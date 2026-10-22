@@ -136,6 +136,57 @@ are upstream's.
 {{- end }}
 
 {{/*
+One table of gatewayConfig, as JSON, its nested maps normalised to dotted tables as
+the gateway TOML renders them: (list $root "openshell.gateway").
+*/}}
+{{- define "openshell-driver-kyma.userGatewayTable" -}}
+{{- $root := index . 0 -}}
+{{- $user := $root.Values.gatewayConfig | default dict | deepCopy -}}
+{{- $flat := dict -}}
+{{- range $name, $table := $user -}}
+{{- if kindIs "map" $table -}}
+{{- include "openshell-driver-kyma.tomlFlatten" (dict "out" $flat "user" $user "name" $name "table" $table) -}}
+{{- end -}}
+{{- end -}}
+{{- get $flat (index . 1) | default dict | toJson -}}
+{{- end }}
+
+{{/*
+The external credential driver the gateway uses: "" (the default store, encrypted in
+the gateway DB with the credentialStorage KEK), "kubernetes-secrets" or "vault".
+gatewayConfig's openshell.gateway.credential_drivers wins over the values, as in
+upstream's chart, and may name one backend only.
+*/}}
+{{- define "openshell-driver-kyma.credentialDriver" -}}
+{{- $gateway := include "openshell-driver-kyma.userGatewayTable" (list . "openshell.gateway") | fromJson -}}
+{{- $drivers := get $gateway "credential_drivers" -}}
+{{- if and (hasKey $gateway "credential_drivers") (ne $drivers nil) -}}
+{{- if not (kindIs "slice" $drivers) -}}
+{{- fail (printf "gatewayConfig.openshell.gateway.credential_drivers must be a list, got %s" (kindOf $drivers)) -}}
+{{- end -}}
+{{- if eq (len $drivers) 0 -}}
+{{- fail "gatewayConfig.openshell.gateway.credential_drivers must select exactly one backend or be omitted/null to use the chart default" -}}
+{{- end -}}
+{{- if gt (len $drivers) 1 -}}
+{{- fail "gatewayConfig.openshell.gateway.credential_drivers may select only one backend" -}}
+{{- end -}}
+{{- index $drivers 0 | toString -}}
+{{- else if .Values.gateway.credentialDrivers.kubernetesSecrets.enabled -}}
+kubernetes-secrets
+{{- end -}}
+{{- end }}
+
+{{/*
+Namespace of the Kubernetes Secrets credential driver: gatewayConfig's
+openshell.credential_drivers.kubernetes-secrets namespace, else
+gateway.credentialDrivers.kubernetesSecrets.namespace, else the release namespace.
+*/}}
+{{- define "openshell-driver-kyma.credentialSecretsNamespace" -}}
+{{- $config := include "openshell-driver-kyma.userGatewayTable" (list . "openshell.credential_drivers.kubernetes-secrets") | fromJson -}}
+{{- get $config "namespace" | default .Values.gateway.credentialDrivers.kubernetesSecrets.namespace | default .Release.Namespace -}}
+{{- end }}
+
+{{/*
 Server TLS Secret name (auto-created by `generate-certs`, unused when --disable-tls).
 */}}
 {{- define "openshell-driver-kyma.serverTlsSecretName" -}}

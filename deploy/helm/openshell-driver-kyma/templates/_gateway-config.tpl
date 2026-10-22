@@ -146,9 +146,21 @@ sandbox-JWT issuer. */ -}}
 {{- end -}}
 {{- include "openshell-driver-kyma.tomlDefault" (dict "config" $config "table" "openshell.gateway.auth" "key" "allow_unauthenticated_users" "value" $allowUnauth) -}}
 {{- include "openshell-driver-kyma.mtlsAuthGuard" (dict "config" $config "root" . "fromConfig" $fromConfig) -}}
-{{- /* The provider credentials' key-encryption key, from the Secret the gateway
+{{- /* Provider credentials: an external credential driver
+(gateway.credentialDrivers, or gatewayConfig's credential_drivers) owns its storage,
+so, as upstream's chart, no credential_storage table then: its KEK variable is not
+set in that mode. Otherwise the key-encryption key, from the Secret the gateway
 container takes this variable from (gateway.credentialStorage). */ -}}
+{{- $credentialDriver := include "openshell-driver-kyma.credentialDriver" . -}}
+{{- if $credentialDriver -}}
+{{- include "openshell-driver-kyma.tomlDefault" (dict "config" $config "table" "openshell.gateway" "key" "credential_drivers" "value" (list $credentialDriver)) -}}
+{{- $_ := unset $config "openshell.gateway.credential_storage" -}}
+{{- if eq $credentialDriver "kubernetes-secrets" -}}
+{{- include "openshell-driver-kyma.tomlDefault" (dict "config" $config "table" "openshell.credential_drivers.kubernetes-secrets" "key" "namespace" "value" (include "openshell-driver-kyma.credentialSecretsNamespace" .)) -}}
+{{- end -}}
+{{- else -}}
 {{- include "openshell-driver-kyma.tomlDefault" (dict "config" $config "table" "openshell.gateway.credential_storage" "key" "key_encryption_key_env" "value" "OPENSHELL_GATEWAY_CREDENTIAL_KEY_ENCRYPTION_KEY") -}}
+{{- end -}}
 {{- /* Only when sandboxJwt is enabled: paths to the signing material (mounted
 from the JWT Secret) so the gateway can mint per-sandbox JWTs in IssueSandboxToken. */ -}}
 {{- if .Values.gateway.sandboxJwt.enabled -}}

@@ -76,3 +76,21 @@ url
 sqlite
 {{- end -}}
 {{- end -}}
+
+{{/*
+Refuses a Kubernetes Secrets credential driver namespace that is the sandbox
+namespace (the driver keeps sandbox bootstrap Secrets there, and the Role would hand
+the gateway all of them), and createNamespace for the release namespace (upstream's
+message, our keys).
+*/}}
+{{- define "openshell-driver-kyma.credentialDriverGuards" -}}
+{{- if and .Values.gateway.enabled (eq (include "openshell-driver-kyma.credentialDriver" .) "kubernetes-secrets") -}}
+{{- $namespace := include "openshell-driver-kyma.credentialSecretsNamespace" . -}}
+{{- if eq $namespace .Values.namespace -}}
+{{- fail (printf "gateway.credentialDrivers.kubernetesSecrets.namespace must not be the sandbox namespace %q, where the driver keeps sandbox bootstrap Secrets; name a dedicated namespace (empty means the release namespace)" $namespace) -}}
+{{- end -}}
+{{- if and .Values.gateway.credentialDrivers.kubernetesSecrets.createNamespace (eq $namespace .Release.Namespace) -}}
+{{- fail "gateway.credentialDrivers.kubernetesSecrets.createNamespace requires gateway.credentialDrivers.kubernetesSecrets.namespace to name a namespace other than the release namespace" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}

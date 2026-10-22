@@ -288,4 +288,33 @@ PY
 grep -q '^ *allow_unauthenticated_users = false$' "$WORK/gateway-mtls-auth.toml" \
   || { echo "ERROR: the mTLS render has no allow_unauthenticated_users = false; nothing to test" >&2; exit 1; }
 check_config mtls-auth "$WORK/gateway-mtls-auth.toml"
+# The Kubernetes Secrets credential driver (gateway.credentialDrivers.kubernetesSecrets):
+# credential_drivers and the driver's table, with no credential_storage table.
+render templates/gateway-config.yaml --set gateway.credentialDrivers.kubernetesSecrets.enabled=true \
+  --set gateway.credentialDrivers.kubernetesSecrets.namespace=osh-creds > "$WORK/rendered-k8s-secrets.yaml"
+python3 - "$WORK/rendered-k8s-secrets.yaml" "$WORK/gateway-k8s-secrets.toml" <<'PY'
+import sys, yaml
+doc = yaml.safe_load(open(sys.argv[1]))
+open(sys.argv[2], "w").write(doc["data"]["gateway.toml"])
+PY
+grep -q '^\[openshell.credential_drivers.kubernetes-secrets\]' "$WORK/gateway-k8s-secrets.toml" \
+  || { echo "ERROR: the k8s-secrets render has no [openshell.credential_drivers.kubernetes-secrets]; nothing to test" >&2; exit 1; }
+check_config k8s-secrets "$WORK/gateway-k8s-secrets.toml"
+# check_config stops at the state directory, before the gateway builds the credential
+# driver, which is where the driver's own table is parsed. With a writable HOME it gets
+# that far: positive evidence that the table was accepted is the driver failing to find
+# a cluster (an unknown field fails earlier, naming the table). The sandbox-JWT table is
+# left out: its key files are not mounted here, and the gateway reads them first.
+awk '/^\[/ { skip = ($0 == "[openshell.gateway.gateway_jwt]") } !skip' "$WORK/gateway-k8s-secrets.toml" \
+  > "$WORK/gateway-k8s-secrets-driver.toml"
+rc=0
+out="$(docker run --rm -e HOME=/tmp -v "$WORK/gateway-k8s-secrets-driver.toml:/etc/openshell/gateway.toml:ro" \
+  --entrypoint openshell-gateway "$IMAGE" --config /etc/openshell/gateway.toml --compute-driver kyma \
+  --compute-driver-socket /run/openshell/driver.sock --disable-tls --db-url sqlite::memory: 2>&1)" || rc=$?
+if ! grep -q "failed to configure kubernetes-secrets credential" <<<"$out"; then
+  echo "GATEWAY_CREDENTIAL_DRIVER_NOT_BUILT (k8s-secrets, exit $rc); output:" >&2
+  head -10 <<<"$out" >&2
+  exit 1
+fi
+echo "GATEWAY_CREDENTIAL_DRIVER_ACCEPTED (k8s-secrets)"
 echo "GATEWAY_CONFIG_ACCEPTED"

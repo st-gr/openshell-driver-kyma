@@ -581,6 +581,35 @@ gateway:
   # base64-encoded 32-byte value.
   credentialStorage:
     existingSecret: ""
+  # An external store for provider credentials instead of the gateway DB (upstream's
+  # server.credentialDrivers). One backend at most; gatewayConfig can select it as
+  # well, with openshell.gateway.credential_drivers: ["kubernetes-secrets"].
+  # While a driver is selected the chart renders no credentialStorage KEK: no Secret,
+  # no environment variable and no [openshell.gateway.credential_storage] table.
+  # Switching an install from the default store orphans the credentials already
+  # stored: they stay in the gateway DB, unread, and must be created again. The
+  # generated KEK Secret has helm.sh/resource-policy: keep, so Helm leaves it in
+  # place; switching back reuses it, and the old credentials decrypt again if the DB
+  # was persisted.
+  credentialDrivers:
+    # Provider credentials as Secrets in one namespace, read and written by the
+    # gateway through the Kubernetes API.
+    # WARNING: the Role grants get/create/patch/delete on ALL Secrets in that
+    # namespace (their names are generated at runtime), and it binds the
+    # ServiceAccount the driver shares with the gateway, so the driver gains the same
+    # access. Use a dedicated namespace; the sandbox namespace (top-level namespace),
+    # where the driver keeps sandbox bootstrap Secrets, is refused.
+    kubernetesSecrets:
+      enabled: false
+      # "" = the release namespace.
+      namespace: ""
+      # Create the namespace, kept on uninstall so that removing the gateway cannot
+      # delete stored credentials. An existing Namespace is adopted only when this
+      # release created it. Needs a namespace other than the release namespace.
+      createNamespace: false
+      # The credential-secrets Role and RoleBinding; rbac.create=false drops them too.
+      rbac:
+        create: true
   # Gateway DB persistence. The gateway stores provider profiles and providers
   # in its DB (set via gRPC by the post-install Job, not via TOML). Without
   # persistence, a gateway pod restart wipes them, and sandboxes cannot be

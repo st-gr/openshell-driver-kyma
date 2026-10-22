@@ -208,6 +208,33 @@ try bad-p11-ip 'gateway.sandboxJwt.serverIpAddresses entries must be IP addresse
 try bad-p11-extra-san 'gateway.extraArgs sets --server-san; use gateway.sandboxJwt.serverDnsNames instead' t \
 	--set-json 'gateway.extraArgs=["--server-san=x.example.org"]'
 
+# 12. The Kubernetes Secrets credential driver: provider credentials in Secrets, no KEK.
+K8S12=(--set gateway.credentialDrivers.kubernetesSecrets.enabled=true)
+try good-p12-k8s '' t "${K8S12[@]}" --set gateway.credentialDrivers.kubernetesSecrets.namespace=osh-creds
+try good-p12-k8s-default-ns '' t "${K8S12[@]}"
+try good-p12-create-ns '' t "${K8S12[@]}" --set gateway.credentialDrivers.kubernetesSecrets.namespace=osh-creds \
+	--set gateway.credentialDrivers.kubernetesSecrets.createNamespace=true
+try good-p12-no-rbac '' t "${K8S12[@]}" --set gateway.credentialDrivers.kubernetesSecrets.namespace=osh-creds \
+	--set gateway.credentialDrivers.kubernetesSecrets.rbac.create=false
+try good-p12-no-rbac-global '' t "${K8S12[@]}" --set gateway.credentialDrivers.kubernetesSecrets.namespace=osh-creds \
+	--set rbac.create=false
+try good-p12-via-config '' t --set-json 'gatewayConfig={"openshell.gateway":{"credential_drivers":["kubernetes-secrets"]}}'
+try good-p12-via-config-nested '' t \
+	--set-json 'gatewayConfig={"openshell":{"gateway":{"credential_drivers":["kubernetes-secrets"]},"credential_drivers":{"kubernetes-secrets":{"namespace":"osh-creds"}}}}'
+try good-p12-existing-kek '' t "${K8S12[@]}" --set gateway.credentialStorage.existingSecret=my-kek
+try bad-p12-sandbox-ns 'gateway.credentialDrivers.kubernetesSecrets.namespace must not be the sandbox namespace' t \
+	"${K8S12[@]}" --set gateway.credentialDrivers.kubernetesSecrets.namespace=openshell-system
+try bad-p12-sandbox-release-ns 'gateway.credentialDrivers.kubernetesSecrets.namespace must not be the sandbox namespace' t \
+	"${K8S12[@]}" --namespace openshell-system
+try bad-p12-sandbox-config-ns 'gateway.credentialDrivers.kubernetesSecrets.namespace must not be the sandbox namespace' t \
+	--set-json 'gatewayConfig={"openshell.gateway":{"credential_drivers":["kubernetes-secrets"]},"openshell.credential_drivers.kubernetes-secrets":{"namespace":"openshell-system"}}'
+try bad-p12-create-release-ns 'gateway.credentialDrivers.kubernetesSecrets.createNamespace requires gateway.credentialDrivers.kubernetesSecrets.namespace to name a namespace other than the release namespace' t \
+	"${K8S12[@]}" --set gateway.credentialDrivers.kubernetesSecrets.createNamespace=true
+try bad-p12-two-drivers 'gatewayConfig.openshell.gateway.credential_drivers may select only one backend' t \
+	--set-json 'gatewayConfig={"openshell.gateway":{"credential_drivers":["a","b"]}}'
+try bad-p12-no-drivers 'gatewayConfig.openshell.gateway.credential_drivers must select exactly one backend or be omitted/null to use the chart default' t \
+	--set-json 'gatewayConfig={"openshell.gateway":{"credential_drivers":[]}}'
+
 uv run --quiet --no-project --python 3.12 --with pyyaml==6.0.2 python - "$WORK" "$CHART" <<'PY'
 import pathlib, sys, tomllib
 import yaml
@@ -685,6 +712,71 @@ def client_ca_case(case, want_path, want_volume):
 client_ca_case("good-p11-client-ca", "/etc/openshell-tls/client-ca/ca.crt", True)
 client_ca_case("good-p11-client-ca-default", "/etc/openshell-tls/server/ca.crt", False)
 client_ca_case("good-p11-client-ca-off", None, False)
+
+# 12. The Kubernetes Secrets credential driver.
+KEK_ENV = "OPENSHELL_GATEWAY_CREDENTIAL_KEY_ENCRYPTION_KEY"
+KEK_SECRET = "t-openshell-driver-kyma-credential-storage-key-encryption-key"
+CREDS = "t-openshell-driver-kyma-credential-secrets"
+CREDS_RULES = [{"apiGroups": [""], "resources": ["secrets"], "verbs": ["get", "create", "patch", "delete"]}]
+
+def objects(case, kind):
+    return [d for d in docs(case) if d.get("kind") == kind]
+
+def creds_objects(case, kind):
+    return [d for d in objects(case, kind) if d["metadata"]["name"] == CREDS]
+
+def kek_state(case):
+    """(credential_storage table, KEK env, KEK Secret names) of a render."""
+    return (gateway_toml(case).get("openshell", {}).get("gateway", {}).get("credential_storage"),
+            env_of(gateway_container(case)).get(KEK_ENV),
+            [d["metadata"]["name"] for d in objects(case, "Secret") if d["metadata"]["name"] == KEK_SECRET])
+
+for case, ns, rbac in (("good-p12-k8s", "osh-creds", True), ("good-p12-k8s-default-ns", "default", True),
+                       ("good-p12-create-ns", "osh-creds", True), ("good-p12-no-rbac", "osh-creds", False),
+                       ("good-p12-no-rbac-global", "osh-creds", False), ("good-p12-via-config", "default", True),
+                       ("good-p12-via-config-nested", "osh-creds", True), ("good-p12-existing-kek", "default", True)):
+    toml = gateway_toml(case).get("openshell", {})
+    if toml.get("gateway", {}).get("credential_drivers") != ["kubernetes-secrets"]:
+        failures.append(f"{case}: credential_drivers is {toml.get('gateway', {}).get('credential_drivers')!r}")
+    got = toml.get("credential_drivers", {}).get("kubernetes-secrets")
+    if got != {"namespace": ns}:
+        failures.append(f"{case}: [openshell.credential_drivers.kubernetes-secrets] is {got!r}, want namespace {ns!r}")
+    if kek_state(case) != (None, None, []):
+        failures.append(f"{case}: KEK storage rendered with an external driver: {kek_state(case)}")
+    roles, bindings = creds_objects(case, "Role"), creds_objects(case, "RoleBinding")
+    if not rbac:
+        if roles or bindings:
+            failures.append(f"{case}: the credential-secrets Role/RoleBinding rendered with RBAC off")
+        continue
+    if len(roles) != 1 or roles[0]["metadata"].get("namespace") != ns or roles[0].get("rules") != CREDS_RULES:
+        failures.append(f"{case}: the credential-secrets Role is {roles}, want one in {ns} with {CREDS_RULES}")
+    want_binding = {"roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": CREDS},
+                    "subjects": [{"kind": "ServiceAccount", "name": "openshell-driver", "namespace": "default"}]}
+    if len(bindings) != 1 or bindings[0]["metadata"].get("namespace") != ns or \
+            {k: bindings[0].get(k) for k in want_binding} != want_binding:
+        failures.append(f"{case}: the credential-secrets RoleBinding is {bindings}, want one in {ns}: {want_binding}")
+# Only the nested flag: the chart's other RBAC stays.
+if rbac_objects("good-p12-no-rbac", False) != rbac_objects("good-p10-default", False):
+    failures.append("good-p12-no-rbac: kubernetesSecrets.rbac.create=false changed the chart's other RBAC: "
+                    f"{rbac_objects('good-p12-no-rbac', False)}")
+if rbac_objects("good-p12-no-rbac-global", False):
+    failures.append(f"good-p12-no-rbac-global: rbac.create=false still renders {rbac_objects('good-p12-no-rbac-global', False)}")
+for case in ("good-p12-k8s", "good-p12-k8s-default-ns", "good-p12-via-config", "good-p1-defaults"):
+    if objects(case, "Namespace"):
+        failures.append(f"{case}: a Namespace was rendered without createNamespace")
+nss = objects("good-p12-create-ns", "Namespace")
+if [(n["metadata"]["name"], (n["metadata"].get("annotations") or {}).get("helm.sh/resource-policy")) for n in nss] \
+        != [("osh-creds", "keep")]:
+    failures.append(f"good-p12-create-ns: Namespaces are {nss}, want osh-creds with helm.sh/resource-policy: keep")
+# Without the driver: the KEK storage stays, and no credential-secrets RBAC.
+want_kek = ({"key_encryption_key_env": KEK_ENV},
+            {"name": KEK_ENV, "valueFrom": {"secretKeyRef": {"name": KEK_SECRET, "key": "key-encryption-key"}}},
+            [KEK_SECRET])
+if kek_state("good-p1-defaults") != want_kek:
+    failures.append(f"good-p1-defaults: KEK storage is {kek_state('good-p1-defaults')}, want {want_kek}")
+if creds_objects("good-p1-defaults", "Role") or creds_objects("good-p1-defaults", "RoleBinding") or \
+        gateway_toml("good-p1-defaults").get("openshell", {}).get("gateway", {}).get("credential_drivers"):
+    failures.append("good-p1-defaults: the credential driver rendered without being selected")
 
 if failures:
     print("CHART_PARITY_FAIL:")

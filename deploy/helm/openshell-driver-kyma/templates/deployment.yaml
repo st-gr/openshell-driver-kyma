@@ -4,6 +4,7 @@
 {{- include "openshell-driver-kyma.gatewayGuards" . -}}
 {{- include "openshell-driver-kyma.gatewayOidcGuards" . -}}
 {{- include "openshell-driver-kyma.gatewayArgGuards" . -}}
+{{- include "openshell-driver-kyma.credentialDriverGuards" . -}}
 {{- include "openshell-driver-kyma.gatewayIngressGuards" . -}}
 {{- include "openshell-driver-kyma.workspaceGuards" . -}}
 {{- include "openshell-driver-kyma.sandboxEnvGuards" . -}}
@@ -117,12 +118,15 @@ spec:
             # Usage telemetry: off unless gateway.telemetryEnabled (gateway only).
             - name: OPENSHELL_TELEMETRY_ENABLED
               value: {{ .Values.gateway.telemetryEnabled | toString | quote }}
-            # The key the TOML's [openshell.gateway.credential_storage] names.
+            {{- if not (include "openshell-driver-kyma.credentialDriver" .) }}
+            # The key the TOML's [openshell.gateway.credential_storage] names; none
+            # while an external credential driver holds the credentials.
             - name: OPENSHELL_GATEWAY_CREDENTIAL_KEY_ENCRYPTION_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ include "openshell-driver-kyma.kekSecretName" . }}
                   key: key-encryption-key
+            {{- end }}
             {{- if eq $dbMode "secret" }}
             # The database URL, with its password, from the Secret; a --db-url flag
             # would beat this variable, so none is rendered.
