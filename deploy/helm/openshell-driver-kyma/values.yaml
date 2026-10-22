@@ -564,6 +564,16 @@ gateway:
   # container only (upstream's server.extraVolumes / extraVolumeMounts).
   extraVolumes: []
   extraVolumeMounts: []
+  # SPIFFE Workload API for dynamic provider token grants (upstream's
+  # server.providerTokenGrants.spiffe). Enabled, the gateway pod mounts the SPIFFE CSI
+  # driver's volume (csi.spiffe.io, which needs a SPIRE agent on the node) read-only at
+  # the socket's directory and points OPENSHELL_GATEWAY_SPIFFE_WORKLOAD_API_SOCKET at
+  # the socket; the driver passes the same path to the sandboxes unless
+  # driver.providerSpiffeWorkloadApiSocket sets another.
+  providerTokenGrants:
+    spiffe:
+      enabled: false
+      workloadApiSocketPath: /spiffe-workload-api/spire-agent.sock
   # Gateway pod-level resources, separate from the driver's.
   resources:
     requests:

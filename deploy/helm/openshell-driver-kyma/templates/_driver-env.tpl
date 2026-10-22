@@ -129,7 +129,7 @@ scripts/check-chart-render.sh fails CI when an upstream option is missing here.
 - name: OPENSHELL_ENABLE_USER_NAMESPACES
   value: "true"
 {{- end }}
-{{- with $d.providerSpiffeWorkloadApiSocket }}
+{{- with $d.providerSpiffeWorkloadApiSocket | default (include "openshell-driver-kyma.gatewaySpiffeSocket" .) }}
 - name: OPENSHELL_PROVIDER_SPIFFE_WORKLOAD_API_SOCKET
   value: {{ . | quote }}
 {{- end }}

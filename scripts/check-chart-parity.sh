@@ -274,6 +274,15 @@ try bad-p13-http 'gateway.credentialDrivers.vault.address must use HTTPS for non
 try bad-p13-http-config 'gateway.credentialDrivers.vault.address must use HTTPS for non-loopback endpoints' t \
 	--set-json 'gatewayConfig={"openshell.gateway":{"credential_drivers":["vault"]},"openshell.credential_drivers.vault":{"address":"http://vault.example.org:8200"}}'
 
+# 14. SPIFFE Workload API for the gateway's provider token grants.
+SPIFFE14=(--set gateway.providerTokenGrants.spiffe.enabled=true)
+try good-p14-spiffe '' t "${SPIFFE14[@]}"
+try good-p14-spiffe-path '' t "${SPIFFE14[@]}" --set gateway.providerTokenGrants.spiffe.workloadApiSocketPath=/run/spire/sock/agent.sock
+try good-p14-driver-override '' t --set driver.providerSpiffeWorkloadApiSocket=/x/y.sock
+try good-p14-spiffe-driver-override '' t "${SPIFFE14[@]}" --set driver.providerSpiffeWorkloadApiSocket=/x/y.sock
+try bad-p14-relative-path 'gateway.providerTokenGrants.spiffe.workloadApiSocketPath must be an absolute path' t "${SPIFFE14[@]}" \
+	--set gateway.providerTokenGrants.spiffe.workloadApiSocketPath=spire-agent.sock
+
 uv run --quiet --no-project --python 3.12 --with pyyaml==6.0.2 python - "$WORK" "$CHART" <<'PY'
 import pathlib, sys, tomllib
 import yaml
@@ -860,6 +869,37 @@ for case, want_table, want_ports in (
             failures.append(f"{case}: the vault-ca mount is {mounts}, want readOnly at /etc/openshell-tls/vault-ca")
     elif vols or mounts:
         failures.append(f"{case}: a vault-ca volume or mount rendered without a CA ConfigMap: {vols} {mounts}")
+
+# 14. SPIFFE Workload API for the gateway's provider token grants.
+GW_SPIFFE_ENV = "OPENSHELL_GATEWAY_SPIFFE_WORKLOAD_API_SOCKET"
+DRV_SPIFFE_ENV = "OPENSHELL_PROVIDER_SPIFFE_WORKLOAD_API_SOCKET"
+SPIFFE_DIR = "/spiffe-workload-api"
+SPIFFE_VOLUME = {"name": "spiffe-workload-api", "csi": {"driver": "csi.spiffe.io", "readOnly": True}}
+for case, gw_sock, drv_sock, mount in (
+        ("good-p14-spiffe", SPIFFE_DIR + "/spire-agent.sock", SPIFFE_DIR + "/spire-agent.sock", SPIFFE_DIR),
+        ("good-p14-spiffe-path", "/run/spire/sock/agent.sock", "/run/spire/sock/agent.sock", "/run/spire/sock"),
+        ("good-p14-spiffe-driver-override", SPIFFE_DIR + "/spire-agent.sock", "/x/y.sock", SPIFFE_DIR),
+        ("good-p14-driver-override", None, "/x/y.sock", None),
+        ("good-p1-defaults", None, None, None)):
+    gw_env, drv_env = env_of(gateway_container(case)), env_of(driver_container(case))
+    got_gw, got_drv = gw_env.get(GW_SPIFFE_ENV, {}).get("value"), drv_env.get(DRV_SPIFFE_ENV, {}).get("value")
+    if got_gw != gw_sock:
+        failures.append(f"{case}: {GW_SPIFFE_ENV} is {got_gw!r}, want {gw_sock!r}")
+    if got_drv != drv_sock:
+        failures.append(f"{case}: {DRV_SPIFFE_ENV} is {got_drv!r}, want {drv_sock!r}")
+    vols = [v for v in pod_spec(case).get("volumes", []) if v["name"] == "spiffe-workload-api"]
+    mounts = [m for m in gateway_container(case).get("volumeMounts", []) if m["name"] == "spiffe-workload-api"]
+    driver_mounts = [m for m in driver_container(case).get("volumeMounts", []) if m["name"] == "spiffe-workload-api"]
+    if mount is None:
+        if vols or mounts:
+            failures.append(f"{case}: a SPIFFE volume or mount rendered without SPIFFE enabled: {vols} {mounts}")
+        continue
+    if vols != [SPIFFE_VOLUME]:
+        failures.append(f"{case}: the spiffe-workload-api volume is {vols}, want {SPIFFE_VOLUME}")
+    if mounts != [{"name": "spiffe-workload-api", "mountPath": mount, "readOnly": True}]:
+        failures.append(f"{case}: the spiffe-workload-api mount is {mounts}, want readOnly at {mount}")
+    if driver_mounts:
+        failures.append(f"{case}: the driver container mounts the SPIFFE socket: {driver_mounts}")
 
 if failures:
     print("CHART_PARITY_FAIL:")

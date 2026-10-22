@@ -118,6 +118,10 @@ spec:
             # Usage telemetry: off unless gateway.telemetryEnabled (gateway only).
             - name: OPENSHELL_TELEMETRY_ENABLED
               value: {{ .Values.gateway.telemetryEnabled | toString | quote }}
+            {{- with include "openshell-driver-kyma.gatewaySpiffeSocket" . }}
+            - name: OPENSHELL_GATEWAY_SPIFFE_WORKLOAD_API_SOCKET
+              value: {{ . | quote }}
+            {{- end }}
             {{- if not (include "openshell-driver-kyma.credentialDriver" .) }}
             # The key the TOML's [openshell.gateway.credential_storage] names; none
             # while an external credential driver holds the credentials.
@@ -327,6 +331,11 @@ spec:
               mountPath: /etc/openshell-tls/vault-ca
               readOnly: true
             {{- end }}
+            {{- with include "openshell-driver-kyma.gatewaySpiffeSocket" . }}
+            - name: spiffe-workload-api
+              mountPath: {{ dir . | quote }}
+              readOnly: true
+            {{- end }}
             {{- with .Values.gateway.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -393,6 +402,12 @@ spec:
             items:
               - key: ca.crt
                 path: ca.crt
+        {{- end }}
+        {{- if include "openshell-driver-kyma.gatewaySpiffeSocket" . }}
+        - name: spiffe-workload-api
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true
         {{- end }}
         {{- with .Values.gateway.extraVolumes }}
         {{- toYaml . | nindent 8 }}

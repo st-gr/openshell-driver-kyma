@@ -94,6 +94,9 @@ message, our keys).
 {{- fail "gateway.credentialDrivers.kubernetesSecrets.createNamespace requires gateway.credentialDrivers.kubernetesSecrets.namespace to name a namespace other than the release namespace" -}}
 {{- end -}}
 {{- end -}}
+{{- if and .Values.gateway.enabled .Values.gateway.providerTokenGrants.spiffe.enabled (not (hasPrefix "/" (toString .Values.gateway.providerTokenGrants.spiffe.workloadApiSocketPath))) -}}
+{{- fail "gateway.providerTokenGrants.spiffe.workloadApiSocketPath must be an absolute path" -}}
+{{- end -}}
 {{- /* Empty (the driver's default) or a positive integer, as a number or a numeric string; upstream's driver refuses anything else when the gateway starts. */ -}}
 {{- $timeout := .Values.gateway.credentialDrivers.vault.timeoutSecs -}}
 {{- if and .Values.gateway.enabled (not (kindIs "invalid" $timeout)) (ne (toString $timeout) "") (not (regexMatch "^[1-9][0-9]*$" (toString $timeout))) -}}

@@ -194,6 +194,16 @@ selected credential driver.
 {{- end }}
 
 {{/*
+The SPIFFE Workload API socket path of the gateway, when
+gateway.providerTokenGrants.spiffe is enabled; empty otherwise.
+*/}}
+{{- define "openshell-driver-kyma.gatewaySpiffeSocket" -}}
+{{- if .Values.gateway.providerTokenGrants.spiffe.enabled -}}
+{{- .Values.gateway.providerTokenGrants.spiffe.workloadApiSocketPath -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 The ConfigMap holding the private Vault CA, when Vault is the selected credential
 driver.
 */}}
