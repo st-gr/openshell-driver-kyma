@@ -188,6 +188,26 @@ try bad-p2-bind-address 'gatewayConfig must not set openshell.gateway.bind_addre
 try bad-p2-server-sans 'gatewayConfig must not set openshell.gateway.server_sans; it is chart-owned (use gateway.sandboxJwt.serverDnsNames instead)' t \
 	--set-json 'gatewayConfig={"openshell.gateway":{"server_sans":["a"]}}'
 
+# 11. Extra server SANs and a separate client CA Secret.
+ING11=(--set gatewayIngress.enabled=true --set gatewayIngress.domain=example.org
+	--set gateway.oidc.issuer=https://issuer.example --set gateway.oidc.audience=osh-client
+	--set gateway.oidc.clientId=osh-client --set gateway.oidc.authOnly=true
+	--set gateway.tls.enabled=true --set gatewayIngress.serviceHosts.enabled=true
+	--set-json 'gatewayIngress.allowedCidrs=["203.0.113.0/24"]')
+SAN11=(--set 'gateway.sandboxJwt.serverDnsNames={gw.example.org}' --set 'gateway.sandboxJwt.serverIpAddresses={10.0.0.5}')
+try good-p11-sans '' t "${SAN11[@]}"
+try good-p11-sans-ingress '' t "${SAN11[@]}" "${ING11[@]}"
+try good-p11-client-ca '' t --set gateway.tls.enabled=true --set gateway.tls.clientCa.enabled=true \
+	--set gateway.tls.clientCa.secretName=user-ca
+try good-p11-client-ca-default '' t --set gateway.tls.enabled=true --set gateway.tls.clientCa.enabled=true
+try good-p11-client-ca-off '' t --set gateway.tls.enabled=true --set gateway.tls.clientCa.secretName=user-ca
+try bad-p11-dns 'gateway.sandboxJwt.serverDnsNames entries must be DNS names' t \
+	--set 'gateway.sandboxJwt.serverDnsNames={Bad_Name}'
+try bad-p11-ip 'gateway.sandboxJwt.serverIpAddresses entries must be IP addresses' t \
+	--set 'gateway.sandboxJwt.serverIpAddresses={300.1.1.1}'
+try bad-p11-extra-san 'gateway.extraArgs sets --server-san; use gateway.sandboxJwt.serverDnsNames instead' t \
+	--set-json 'gateway.extraArgs=["--server-san=x.example.org"]'
+
 uv run --quiet --no-project --python 3.12 --with pyyaml==6.0.2 python - "$WORK" "$CHART" <<'PY'
 import pathlib, sys, tomllib
 import yaml
@@ -611,6 +631,60 @@ for case in ("good-p10-no-rbac", "good-p10-no-rbac-sources"):
 hook_kinds = {k for k, _ in rbac_objects("good-p10-no-rbac", True)}
 if not {"Role", "RoleBinding"} <= hook_kinds:
     failures.append(f"good-p10-no-rbac: the PKI and provider hook Roles are missing: {hook_kinds}")
+
+# 11. Extra server SANs and a separate client CA Secret.
+def hook_sans(case):
+    job = next((d for d in docs(case) if d.get("kind") == "Job" and d["metadata"]["name"].endswith("-jwt-pki-hook")), None)
+    if job is None:
+        failures.append(f"{case}: no PKI hook Job was rendered")
+        return []
+    return [a for a in job["spec"]["template"]["spec"]["containers"][0]["args"] if a.startswith("--server-san=")]
+
+def gateway_sans(case):
+    """Every value of a --server-san flag on the gateway, in either spelling."""
+    args = gw_args(case)
+    return [args[i + 1] for i, a in enumerate(args[:-1]) if a == "--server-san"] + \
+           [a.split("=", 1)[1] for a in args if a.startswith("--server-san=")]
+
+for case in ("good-p11-sans", "good-p11-sans-ingress"):
+    got = hook_sans(case)
+    if got[-2:] != ["--server-san=gw.example.org", "--server-san=10.0.0.5"] or len(got) != 8:
+        failures.append(f"{case}: the PKI hook's --server-san are {got}, want today's six then gw.example.org and 10.0.0.5")
+    sans = gateway_sans(case)
+    if len(sans) != 1:
+        failures.append(f"{case}: the gateway has {len(sans)} --server-san args ({sans}), want exactly one")
+    else:
+        names = sans[0].split(",")
+        want = ["gw.example.org", "10.0.0.5"] + (["*.example.org"] if case.endswith("ingress") else [])
+        if sorted(names) != sorted(want):
+            failures.append(f"{case}: the gateway's --server-san is {sans[0]!r}, want {want}")
+for case in ("good-p1-defaults", "good-p11-client-ca"):
+    if gateway_sans(case):
+        failures.append(f"{case}: the gateway has --server-san {gateway_sans(case)}, want none")
+if len(hook_sans("good-p1-defaults")) != 6:
+    failures.append("good-p1-defaults: the PKI hook does not carry exactly today's six --server-san")
+
+def client_ca_case(case, want_path, want_volume):
+    gw = gateway_container(case)
+    args = gw.get("args", [])
+    got = args[args.index("--tls-client-ca") + 1] if "--tls-client-ca" in args else None
+    if got != want_path:
+        failures.append(f"{case}: --tls-client-ca is {got!r}, want {want_path!r}")
+    vols = [v for v in pod_spec(case).get("volumes", []) if v["name"] == "tls-client-ca"]
+    mounts = [m for m in gw.get("volumeMounts", []) if m["name"] == "tls-client-ca"]
+    if not want_volume:
+        if vols or mounts:
+            failures.append(f"{case}: a tls-client-ca volume or mount was rendered: {vols} {mounts}")
+        return
+    if len(vols) != 1 or vols[0].get("secret", {}).get("secretName") != "user-ca" \
+            or vols[0]["secret"].get("items") != [{"key": "ca.crt", "path": "ca.crt"}]:
+        failures.append(f"{case}: the tls-client-ca volume is {vols}, want Secret user-ca items ca.crt")
+    if len(mounts) != 1 or mounts[0].get("mountPath") != "/etc/openshell-tls/client-ca" or not mounts[0].get("readOnly"):
+        failures.append(f"{case}: the tls-client-ca mount is {mounts}, want readOnly at /etc/openshell-tls/client-ca")
+
+client_ca_case("good-p11-client-ca", "/etc/openshell-tls/client-ca/ca.crt", True)
+client_ca_case("good-p11-client-ca-default", "/etc/openshell-tls/server/ca.crt", False)
+client_ca_case("good-p11-client-ca-off", None, False)
 
 if failures:
     print("CHART_PARITY_FAIL:")

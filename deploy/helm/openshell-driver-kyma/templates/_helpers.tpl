@@ -364,3 +364,29 @@ or NodePort those ports move to <fullname>-internal, which stays ClusterIP.
 {{- printf "%s-internal" (include "openshell-driver-kyma.fullname" .) -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+The gateway's runtime --server-san value, comma-joined: the wildcard of the sandbox
+service domain when gatewayIngress.serviceHosts is on, then
+gateway.sandboxJwt.serverDnsNames and serverIpAddresses. Empty when there is none.
+*/}}
+{{- define "openshell-driver-kyma.runtimeServerSans" -}}
+{{- $sans := list -}}
+{{- if include "openshell-driver-kyma.serviceHostsEnabled" . -}}
+{{- $sans = append $sans (printf "*.%s" .Values.gatewayIngress.domain) -}}
+{{- end -}}
+{{- $sans = concat $sans (.Values.gateway.sandboxJwt.serverDnsNames | default list) (.Values.gateway.sandboxJwt.serverIpAddresses | default list) -}}
+{{- join "," $sans -}}
+{{- end }}
+
+{{/*
+Where the gateway reads the client CA: the server TLS Secret's ca.crt, or
+gateway.tls.clientCa.secretName's ca.crt (mounted at /etc/openshell-tls/client-ca).
+*/}}
+{{- define "openshell-driver-kyma.clientCaPath" -}}
+{{- if .Values.gateway.tls.clientCa.secretName -}}
+/etc/openshell-tls/client-ca/ca.crt
+{{- else -}}
+/etc/openshell-tls/server/ca.crt
+{{- end -}}
+{{- end }}

@@ -175,7 +175,7 @@ spec:
             - /etc/openshell-tls/server/tls.key
             {{- if .Values.gateway.tls.clientCa.enabled }}
             - --tls-client-ca
-            - /etc/openshell-tls/server/ca.crt
+            - {{ include "openshell-driver-kyma.clientCaPath" . }}
             {{- end }}
             {{- else }}
             - --disable-tls
@@ -217,11 +217,12 @@ spec:
             - --oidc-dangerously-allow-insecure-http=true
             {{- end }}
             {{- end }}
-            {{- if include "openshell-driver-kyma.serviceHostsEnabled" . }}
-            # A wildcard SAN is how upstream learns the domain of sandbox service
-            # URLs (its default, openshell.localhost, stays available).
+            {{- /* Upstream takes one comma-separated --server-san: the wildcard that tells it the
+                 domain of sandbox service URLs (its default, openshell.localhost, stays
+                 available), plus the chart's extra names. */}}
+            {{- with include "openshell-driver-kyma.runtimeServerSans" . }}
             - --server-san
-            - {{ printf "*.%s" .Values.gatewayIngress.domain | quote }}
+            - {{ . | quote }}
             {{- end }}
             {{- with .Values.gateway.extraArgs }}
               {{- toYaml . | nindent 12 }}
@@ -304,6 +305,13 @@ spec:
             - name: gateway-tls
               mountPath: /etc/openshell-tls/server
               readOnly: true
+            {{- if .Values.gateway.tls.clientCa.secretName }}
+            {{- if .Values.gateway.tls.clientCa.enabled }}
+            - name: tls-client-ca
+              mountPath: /etc/openshell-tls/client-ca
+              readOnly: true
+            {{- end }}
+            {{- end }}
             {{- end }}
             {{- if and .Values.gateway.oidc.issuer .Values.gateway.oidc.caConfigMapName }}
             - name: oidc-ca
@@ -353,6 +361,16 @@ spec:
           secret:
             secretName: {{ include "openshell-driver-kyma.serverTlsSecretName" . }}
             defaultMode: {{ include "openshell-driver-kyma.secretDefaultMode" . }}
+        {{- if .Values.gateway.tls.clientCa.secretName }}
+        {{- if .Values.gateway.tls.clientCa.enabled }}
+        - name: tls-client-ca
+          secret:
+            secretName: {{ .Values.gateway.tls.clientCa.secretName | quote }}
+            items:
+              - key: ca.crt
+                path: ca.crt
+        {{- end }}
+        {{- end }}
         {{- end }}
         {{- if and .Values.gateway.oidc.issuer .Values.gateway.oidc.caConfigMapName }}
         - name: oidc-ca

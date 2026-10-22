@@ -136,6 +136,13 @@ spec:
             - --server-san={{ $service }}.{{ .Release.Namespace }}.svc.cluster.local
             - --server-san=localhost
             - --server-san=127.0.0.1
+            {{- /* Extra names (validated by gatewayTlsGuards); an IPv6 address is a --server-san as is. */}}
+            {{- range .Values.gateway.sandboxJwt.serverDnsNames }}
+            - --server-san={{ . }}
+            {{- end }}
+            {{- range .Values.gateway.sandboxJwt.serverIpAddresses }}
+            - --server-san={{ . }}
+            {{- end }}
             {{- if .Values.gatewayIngress.enabled }}
             # The chart CA's public certificate as a ConfigMap (key ca.crt), which the
             # ingress gateway verifies the gateway pod against. Upstream's generator

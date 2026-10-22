@@ -92,6 +92,17 @@ path: every call would fail, and so would the install. */ -}}
 {{- if not (kindIs "bool" .Values.gateway.tls.clientCa.enabled) -}}
 {{- fail (printf "gateway.tls.clientCa.enabled must be a boolean (true or false), got the %s %q." (kindOf .Values.gateway.tls.clientCa.enabled) (toString .Values.gateway.tls.clientCa.enabled)) -}}
 {{- end -}}
+{{- range .Values.gateway.sandboxJwt.serverDnsNames -}}
+{{- if not (regexMatch "^(\\*\\.)?[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" (toString .)) -}}
+{{- fail (printf "gateway.sandboxJwt.serverDnsNames entries must be DNS names, got %q." (toString .)) -}}
+{{- end -}}
+{{- end -}}
+{{- range .Values.gateway.sandboxJwt.serverIpAddresses -}}
+{{- $ip := toString . -}}
+{{- if not (or (regexMatch "^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$" $ip) (regexMatch "^[0-9a-fA-F:]*:[0-9a-fA-F:]*$" $ip)) -}}
+{{- fail (printf "gateway.sandboxJwt.serverIpAddresses entries must be IP addresses, got %q." $ip) -}}
+{{- end -}}
+{{- end -}}
 {{- if .Values.gateway.tls.enabled -}}
 {{- if not .Values.gateway.enabled -}}
 {{- fail "gateway.tls.enabled=true requires gateway.enabled=true (no in-pod gateway sidecar to terminate TLS on)." -}}

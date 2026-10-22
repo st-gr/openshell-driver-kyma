@@ -26,6 +26,7 @@ of openshell-driver-kyma.gatewayArgGuards.
   "--tls-key" "gateway.tls.enabled"
   "--disable-tls" "gateway.tls.enabled"
   "--tls-client-ca" "gateway.tls.clientCa"
+  "--server-san" "gateway.sandboxJwt.serverDnsNames"
   "--oidc-jwks-ttl" "gateway.oidc.jwksTtl"
   "--oidc-scopes-claim" "gateway.oidc.scopesClaim"
   "--oidc-jwks-allowed-origins" "gateway.oidc.jwksAllowedOrigins"

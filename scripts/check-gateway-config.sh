@@ -108,12 +108,15 @@ helm template check "$CHART" --set gateway.enabled=true --set gateway.sandboxJwt
   --set gatewayService.enabled=true --set gatewayIngress.enabled=true --set gatewayIngress.domain=example.org \
   --set gateway.tls.enabled=true --set gateway.oidc.issuer=https://issuer.example \
   --set gateway.oidc.audience=osh-client --set gateway.oidc.clientId=osh-client \
+  --set 'gateway.sandboxJwt.serverDnsNames={gw.example.org}' --set 'gateway.sandboxJwt.serverIpAddresses={10.0.0.5}' \
   --show-only templates/gateway-jwt-pki-hook.yaml > "$WORK/pki-hook.yaml"
 python3 - "$WORK/pki-hook.yaml" > "$WORK/pki-args.txt" <<'PY'
 import sys, yaml
 job = next(d for d in yaml.safe_load_all(open(sys.argv[1])) if d and d.get("kind") == "Job")
 print("\n".join(a.replace("$(POD_NAMESPACE)", "check") for a in job["spec"]["template"]["spec"]["containers"][0]["args"]))
 PY
+grep -q -- '--server-san=10.0.0.5' "$WORK/pki-args.txt" \
+  || { echo "ERROR: the PKI hook render has no extra --server-san; nothing to test" >&2; exit 1; }
 grep -q -- '--backend-ca-configmap-name=' "$WORK/pki-args.txt" \
   || { echo "ERROR: the PKI hook render has no --backend-ca-configmap-name; nothing to test" >&2; exit 1; }
 pki_args=()
@@ -143,6 +146,23 @@ check_args operator-auth \
   --set gateway.tls.enabled=true \
   --set gateway.tls.clientCa.enabled=true \
   --set-json 'gateway.extraArgs=["--enable-operator-auth=true"]'
+# Extra server SANs reach the gateway as one comma-separated --server-san (with the
+# service-host wildcard too), and the client CA from its own Secret's path.
+check_args sans-client-ca \
+  --set 'gateway.sandboxJwt.serverDnsNames={gw.example.org}' \
+  --set 'gateway.sandboxJwt.serverIpAddresses={10.0.0.5}' \
+  --set gatewayIngress.enabled=true --set gatewayIngress.domain=example.org \
+  --set gatewayIngress.serviceHosts.enabled=true \
+  --set-json 'gatewayIngress.allowedCidrs=["203.0.113.0/24"]' \
+  --set gateway.oidc.issuer=https://issuer.example \
+  --set gateway.oidc.audience=osh-client --set gateway.oidc.clientId=osh-client \
+  --set gateway.oidc.authOnly=true \
+  --set gateway.tls.enabled=true
+check_args sans-client-ca-secret \
+  --set 'gateway.sandboxJwt.serverDnsNames={gw.example.org}' \
+  --set 'gateway.sandboxJwt.serverIpAddresses={10.0.0.5}' \
+  --set gateway.tls.enabled=true --set gateway.tls.clientCa.enabled=true \
+  --set gateway.tls.clientCa.secretName=user-ca
 check_args rbac-roles \
   --set gateway.oidc.issuer=https://issuer.example \
   --set gateway.oidc.audience=osh-client \

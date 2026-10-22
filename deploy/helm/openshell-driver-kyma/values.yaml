@@ -529,6 +529,11 @@ gateway:
     enabled: false
     clientCa:
       enabled: false
+      # A Secret in the release namespace holding the CA (key ca.crt) the gateway
+      # verifies client certificates against, instead of the chart's own CA. Mounted
+      # at /etc/openshell-tls/client-ca; only used while tls.enabled and
+      # clientCa.enabled are both true. Empty = the server-tls Secret's ca.crt.
+      secretName: ""
   # Gateway-wide gRPC request rate limit (upstream's server.grpcRateLimit), rendered
   # into the gateway TOML as grpc_rate_limit_requests/_window_seconds. Applies to gRPC
   # API traffic only, not to health, metrics or loopback service HTTP. Both values
@@ -633,6 +638,15 @@ gateway:
     # File mode of the keys Secret mounted into the gateway pod: a string such
     # as "0440" (read as octal) or an integer (288 is 0440). Empty = 0400.
     secretDefaultMode: ""
+    # Extra names and addresses the gateway's server certificate is valid for, on top
+    # of the release's Service names, localhost and 127.0.0.1 (and, with
+    # gatewayIngress.serviceHosts, the wildcard of the service domain). The PKI hook
+    # passes them as --server-san, and the gateway as one comma-separated --server-san.
+    # The hook never rewrites an existing Secret: for a new name to reach the
+    # certificate, delete the three PKI Secrets (server, client, JWT keys) before the
+    # upgrade.
+    serverDnsNames: []          # DNS names, e.g. [gw.example.org]; "*." prefix allowed
+    serverIpAddresses: []       # IP addresses, e.g. [10.0.0.5]
 
 # Non-secret gateway settings as TOML, upstream's gatewayConfig: top-level keys
 # name TOML tables (dotted, such as "openshell.gateway"; a nested map is the same
