@@ -78,6 +78,7 @@ sqlite
 {{- end -}}
 
 {{/*
+Refuses a Vault address that is missing, or plain HTTP to a non-loopback host.
 Refuses a Kubernetes Secrets credential driver namespace that is the sandbox
 namespace (the driver keeps sandbox bootstrap Secrets there, and the Role would hand
 the gateway all of them), and createNamespace for the release namespace (upstream's
@@ -91,6 +92,17 @@ message, our keys).
 {{- end -}}
 {{- if and .Values.gateway.credentialDrivers.kubernetesSecrets.createNamespace (eq $namespace .Release.Namespace) -}}
 {{- fail "gateway.credentialDrivers.kubernetesSecrets.createNamespace requires gateway.credentialDrivers.kubernetesSecrets.namespace to name a namespace other than the release namespace" -}}
+{{- end -}}
+{{- end -}}
+{{- if and .Values.gateway.enabled (eq (include "openshell-driver-kyma.credentialDriver" .) "vault") -}}
+{{- /* Upstream's Vault driver checks the same at start-up; here the release fails instead. */ -}}
+{{- $address := include "openshell-driver-kyma.vaultAddress" . | trim -}}
+{{- if not $address -}}
+{{- fail "gateway.credentialDrivers.vault.address is required when the Vault credential driver is selected" -}}
+{{- end -}}
+{{- $url := urlParse $address -}}
+{{- if and (eq $url.scheme "http") (not (include "openshell-driver-kyma.hostIsLoopback" $url.host)) -}}
+{{- fail "gateway.credentialDrivers.vault.address must use HTTPS for non-loopback endpoints" -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

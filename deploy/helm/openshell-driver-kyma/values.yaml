@@ -610,6 +610,36 @@ gateway:
       # The credential-secrets Role and RoleBinding; rbac.create=false drops them too.
       rbac:
         create: true
+    # Provider credentials in HashiCorp Vault or OpenBao (upstream's in-tree Vault
+    # driver). Enabled with kubernetesSecrets is refused: one backend at most. A key
+    # set in gatewayConfig's [openshell.credential_drivers.vault] wins over these
+    # values. Keys the gateway needs and the chart cannot know (a Vault policy, the
+    # Kubernetes auth role's binding) are the operator's to set up in Vault.
+    vault:
+      enabled: false
+      # Vault base URL. Non-loopback endpoints must use HTTPS, for example
+      # https://vault.example.org:8200. The pod's NetworkPolicy opens egress to its port
+      # (443 for https, 8200 for http when the URL names none).
+      address: ""
+      # ConfigMap with the private Vault CA certificate in its ca.crt key; mounted at
+      # /etc/openshell-tls/vault-ca and set as ca_bundle. Empty = platform trust roots.
+      caConfigMapName: ""
+      # Default KV mount name.
+      mount: secret
+      # KV engine version, "1" or "2".
+      kvVersion: "2"
+      # "kubernetes" in-cluster, or "token_file" for local and development validation.
+      authMethod: kubernetes
+      # Vault Kubernetes auth role (authMethod kubernetes).
+      role: ""
+      # Vault Kubernetes auth mount.
+      kubernetesAuthMount: kubernetes
+      # ServiceAccount token path used for Kubernetes auth.
+      serviceAccountTokenPath: /var/run/secrets/kubernetes.io/serviceaccount/token
+      # Mounted token file path (authMethod token_file).
+      tokenPath: ""
+      # HTTP request timeout in seconds. Empty = the driver's default.
+      timeoutSecs: ""
   # Gateway DB persistence. The gateway stores provider profiles and providers
   # in its DB (set via gRPC by the post-install Job, not via TOML). Without
   # persistence, a gateway pod restart wipes them, and sandboxes cannot be

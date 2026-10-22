@@ -71,7 +71,7 @@ spec:
         - port: 443
           protocol: TCP
     {{- range include "openshell-driver-kyma.egressPorts" . | fromJsonArray }}
-    # OTLP trace export (driver.otlpEndpoint, gateway.otlp.endpoint): the port only, any destination.
+    # OTLP trace export (driver.otlpEndpoint, gateway.otlp.endpoint) and the Vault credential driver: the port only, any destination.
     - ports:
         - port: {{ . }}
           protocol: TCP

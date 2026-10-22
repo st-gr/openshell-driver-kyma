@@ -160,6 +160,9 @@ upstream's chart, and may name one backend only.
 {{- define "openshell-driver-kyma.credentialDriver" -}}
 {{- $gateway := include "openshell-driver-kyma.userGatewayTable" (list . "openshell.gateway") | fromJson -}}
 {{- $drivers := get $gateway "credential_drivers" -}}
+{{- if and .Values.gateway.credentialDrivers.kubernetesSecrets.enabled .Values.gateway.credentialDrivers.vault.enabled -}}
+{{- fail "only one external gateway.credentialDrivers backend can be enabled at a time" -}}
+{{- end -}}
 {{- if and (hasKey $gateway "credential_drivers") (ne $drivers nil) -}}
 {{- if not (kindIs "slice" $drivers) -}}
 {{- fail (printf "gatewayConfig.openshell.gateway.credential_drivers must be a list, got %s" (kindOf $drivers)) -}}
@@ -173,6 +176,43 @@ upstream's chart, and may name one backend only.
 {{- index $drivers 0 | toString -}}
 {{- else if .Values.gateway.credentialDrivers.kubernetesSecrets.enabled -}}
 kubernetes-secrets
+{{- else if .Values.gateway.credentialDrivers.vault.enabled -}}
+vault
+{{- end -}}
+{{- end }}
+
+{{/*
+The Vault driver's address: gatewayConfig's openshell.credential_drivers.vault
+address, else gateway.credentialDrivers.vault.address; empty when Vault is not the
+selected credential driver.
+*/}}
+{{- define "openshell-driver-kyma.vaultAddress" -}}
+{{- if eq (include "openshell-driver-kyma.credentialDriver" .) "vault" -}}
+{{- $config := include "openshell-driver-kyma.userGatewayTable" (list . "openshell.credential_drivers.vault") | fromJson -}}
+{{- get $config "address" | default .Values.gateway.credentialDrivers.vault.address -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+The ConfigMap holding the private Vault CA, when Vault is the selected credential
+driver.
+*/}}
+{{- define "openshell-driver-kyma.vaultCaConfigMapName" -}}
+{{- if eq (include "openshell-driver-kyma.credentialDriver" .) "vault" -}}
+{{- .Values.gateway.credentialDrivers.vault.caConfigMapName -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Whether a URL host is loopback, as upstream's Vault driver decides it
+(vault_host_is_loopback): localhost, or an IPv4 address in 127.0.0.0/8, or ::1. The
+host is the URL's, with any port and IPv6 brackets: (include ... $host) prints
+"true" or nothing.
+*/}}
+{{- define "openshell-driver-kyma.hostIsLoopback" -}}
+{{- $host := lower (regexReplaceAll ":[0-9]+$" . "") -}}
+{{- if or (eq $host "localhost") (eq $host "[::1]") (regexMatch "^127(\\.[0-9]{1,3}){3}$" $host) -}}
+true
 {{- end -}}
 {{- end }}
 
@@ -315,9 +355,10 @@ scheme, so upstream exports nothing there and there is no port to open.
 {{- end -}}
 
 {{/*
-The de-duplicated TCP ports the pod's OTLP trace exports dial, as a JSON array of
-numbers: the driver's endpoint, and the gateway's when the in-pod gateway runs.
-Each endpoint's port comes from openshell-driver-kyma.otlpPort (given the endpoint).
+The de-duplicated TCP ports the pod's OTLP trace exports and Vault driver dial, as a
+JSON array of numbers: the driver's OTLP endpoint, and, when the in-pod gateway
+runs, the gateway's and the Vault address'.
+Each OTLP endpoint's port comes from openshell-driver-kyma.otlpPort.
 */}}
 {{- define "openshell-driver-kyma.egressPorts" -}}
 {{- $endpoints := list (include "openshell-driver-kyma.driverOtlpEndpoint" .) -}}
@@ -329,6 +370,11 @@ Each endpoint's port comes from openshell-driver-kyma.otlpPort (given the endpoi
 {{- with include "openshell-driver-kyma.otlpPort" . -}}
 {{- $ports = append $ports (int .) -}}
 {{- end -}}
+{{- end -}}
+{{- /* The Vault driver is dialled by the gateway: explicit port, else 443 for https, 8200 for http. */ -}}
+{{- with and .Values.gateway.enabled (include "openshell-driver-kyma.vaultAddress" .) -}}
+{{- $url := urlParse . -}}
+{{- $ports = append $ports (int (default (ternary "443" "8200" (eq $url.scheme "https")) (trimPrefix ":" (regexFind ":[0-9]+$" $url.host)))) -}}
 {{- end -}}
 {{- $ports | uniq | toJson -}}
 {{- end -}}

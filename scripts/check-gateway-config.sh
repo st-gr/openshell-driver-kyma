@@ -317,4 +317,33 @@ if ! grep -q "failed to configure kubernetes-secrets credential" <<<"$out"; then
   exit 1
 fi
 echo "GATEWAY_CREDENTIAL_DRIVER_ACCEPTED (k8s-secrets)"
+# The Vault credential driver (gateway.credentialDrivers.vault): its table with every key
+# the chart renders, including ca_bundle and an integer timeout_secs.
+render templates/gateway-config.yaml --set gateway.credentialDrivers.vault.enabled=true \
+  --set gateway.credentialDrivers.vault.address=https://vault.example.org \
+  --set gateway.credentialDrivers.vault.role=osh --set gateway.credentialDrivers.vault.timeoutSecs=30 \
+  --set gateway.credentialDrivers.vault.caConfigMapName=vault-ca > "$WORK/rendered-vault.yaml"
+python3 - "$WORK/rendered-vault.yaml" "$WORK/gateway-vault.toml" <<'PY'
+import sys, yaml
+doc = yaml.safe_load(open(sys.argv[1]))
+open(sys.argv[2], "w").write(doc["data"]["gateway.toml"])
+PY
+grep -q '^\[openshell.credential_drivers.vault\]' "$WORK/gateway-vault.toml" \
+  || { echo "ERROR: the Vault render has no [openshell.credential_drivers.vault]; nothing to test" >&2; exit 1; }
+check_config vault "$WORK/gateway-vault.toml"
+# As for k8s-secrets: the driver builds from its table, and reads the CA bundle first,
+# at the path the chart renders and mounts. The file is not mounted here, so its absence,
+# named with that path, is the positive evidence that the table was accepted up to it.
+awk '/^\[/ { skip = ($0 == "[openshell.gateway.gateway_jwt]") } !skip' "$WORK/gateway-vault.toml" \
+  > "$WORK/gateway-vault-driver.toml"
+rc=0
+out="$(docker run --rm -e HOME=/tmp -v "$WORK/gateway-vault-driver.toml:/etc/openshell/gateway.toml:ro" \
+  --entrypoint openshell-gateway "$IMAGE" --config /etc/openshell/gateway.toml --compute-driver kyma \
+  --compute-driver-socket /run/openshell/driver.sock --disable-tls --db-url sqlite::memory: 2>&1)" || rc=$?
+if ! tr -d '\n│ ' <<<"$out" | grep -q "failedtoreadVaultCAbundle'/etc/openshell-tls/vault-ca/ca.crt'"; then
+  echo "GATEWAY_CREDENTIAL_DRIVER_NOT_BUILT (vault, exit $rc); output:" >&2
+  head -10 <<<"$out" >&2
+  exit 1
+fi
+echo "GATEWAY_CREDENTIAL_DRIVER_ACCEPTED (vault)"
 echo "GATEWAY_CONFIG_ACCEPTED"

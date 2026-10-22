@@ -235,6 +235,32 @@ try bad-p12-two-drivers 'gatewayConfig.openshell.gateway.credential_drivers may 
 try bad-p12-no-drivers 'gatewayConfig.openshell.gateway.credential_drivers must select exactly one backend or be omitted/null to use the chart default' t \
 	--set-json 'gatewayConfig={"openshell.gateway":{"credential_drivers":[]}}'
 
+# 13. The Vault credential driver.
+VAULT13=(--set gateway.credentialDrivers.vault.enabled=true --set gateway.credentialDrivers.vault.address=https://vault.example.org)
+try good-p13-vault '' t "${VAULT13[@]}" --set gateway.credentialDrivers.vault.role=osh \
+	--set gateway.credentialDrivers.vault.timeoutSecs=30 --set gateway.credentialDrivers.vault.caConfigMapName=vault-ca
+try good-p13-vault-port '' t --set gateway.credentialDrivers.vault.enabled=true \
+	--set gateway.credentialDrivers.vault.address=https://vault.example.org:8200
+try good-p13-vault-loopback-http '' t --set gateway.credentialDrivers.vault.enabled=true \
+	--set gateway.credentialDrivers.vault.address=http://localhost
+try good-p13-vault-no-np '' t "${VAULT13[@]}" --set networkPolicy.enabled=false
+try good-p13-vault-via-config '' t \
+	--set-json 'gatewayConfig={"openshell.gateway":{"credential_drivers":["vault"]},"openshell.credential_drivers.vault":{"address":"https://vault.example.org","role":"osh"}}'
+try good-p13-vault-via-config-ca '' t --set gateway.credentialDrivers.vault.caConfigMapName=vault-ca \
+	--set-json 'gatewayConfig={"openshell.gateway":{"credential_drivers":["vault"]},"openshell.credential_drivers.vault":{"address":"https://vault.example.org:8443","ca_bundle":"/tmp/x"}}'
+try bad-p13-two-backends 'only one external gateway.credentialDrivers backend can be enabled at a time' t "${VAULT13[@]}" \
+	"${K8S12[@]}"
+try bad-p13-two-backends-config 'only one external gateway.credentialDrivers backend can be enabled at a time' t "${VAULT13[@]}" \
+	"${K8S12[@]}" --set-json 'gatewayConfig={"openshell.gateway":{"credential_drivers":["vault"]}}'
+try bad-p13-no-address 'gateway.credentialDrivers.vault.address is required' t \
+	--set gateway.credentialDrivers.vault.enabled=true
+try bad-p13-no-address-config 'gateway.credentialDrivers.vault.address is required' t \
+	--set-json 'gatewayConfig={"openshell.gateway":{"credential_drivers":["vault"]}}'
+try bad-p13-http 'gateway.credentialDrivers.vault.address must use HTTPS for non-loopback endpoints' t \
+	--set gateway.credentialDrivers.vault.enabled=true --set gateway.credentialDrivers.vault.address=http://vault.example.org
+try bad-p13-http-config 'gateway.credentialDrivers.vault.address must use HTTPS for non-loopback endpoints' t \
+	--set-json 'gatewayConfig={"openshell.gateway":{"credential_drivers":["vault"]},"openshell.credential_drivers.vault":{"address":"http://vault.example.org:8200"}}'
+
 uv run --quiet --no-project --python 3.12 --with pyyaml==6.0.2 python - "$WORK" "$CHART" <<'PY'
 import pathlib, sys, tomllib
 import yaml
@@ -777,6 +803,49 @@ if kek_state("good-p1-defaults") != want_kek:
 if creds_objects("good-p1-defaults", "Role") or creds_objects("good-p1-defaults", "RoleBinding") or \
         gateway_toml("good-p1-defaults").get("openshell", {}).get("gateway", {}).get("credential_drivers"):
     failures.append("good-p1-defaults: the credential driver rendered without being selected")
+
+# 13. The Vault credential driver.
+VAULT_BASE = {"address": "https://vault.example.org", "auth_method": "kubernetes", "role": "osh", "mount": "secret",
+              "kv_version": "2", "kubernetes_auth_mount": "kubernetes",
+              "service_account_token_path": "/var/run/secrets/kubernetes.io/serviceaccount/token"}
+VAULT_CA = "/etc/openshell-tls/vault-ca/ca.crt"
+for case, want_table, want_ports in (
+        ("good-p13-vault", {**VAULT_BASE, "timeout_secs": 30, "ca_bundle": VAULT_CA}, [443]),
+        ("good-p13-vault-port", {**VAULT_BASE, "address": "https://vault.example.org:8200", "role": ""}, [443, 8200]),
+        ("good-p13-vault-loopback-http", {**VAULT_BASE, "address": "http://localhost", "role": ""}, [443, 8200]),
+        ("good-p13-vault-no-np", {**VAULT_BASE, "role": ""}, None),
+        # Selected only by gatewayConfig: the values are not applied (enabled is false), the user's table is.
+        ("good-p13-vault-via-config", {"address": "https://vault.example.org", "role": "osh"}, [443]),
+        # ... and the CA ConfigMap still mounts, with the chart's ca_bundle replacing the user's.
+        ("good-p13-vault-via-config-ca", {"address": "https://vault.example.org:8443", "ca_bundle": VAULT_CA},
+         [443, 8443])):
+    toml = gateway_toml(case).get("openshell", {})
+    if toml.get("gateway", {}).get("credential_drivers") != ["vault"]:
+        failures.append(f"{case}: credential_drivers is {toml.get('gateway', {}).get('credential_drivers')!r}")
+    got = toml.get("credential_drivers", {}).get("vault")
+    if got != want_table or (want_table.get("timeout_secs") is not None and type(got.get("timeout_secs")) is not int):
+        failures.append(f"{case}: [openshell.credential_drivers.vault] is {got!r}, want {want_table!r}")
+    if "kubernetes-secrets" in toml.get("credential_drivers", {}):
+        failures.append(f"{case}: a kubernetes-secrets table rendered with Vault selected")
+    if kek_state(case) != (None, None, []):
+        failures.append(f"{case}: KEK storage rendered with an external driver: {kek_state(case)}")
+    if creds_objects(case, "Role") or creds_objects(case, "RoleBinding") or objects(case, "Namespace"):
+        failures.append(f"{case}: Kubernetes Secrets driver objects rendered with Vault selected")
+    ports = pod_egress_ports(case)
+    if want_ports is None:
+        if ports is not None:
+            failures.append(f"{case}: networkPolicy.enabled=false still rendered the pod NetworkPolicy ({ports})")
+    elif ports is None or not set(want_ports) <= set(ports) or (8200 not in want_ports and 8200 in ports):
+        failures.append(f"{case}: the pod NetworkPolicy egress ports are {ports!r}, want {want_ports!r} among them")
+    vols = [v for v in pod_spec(case).get("volumes", []) if v["name"] == "vault-ca"]
+    mounts = [m for m in gateway_container(case).get("volumeMounts", []) if m["name"] == "vault-ca"]
+    if VAULT_CA in (want_table.get("ca_bundle"),):
+        if len(vols) != 1 or vols[0].get("configMap") != {"name": "vault-ca", "items": [{"key": "ca.crt", "path": "ca.crt"}]}:
+            failures.append(f"{case}: the vault-ca volume is {vols}, want ConfigMap vault-ca items ca.crt")
+        if len(mounts) != 1 or mounts[0].get("mountPath") != "/etc/openshell-tls/vault-ca" or not mounts[0].get("readOnly"):
+            failures.append(f"{case}: the vault-ca mount is {mounts}, want readOnly at /etc/openshell-tls/vault-ca")
+    elif vols or mounts:
+        failures.append(f"{case}: a vault-ca volume or mount rendered without a CA ConfigMap: {vols} {mounts}")
 
 if failures:
     print("CHART_PARITY_FAIL:")

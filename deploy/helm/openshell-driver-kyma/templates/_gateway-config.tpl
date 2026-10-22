@@ -157,6 +157,30 @@ container takes this variable from (gateway.credentialStorage). */ -}}
 {{- $_ := unset $config "openshell.gateway.credential_storage" -}}
 {{- if eq $credentialDriver "kubernetes-secrets" -}}
 {{- include "openshell-driver-kyma.tomlDefault" (dict "config" $config "table" "openshell.credential_drivers.kubernetes-secrets" "key" "namespace" "value" (include "openshell-driver-kyma.credentialSecretsNamespace" .)) -}}
+{{- else if eq $credentialDriver "vault" -}}
+{{- /* As upstream: the values fill keys gatewayConfig left out, only while
+gateway.credentialDrivers.vault.enabled; the CA path is chart-owned, derived from
+caConfigMapName whenever Vault is selected. */ -}}
+{{- $vault := .Values.gateway.credentialDrivers.vault -}}
+{{- if $vault.enabled -}}
+{{- range $key, $value := dict "address" $vault.address "auth_method" $vault.authMethod "role" $vault.role -}}
+{{- include "openshell-driver-kyma.tomlDefault" (dict "config" $config "table" "openshell.credential_drivers.vault" "key" $key "value" $value) -}}
+{{- end -}}
+{{- range $key, $value := dict "mount" $vault.mount "kv_version" $vault.kvVersion "kubernetes_auth_mount" $vault.kubernetesAuthMount
+    "service_account_token_path" $vault.serviceAccountTokenPath "token_path" $vault.tokenPath -}}
+{{- if $value -}}
+{{- include "openshell-driver-kyma.tomlDefault" (dict "config" $config "table" "openshell.credential_drivers.vault" "key" $key "value" $value) -}}
+{{- end -}}
+{{- end -}}
+{{- if $vault.timeoutSecs -}}
+{{- include "openshell-driver-kyma.tomlDefault" (dict "config" $config "table" "openshell.credential_drivers.vault" "key" "timeout_secs" "value" (int $vault.timeoutSecs)) -}}
+{{- end -}}
+{{- end -}}
+{{- if include "openshell-driver-kyma.vaultCaConfigMapName" . -}}
+{{- $vaultTable := get $config "openshell.credential_drivers.vault" | default dict -}}
+{{- $_ := set $vaultTable "ca_bundle" "/etc/openshell-tls/vault-ca/ca.crt" -}}
+{{- $_ := set $config "openshell.credential_drivers.vault" $vaultTable -}}
+{{- end -}}
 {{- end -}}
 {{- else -}}
 {{- include "openshell-driver-kyma.tomlDefault" (dict "config" $config "table" "openshell.gateway.credential_storage" "key" "key_encryption_key_env" "value" "OPENSHELL_GATEWAY_CREDENTIAL_KEY_ENCRYPTION_KEY") -}}

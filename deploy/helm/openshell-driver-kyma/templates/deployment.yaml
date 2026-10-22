@@ -322,6 +322,11 @@ spec:
               mountPath: /etc/openshell-tls/oidc-ca
               readOnly: true
             {{- end }}
+            {{- if include "openshell-driver-kyma.vaultCaConfigMapName" . }}
+            - name: vault-ca
+              mountPath: /etc/openshell-tls/vault-ca
+              readOnly: true
+            {{- end }}
             {{- with .Values.gateway.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -380,6 +385,14 @@ spec:
         - name: oidc-ca
           configMap:
             name: {{ .Values.gateway.oidc.caConfigMapName }}
+        {{- end }}
+        {{- with include "openshell-driver-kyma.vaultCaConfigMapName" . }}
+        - name: vault-ca
+          configMap:
+            name: {{ . }}
+            items:
+              - key: ca.crt
+                path: ca.crt
         {{- end }}
         {{- with .Values.gateway.extraVolumes }}
         {{- toYaml . | nindent 8 }}
