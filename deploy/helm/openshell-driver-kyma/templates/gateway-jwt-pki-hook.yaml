@@ -138,18 +138,9 @@ spec:
             # The names clients verify the gateway under: this release's Service
             # (sandboxes, the provider hook, the ingress gateway) and loopback (a
             # port-forward). Upstream's own defaults name a release called "openshell".
-            {{- $service := include "openshell-driver-kyma.fullname" . }}
-            - --server-san={{ $service }}
-            - --server-san={{ $service }}.{{ .Release.Namespace }}
-            - --server-san={{ $service }}.{{ .Release.Namespace }}.svc
-            - --server-san={{ $service }}.{{ .Release.Namespace }}.svc.cluster.local
-            - --server-san=localhost
-            - --server-san=127.0.0.1
-            {{- /* Extra names (validated by gatewayTlsGuards); an IPv6 address is a --server-san as is. */}}
-            {{- range .Values.gateway.sandboxJwt.serverDnsNames }}
-            - --server-san={{ . }}
-            {{- end }}
-            {{- range .Values.gateway.sandboxJwt.serverIpAddresses }}
+            {{- /* The names are openshell-driver-kyma.pkiServerNames (an IPv6 address is a --server-san as is). */}}
+            {{- $names := include "openshell-driver-kyma.pkiServerNames" . | fromJson }}
+            {{- range concat $names.base (list $names.loopbackIp) $names.dnsNames $names.ipAddresses }}
             - --server-san={{ . }}
             {{- end }}
             {{- if .Values.gatewayIngress.enabled }}

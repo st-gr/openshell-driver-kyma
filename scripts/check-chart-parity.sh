@@ -329,6 +329,20 @@ try bad-p15-enabled-string 'gateway.certManager.enabled must be a boolean' t --s
 try bad-p15-cm-ip 'gateway.certManager.serverIpAddresses entries must be IP addresses' t \
 	"${CM15[@]}" --set 'gateway.certManager.serverIpAddresses={300.1.1.1}'
 
+# 16. Certificates from Gardener's certificate service (gateway.certManager.api=cert.gardener.cloud).
+GD16=("${CM15[@]}" --set gateway.certManager.api=cert.gardener.cloud)
+try good-p16-gardener '' t "${GD16[@]}"
+try good-p16-gardener-ingress '' t "${GD16[@]}" "${ING15[@]}"
+try good-p16-gardener-sans '' t "${GD16[@]}" --set 'gateway.certManager.serverDnsNames={gw.example.org}' \
+	--set 'gateway.certManager.serverIpAddresses={10.0.0.5}' --set gateway.certManager.caSecretName=own-ca \
+	--set gateway.certManager.caDuration=9481h
+try good-p16-gardener-mixed-durations '' t "${GD16[@]}" --set gateway.certManager.certificateDuration=1h30m \
+	--set gateway.certManager.certificateRenewBefore=45m --set gateway.certManager.caDuration=2h15m1s
+try good-p16-renew-half '' t "${CM15[@]}" --set gateway.certManager.certificateRenewBefore=4380h
+RENEW16='gateway.certManager.certificateDuration (8760h) must be at least twice certificateRenewBefore (5000h)'
+try bad-p16-gardener-renew "$RENEW16" t "${GD16[@]}" --set gateway.certManager.certificateRenewBefore=5000h
+try bad-p16-cm-renew "$RENEW16" t "${CM15[@]}" --set gateway.certManager.certificateRenewBefore=5000h
+
 uv run --quiet --no-project --python 3.12 --with pyyaml==6.0.2 python - "$WORK" "$CHART" <<'PY'
 import pathlib, sys, tomllib
 import yaml
@@ -954,8 +968,8 @@ CA_ISSUER_REF = {"name": f"{FN}-ca-issuer", "kind": "Issuer", "group": "cert-man
 ECDSA = {"algorithm": "ECDSA", "size": 256}
 HOOK_SANS = [FN, f"{FN}.default", f"{FN}.default.svc", f"{FN}.default.svc.cluster.local", "localhost"]
 
-def cm_objects(case):
-    return {(d["kind"], d["metadata"]["name"]): d for d in docs(case) if d.get("apiVersion") == CM_API}
+def cm_objects(case, api=CM_API):
+    return {(d["kind"], d["metadata"]["name"]): d for d in docs(case) if d.get("apiVersion") == api}
 
 def want_cm(ca_secret=f"{FN}-ca-tls", ca_duration="87600h", dns=(), ips=(), duration="8760h", renew="720h"):
     leaf = {"duration": duration, "renewBefore": renew, "privateKey": ECDSA, "issuerRef": CA_ISSUER_REF}
@@ -1060,6 +1074,43 @@ if [v.get("secret", {}).get("secretName") for v in vols] != [f"{FN}-ca-tls"]:
 if gateway_sans("good-p15-cm-sans") != ["gw.example.org,10.0.0.5"]:
     failures.append(f"good-p15-cm-sans: the gateway's --server-san is {gateway_sans('good-p15-cm-sans')}, "
                     "want ['gw.example.org,10.0.0.5']")
+
+# 16. Certificates from Gardener: the same five objects as cert-manager, in Gardener's schema.
+GD_API = "cert.gardener.cloud/v1alpha1"
+NS_REF = lambda name: {"name": name, "namespace": "default"}
+
+def want_gardener(ca_secret=f"{FN}-ca-tls", ca_duration="87600h", dns=(), ips=(), duration="8760h", renew="720h"):
+    want = want_cm(ca_secret, ca_duration, dns, ips, duration, renew)
+    for spec in want.values():
+        if "issuerRef" in spec:
+            spec["issuerRef"] = NS_REF(spec["issuerRef"]["name"])
+    want[("Issuer", f"{FN}-ca-issuer")] = {"ca": {"privateKeySecretRef": NS_REF(ca_secret)}}
+    return want
+
+for case, want in (("good-p16-gardener", want_gardener()), ("good-p16-gardener-ingress", want_gardener()),
+                   ("good-p16-gardener-sans", want_gardener(ca_secret="own-ca", ca_duration="9481h",
+                                                            dns=["gw.example.org"], ips=["10.0.0.5"])),
+                   ("good-p16-gardener-mixed-durations",
+                    want_gardener(ca_duration="2h15m1s", duration="1h30m", renew="45m"))):
+    got = cm_objects(case, GD_API)
+    if {k: v.get("spec") for k, v in got.items()} != want:
+        failures.append(f"{case}: the Gardener objects are {[(k, v.get('spec')) for k, v in got.items()]}, "
+                        f"want exactly {want}")
+    for (kind, name), d in got.items():
+        if d["metadata"].get("namespace") != "default":
+            failures.append(f"{case}: {kind} {name} is not in the release namespace")
+    if cm_objects(case):
+        failures.append(f"{case}: cert-manager.io objects rendered with api cert.gardener.cloud")
+for case in ("good-p15-cm", "good-p1-defaults", "good-p7-tls"):
+    if cm_objects(case, GD_API):
+        failures.append(f"{case}: Gardener objects rendered without api cert.gardener.cloud")
+for case in ("good-p16-gardener", "good-p16-gardener-ingress"):
+    got = job_args(case, f"{FN}-jwt-pki-hook")
+    if got is not None and got != JWT_ONLY:
+        failures.append(f"{case}: the PKI hook args are {got}, want {JWT_ONLY}")
+got = job_args("good-p16-gardener-ingress", BACKEND_CA)
+if got != want_backend_args:
+    failures.append(f"good-p16-gardener-ingress: the backend-CA Job args are {got}, want {want_backend_args}")
 
 if failures:
     print("CHART_PARITY_FAIL:")

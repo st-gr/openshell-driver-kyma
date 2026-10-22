@@ -746,6 +746,9 @@ gateway:
     # Go durations in hours, minutes and seconds (e.g. 8760h, 1h30m). The CA must
     # outlive a leaf: caDuration must exceed certificateDuration +
     # certificateRenewBefore.
+    # certificateDuration must be at least twice certificateRenewBefore (Gardener
+    # refuses less). With api cert.gardener.cloud the Gardener certificate service
+    # (on Kyma) must be enabled in the cluster, as cert-manager must be otherwise.
     caDuration: 87600h
     certificateDuration: 8760h
     certificateRenewBefore: 720h

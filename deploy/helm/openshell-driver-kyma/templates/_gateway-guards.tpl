@@ -140,6 +140,9 @@ takes the server Secret's ca.crt, false takes gateway.tls.clientCa.secretName.
 {{- $ca := include "openshell-driver-kyma.durationSeconds" (dict "key" "gateway.certManager.caDuration" "value" $cm.caDuration "example" "87600h") | int64 -}}
 {{- $leaf := include "openshell-driver-kyma.durationSeconds" (dict "key" "gateway.certManager.certificateDuration" "value" $cm.certificateDuration "example" "8760h") | int64 -}}
 {{- $renew := include "openshell-driver-kyma.durationSeconds" (dict "key" "gateway.certManager.certificateRenewBefore" "value" $cm.certificateRenewBefore "example" "720h") | int64 -}}
+{{- if lt $leaf (mul 2 $renew) -}}
+{{- fail (printf "gateway.certManager.certificateDuration (%s) must be at least twice certificateRenewBefore (%s): Gardener refuses a shorter duration, and cert-manager would renew before it could use the certificate." (toString $cm.certificateDuration) (toString $cm.certificateRenewBefore)) -}}
+{{- end -}}
 {{- if le $ca (add $leaf $renew) -}}
 {{- fail (printf "gateway.certManager.caDuration (%s) must exceed certificateDuration + certificateRenewBefore (%s): Gardener refuses a certificate that outlives its CA, and cert-manager cuts it short." (toString $cm.caDuration) (include "openshell-driver-kyma.formatDuration" (add $leaf $renew))) -}}
 {{- end -}}

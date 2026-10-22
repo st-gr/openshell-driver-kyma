@@ -6,7 +6,8 @@
 # certificate carries the PKI hook's names (openshell-driver-kyma.pkiServerSans)
 # rather than upstream's openshell.openshell.* defaults.
 {{- $fullname := include "openshell-driver-kyma.fullname" . }}
-{{- $cm := .Values.gateway.certManager }}
+{{- /* The fields both APIs share are openshell-driver-kyma.pkiCertSpec; only the
+  issuer wiring differs from gardener-pki.yaml. */}}
 apiVersion: cert-manager.io/v1
 kind: Issuer
 metadata:
@@ -25,15 +26,7 @@ metadata:
   labels:
     {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
 spec:
-  isCA: true
-  commonName: openshell-ca
-  secretName: {{ include "openshell-driver-kyma.caSecretName" . | quote }}
-  # Explicit, and longer than a leaf's lifetime plus its renewal window
-  # (certManagerGuards): the CA must outlive every certificate it signs.
-  duration: {{ $cm.caDuration | quote }}
-  privateKey:
-    algorithm: ECDSA
-    size: 256
+  {{- include "openshell-driver-kyma.pkiCertSpec" (dict "ctx" . "role" "ca") | nindent 2 }}
   issuerRef:
     name: {{ $fullname }}-selfsigned
     kind: Issuer
@@ -49,60 +42,20 @@ metadata:
 spec:
   ca:
     secretName: {{ include "openshell-driver-kyma.caSecretName" . | quote }}
+{{- range $role := list "server" "client" }}
 ---
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
-  name: {{ $fullname }}-server
-  namespace: {{ .Release.Namespace }}
+  name: {{ $fullname }}-{{ $role }}
+  namespace: {{ $.Release.Namespace }}
   labels:
-    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
+    {{- include "openshell-driver-kyma.labels" $ | nindent 4 }}
 spec:
-  secretName: {{ include "openshell-driver-kyma.serverTlsSecretName" . | quote }}
-  duration: {{ $cm.certificateDuration | quote }}
-  renewBefore: {{ $cm.certificateRenewBefore | quote }}
-  commonName: {{ $fullname }}
-  dnsNames:
-    {{- range include "openshell-driver-kyma.pkiServerSans" . | fromYamlArray }}
-    - {{ . | quote }}
-    {{- end }}
-  ipAddresses:
-    {{- range include "openshell-driver-kyma.pkiServerIps" . | fromYamlArray }}
-    - {{ . | quote }}
-    {{- end }}
-  privateKey:
-    algorithm: ECDSA
-    size: 256
-  usages:
-    - server auth
-    - digital signature
-    - key encipherment
+  {{- include "openshell-driver-kyma.pkiCertSpec" (dict "ctx" $ "role" $role) | nindent 2 }}
   issuerRef:
     name: {{ $fullname }}-ca-issuer
     kind: Issuer
     group: cert-manager.io
----
-apiVersion: cert-manager.io/v1
-kind: Certificate
-metadata:
-  name: {{ $fullname }}-client
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
-spec:
-  secretName: {{ include "openshell-driver-kyma.clientTlsSecretName" . | quote }}
-  duration: {{ $cm.certificateDuration | quote }}
-  renewBefore: {{ $cm.certificateRenewBefore | quote }}
-  commonName: openshell-client
-  privateKey:
-    algorithm: ECDSA
-    size: 256
-  usages:
-    - client auth
-    - digital signature
-    - key encipherment
-  issuerRef:
-    name: {{ $fullname }}-ca-issuer
-    kind: Issuer
-    group: cert-manager.io
+{{- end }}
 {{- end }}

@@ -498,20 +498,30 @@ gateway.certManager's while it issues the certificates, else gateway.sandboxJwt'
 {{- end }}
 
 {{/*
-The DNS names on a server certificate the chart has issued (cert-manager or Gardener),
-as a YAML list: the names the PKI hook gives its certificate (this release's Service,
-short to fully qualified, and localhost), then the extra names. pkiServerIps: 127.0.0.1,
-then the extra addresses.
+The names on a server certificate the chart issues (the PKI hook, cert-manager or
+Gardener), as JSON: "base" (this release's Service, short to fully qualified, and
+localhost), "loopbackIp" (127.0.0.1), then the operator's extra "dnsNames" and
+"ipAddresses" (openshell-driver-kyma.extraServerSans). The one place the list is built.
 */}}
-{{- define "openshell-driver-kyma.pkiServerSans" -}}
+{{- define "openshell-driver-kyma.pkiServerNames" -}}
 {{- $service := include "openshell-driver-kyma.fullname" . -}}
 {{- $ns := .Release.Namespace -}}
-{{- $base := list $service (printf "%s.%s" $service $ns) (printf "%s.%s.svc" $service $ns) (printf "%s.%s.svc.cluster.local" $service $ns) "localhost" -}}
-{{- concat $base (include "openshell-driver-kyma.extraServerSans" . | fromJson).dnsNames | toYaml -}}
+{{- $extra := include "openshell-driver-kyma.extraServerSans" . | fromJson -}}
+{{- dict "base" (list $service (printf "%s.%s" $service $ns) (printf "%s.%s.svc" $service $ns) (printf "%s.%s.svc.cluster.local" $service $ns) "localhost") "loopbackIp" "127.0.0.1" "dnsNames" $extra.dnsNames "ipAddresses" $extra.ipAddresses | toJson -}}
+{{- end }}
+
+{{/*
+The DNS names (pkiServerSans: base, then the extra names) and the IP addresses
+(pkiServerIps: 127.0.0.1, then the extra addresses) of that certificate, as YAML lists.
+*/}}
+{{- define "openshell-driver-kyma.pkiServerSans" -}}
+{{- $n := include "openshell-driver-kyma.pkiServerNames" . | fromJson -}}
+{{- concat $n.base $n.dnsNames | toYaml -}}
 {{- end }}
 
 {{- define "openshell-driver-kyma.pkiServerIps" -}}
-{{- concat (list "127.0.0.1") (include "openshell-driver-kyma.extraServerSans" . | fromJson).ipAddresses | toYaml -}}
+{{- $n := include "openshell-driver-kyma.pkiServerNames" . | fromJson -}}
+{{- concat (list $n.loopbackIp) $n.ipAddresses | toYaml -}}
 {{- end }}
 
 {{/*
@@ -520,6 +530,51 @@ gateway.certManager.caSecretName, else <fullname>-ca-tls.
 */}}
 {{- define "openshell-driver-kyma.caSecretName" -}}
 {{- default (printf "%s-ca-tls" (include "openshell-driver-kyma.fullname" .)) .Values.gateway.certManager.caSecretName -}}
+{{- end }}
+
+{{/*
+The spec fields cert-manager.io and cert.gardener.cloud Certificates have in common,
+for cert-manager-pki.yaml and gardener-pki.yaml (each adds its own issuerRef). Takes a
+dict with `ctx` (the root context) and `role`: "ca" (the chart CA), "server" (the
+gateway's names, as openshell-driver-kyma.pkiServerSans) or "client". The CA gets an
+explicit duration, longer than a leaf's lifetime plus its renewal window
+(certManagerGuards): it must outlive every certificate it signs.
+*/}}
+{{- define "openshell-driver-kyma.pkiCertSpec" -}}
+{{- $ctx := .ctx -}}
+{{- $cm := $ctx.Values.gateway.certManager -}}
+{{- if eq .role "ca" -}}
+isCA: true
+commonName: openshell-ca
+secretName: {{ include "openshell-driver-kyma.caSecretName" $ctx | quote }}
+duration: {{ $cm.caDuration | quote }}
+{{- else -}}
+secretName: {{ include (printf "openshell-driver-kyma.%sTlsSecretName" .role) $ctx | quote }}
+duration: {{ $cm.certificateDuration | quote }}
+renewBefore: {{ $cm.certificateRenewBefore | quote }}
+{{- if eq .role "server" }}
+commonName: {{ include "openshell-driver-kyma.fullname" $ctx }}
+dnsNames:
+  {{- range include "openshell-driver-kyma.pkiServerSans" $ctx | fromYamlArray }}
+  - {{ . | quote }}
+  {{- end }}
+ipAddresses:
+  {{- range include "openshell-driver-kyma.pkiServerIps" $ctx | fromYamlArray }}
+  - {{ . | quote }}
+  {{- end }}
+{{- else }}
+commonName: openshell-client
+{{- end }}
+{{- end }}
+privateKey:
+  algorithm: ECDSA
+  size: 256
+{{- if ne .role "ca" }}
+usages:
+  - {{ ternary "server auth" "client auth" (eq .role "server") }}
+  - digital signature
+  - key encipherment
+{{- end }}
 {{- end }}
 
 {{/*
