@@ -57,7 +57,18 @@ VAULT_ROLE=openshell-gateway               # the values file names it
 GATEWAY_SA=openshell-driver
 
 log()  { printf '\n=== parity-smoke: %s\n' "$*"; }
-fail() { printf '\nFAIL (parity-smoke %s): %s\n' "${MODE:-?}" "$*" >&2; exit 1; }
+fail() { printf '\nFAIL (parity-smoke %s): %s\n' "${MODE:-?}" "$*" >&2; dump_diagnostics; exit 1; }
+# What a CI-only failure needs: every pod in the cluster, and the gateway's
+# and driver's logs. Best effort; never fails itself.
+dump_diagnostics() {
+	printf '\n--- pods (all namespaces) ---\n' >&2
+	kubectl get pods -A -o wide >&2 2>&1 || true
+	local c
+	for c in gateway driver; do
+		printf '\n--- %s log (last 200 lines) ---\n' "$c" >&2
+		kubectl -n "$NS" logs "deploy/${FULLNAME}" -c "$c" --tail=200 2>&1 | strip_ansi >&2 || true
+	done
+}
 strip_ansi() { sed $'s/\033\\[[0-9;]*m//g'; }
 
 usage() { echo "usage: DRIVER_IMAGE=<image> $0 cert-manager|vault|spiffe" >&2; exit 2; }
@@ -69,11 +80,17 @@ case $MODE in
 esac
 [[ -n ${DRIVER_IMAGE:-} ]] || { echo "error: DRIVER_IMAGE is required" >&2; exit 1; }
 
+# This installs cert-manager, Vault, SPIRE and CRDs into whatever cluster the
+# current context names. Refuse anything but a kind cluster, before the first
+# helm, kubectl or openshell action. No override.
+ctx=$(kubectl config current-context 2>/dev/null || true)
+[[ $ctx == kind-* ]] || { echo "refusing to run: current kube context '${ctx}' is not a kind cluster" >&2; exit 1; }
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}/.."
 WORK="$(mktemp -d)"
 PF_PID=""   # the vault assertion's port-forward
-trap '[[ -z $PF_PID ]] || kill "$PF_PID" 2>/dev/null || true' EXIT
+trap '[[ -z $PF_PID ]] || kill "$PF_PID" 2>/dev/null || true; rm -rf "$WORK"' EXIT
 
 fetch() { # url sha256 dest
 	curl -fsSL --retry 3 --retry-delay 2 -o "$3" "$1" || fail "could not download $1"
@@ -284,11 +301,21 @@ assert_vault() {
 		--name "$sb" --provider smoke-vault -- sleep infinity \
 		|| fail "sandbox ${sb} with provider smoke-vault did not reach Ready"
 
-	log "ASSERT vault: no failed GetSandboxProviderEnvironment in the gateway log"
-	local gw hits
+	# The gateway logs a successful call as "GetSandboxProviderEnvironment
+	# request completed successfully ... provider_count=N", and its request
+	# span carries rpc.grpc.status_code only when the call failed (an OK
+	# response has none). So: require a successful call that carried the
+	# provider, and refuse any non-zero status (FailedPrecondition 9 is how a
+	# provider fetch error surfaces; a Vault auth failure would be 7 or 14).
+	log "ASSERT vault: GetSandboxProviderEnvironment succeeded for the provider, and never failed"
+	local gw rpc_lines hits
 	gw=$(kubectl -n "$NS" logs "deploy/${FULLNAME}" -c gateway --since-time="$since" 2>&1) \
 		|| fail "could not read the gateway log: ${gw}"
-	hits=$(strip_ansi <<<"$gw" | grep -F 'GetSandboxProviderEnvironment' | grep -F 'rpc.grpc.status_code=9' || true)
+	rpc_lines=$(strip_ansi <<<"$gw" | grep -F 'GetSandboxProviderEnvironment' || true)
+	grep -qE 'GetSandboxProviderEnvironment request completed successfully.* provider_count=[1-9]' <<<"$rpc_lines" \
+		|| fail "no successful GetSandboxProviderEnvironment with a provider since ${since}:
+$(tail -5 <<<"$rpc_lines")"
+	hits=$(grep -E 'rpc\.grpc\.status_code=[1-9]' <<<"$rpc_lines" || true)
 	[[ -z $hits ]] || fail "the gateway failed GetSandboxProviderEnvironment:
 ${hits}"
 

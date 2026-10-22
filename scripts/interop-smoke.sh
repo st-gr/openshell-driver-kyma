@@ -67,6 +67,11 @@ dump_diagnostics() {
 }
 
 [[ -n ${DRIVER_IMAGE:-} ]] || { echo "error: DRIVER_IMAGE is required" >&2; exit 1; }
+# This creates namespaces and installs a controller, CRDs and the chart into
+# whatever cluster the current context names. Refuse anything but a kind
+# cluster, before the first helm, kubectl or openshell action. No override.
+ctx=$(kubectl config current-context 2>/dev/null || true)
+[[ $ctx == kind-* ]] || { echo "refusing to run: current kube context '${ctx}' is not a kind cluster" >&2; exit 1; }
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/proto-lib.sh
 . "${SCRIPT_DIR}/proto-lib.sh"
@@ -213,6 +218,8 @@ if grep -qF -- '--tls-cert' <<<"$gw_args"; then
 	XDG_CONFIG_HOME="$(mktemp -d)"
 	OPENSHELL_GATEWAY=interop-smoke
 	export XDG_CONFIG_HOME OPENSHELL_GATEWAY
+	# It will hold the client key: remove it on exit with the port-forward.
+	trap 'kill "$PF_PID" 2>/dev/null || true; rm -rf "$XDG_CONFIG_HOME"' EXIT
 	mtls_dir="${XDG_CONFIG_HOME}/openshell/gateways/${OPENSHELL_GATEWAY}/mtls"
 	mkdir -p "$mtls_dir"
 	for key in ca.crt tls.crt tls.key; do

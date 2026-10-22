@@ -13,6 +13,11 @@ on:
     paths:
       - deploy/helm/openshell-driver-kyma/**
       - scripts/**
+      # The driver image the smoke builds.
+      - crates/**
+      - Cargo.toml
+      - Cargo.lock
+      - deploy/Dockerfile
       - .github/workflows/parity-smoke.yml
   push:
     tags:
@@ -20,6 +25,11 @@ on:
 
 permissions:
   contents: read
+
+# A newer push to the same ref makes an in-progress run moot.
+concurrency:
+  group: parity-smoke-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   smoke:
@@ -33,6 +43,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing here pushes; keep the token out of .git/config.
+          persist-credentials: false
 
       - name: Create kind cluster
         uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
