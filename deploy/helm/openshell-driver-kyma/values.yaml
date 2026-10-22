@@ -202,7 +202,7 @@ driver:
   # its exporter without TLS). With networkPolicy.enabled the driver pod may
   # then reach that port (80 when none is given), on any address.
   otlpEndpoint: ""
-  gatewayName: ""
+  gatewayName: ""            # "" = gateway.name, else the chart fullname
   # Secret with the client certificate sandboxes present to a TLS gateway
   # (OPENSHELL_CLIENT_TLS_SECRET_NAME). Empty defaults, when gateway.tls.enabled,
   # to the one the chart's PKI hook creates (gateway.sandboxJwt.
@@ -370,6 +370,20 @@ gateway:
     repository: ghcr.io/nvidia/openshell/gateway
     tag: "sha256:bdb4fe248070032c88be78f029dad9325cb698480e90486e1413a674a5d8edc8"
     pullPolicy: IfNotPresent
+  # The gateway's name: its OCSF identity, its OTel resource and the in-process
+  # driver build context. "" = the chart fullname. driver.gatewayName, the
+  # driver's own OTel name, defaults to it.
+  name: ""
+  # What the gateway does when a policy update fails validation: fail_closed
+  # rejects it, retain_last_valid keeps the last valid policy.
+  policyValidationFailureMode: fail_closed
+  # The gateway's HTTP listener on the loopback interface (enable_loopback_service_http).
+  enableLoopbackServiceHttp: true
+  # Accept WebSocket tunnels on the gateway's HTTP listener. The ingress does not
+  # authenticate them, the gateway does. The gatewayIngress VirtualService sets
+  # nothing on its route that blocks HTTP/1.1 upgrades, and Istio passes them by
+  # default, so the tunnel works through gatewayIngress without a template change.
+  enableWebsocketTunnel: false
   grpcPort: 8080
   metricsPort: 9091
   healthPort: 9092

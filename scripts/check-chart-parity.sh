@@ -47,6 +47,18 @@ try good-p1-full '' t --set gateway.oidc.issuer=https://issuer.example --set gat
 	--set gateway.grpcRateLimit.windowSeconds=60 \
 	--set-json 'driver.resourceAdmission.requiredLabels={"example.com/team":"a"}'
 
+# 3. Gateway name, policy validation mode, loopback service HTTP and WebSocket tunnel.
+try good-p3-values '' t --set gateway.name=gw1 --set gateway.policyValidationFailureMode=retain_last_valid \
+	--set gateway.enableLoopbackServiceHttp=false --set gateway.enableWebsocketTunnel=true
+try good-p3-driver-name '' t --set driver.gatewayName=other
+try bad-p3-mode 'gateway.policyValidationFailureMode must be fail_closed or retain_last_valid' t \
+	--set gateway.policyValidationFailureMode=open
+try bad-p3-websocket-string 'gateway.enableWebsocketTunnel must be a boolean' t \
+	--set-string gateway.enableWebsocketTunnel=true
+try bad-p3-loopback-string 'gateway.enableLoopbackServiceHttp must be a boolean' t \
+	--set-string gateway.enableLoopbackServiceHttp=false
+try bad-p3-empty-name 'gateway.name must not be empty' t --set-string 'gateway.name= '
+
 # 2. gatewayConfig: merged, nested, arrays of tables; then each refusal.
 try good-p2-merge '' t --set-json 'gatewayConfig={"openshell.gateway":{"policy_validation_failure_mode":"retain_last_valid"},"openshell.gateway.auth":{"allow_unauthenticated_users":false}}'
 try good-p2-nested '' t --set-json 'gatewayConfig={"openshell":{"gateway":{"ssh_session_ttl_secs":600}}}'
@@ -163,7 +175,10 @@ def diff(got, want):
 # 1. The gateway TOML, as the hand-written template rendered it before the serializer.
 GOLDEN_DEFAULT = {
     "openshell": {"version": 2},
-    "openshell.gateway": {"log_level": "info"},
+    "openshell.gateway": {
+        "log_level": "info", "name": "t-openshell-driver-kyma",
+        "policy_validation_failure_mode": "fail_closed",
+        "enable_loopback_service_http": True, "enable_websocket_tunnel": False},
     "openshell.gateway.auth": {"allow_unauthenticated_users": True},
     "openshell.gateway.credential_storage": {
         "key_encryption_key_env": "OPENSHELL_GATEWAY_CREDENTIAL_KEY_ENCRYPTION_KEY"},
@@ -177,7 +192,7 @@ GOLDEN_DEFAULT = {
 }
 GOLDEN_FULL = {
     **GOLDEN_DEFAULT,
-    "openshell.gateway": {"log_level": "info", "grpc_rate_limit_requests": 120,
+    "openshell.gateway": {**GOLDEN_DEFAULT["openshell.gateway"], "grpc_rate_limit_requests": 120,
                           "grpc_rate_limit_window_seconds": 60},
     "openshell.gateway.auth": {"allow_unauthenticated_users": False},
     "openshell.gateway.ocsf_log": {"path": "/tmp/gateway-ocsf.jsonl", "rotation": "daily", "max_files": 7,
@@ -188,6 +203,21 @@ for name, want in (("good-p1-defaults", GOLDEN_DEFAULT), ("good-p1-full", GOLDEN
     got = flatten(gateway_toml(name))
     if got != want:
         failures.append(f"{name}: the gateway TOML differs from the golden: {diff(got, want)}")
+
+# 3. The gateway name, and the four settings: values reach the TOML; the driver's env follows.
+p3 = gateway_toml("good-p3-values").get("openshell", {}).get("gateway", {})
+want_p3 = {"name": "gw1", "policy_validation_failure_mode": "retain_last_valid",
+           "enable_loopback_service_http": False, "enable_websocket_tunnel": True}
+if {k: p3.get(k) for k in want_p3} != want_p3:
+    failures.append(f"good-p3-values: the gateway table has {p3}, want {want_p3}")
+for case, want in (("good-p3-values", "gw1"), ("good-p1-defaults", "t-openshell-driver-kyma"),
+                   ("good-p3-driver-name", "other")):
+    got = env_of(driver_container(case)).get("OPENSHELL_GATEWAY_NAME", {}).get("value")
+    if got != want:
+        failures.append(f"{case}: the driver's OPENSHELL_GATEWAY_NAME is {got!r}, want {want!r}")
+got = gateway_toml("good-p3-driver-name").get("openshell", {}).get("gateway", {}).get("name")
+if got != "t-openshell-driver-kyma":
+    failures.append(f"good-p3-driver-name: the TOML name is {got!r}, want 't-openshell-driver-kyma'")
 
 # 2. gatewayConfig merged into the chart's tables, each table rendered once.
 def gateway_toml_text(name):

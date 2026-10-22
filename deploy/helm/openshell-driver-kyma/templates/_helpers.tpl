@@ -192,6 +192,20 @@ so the variable is not passed.
 {{- end -}}
 
 {{/*
+The gateway's name: gateway.name, else the chart fullname. The gateway uses it
+for its OCSF identity, its OTel resource and the in-process driver build context;
+the external driver only for its OTel resource, and nothing persists it, so the
+default can follow the fullname. driver.gatewayName defaults to it.
+*/}}
+{{- define "openshell-driver-kyma.gatewayName" -}}
+{{- $name := .Values.gateway.name -}}
+{{- if and $name (not (trim (toString $name))) -}}
+{{- fail "gateway.name must not be empty; leave it unset for the chart fullname." -}}
+{{- end -}}
+{{- default (include "openshell-driver-kyma.fullname" .) $name -}}
+{{- end -}}
+
+{{/*
 The effective managed SSH ingress, as JSON {enabled, gatewayNamespace,
 gatewayPodSelector}. Upstream's chart sets managed_ssh_ingress from its own
 networkPolicy.enabled, with its release namespace and its gateway pod's labels

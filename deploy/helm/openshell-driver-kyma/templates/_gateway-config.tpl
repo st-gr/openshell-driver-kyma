@@ -117,6 +117,10 @@ key would silently do nothing). database_url is refused by _toml.tpl in every ta
 {{- end -}}
 {{- include "openshell-driver-kyma.tomlDefault" (dict "config" $config "table" "openshell" "key" "version" "value" 2) -}}
 {{- include "openshell-driver-kyma.tomlDefault" (dict "config" $config "table" "openshell.gateway" "key" "log_level" "value" .Values.driver.logLevel) -}}
+{{- include "openshell-driver-kyma.tomlDefault" (dict "config" $config "table" "openshell.gateway" "key" "name" "value" (include "openshell-driver-kyma.gatewayName" .)) -}}
+{{- include "openshell-driver-kyma.tomlDefault" (dict "config" $config "table" "openshell.gateway" "key" "policy_validation_failure_mode" "value" .Values.gateway.policyValidationFailureMode) -}}
+{{- include "openshell-driver-kyma.tomlDefault" (dict "config" $config "table" "openshell.gateway" "key" "enable_loopback_service_http" "value" .Values.gateway.enableLoopbackServiceHttp) -}}
+{{- include "openshell-driver-kyma.tomlDefault" (dict "config" $config "table" "openshell.gateway" "key" "enable_websocket_tunnel" "value" .Values.gateway.enableWebsocketTunnel) -}}
 {{- $rateRequests := int (.Values.gateway.grpcRateLimit.requests | default 0) -}}
 {{- $rateWindow := int (.Values.gateway.grpcRateLimit.windowSeconds | default 0) -}}
 {{- if gt $rateRequests 0 -}}
