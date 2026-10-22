@@ -72,5 +72,5 @@ openshell sandbox list       # empty list on a fresh install
 If `openshell status` returns `missing authorization header`, your
 gateway requires auth — set up OIDC per the production runbook or
 deploy with `gateway.oidc.issuer=""` (the chart will set
-`allow_unauthenticated_users = true` when no issuer is configured,
+`allow_unauthenticated_users = true` when neither an issuer nor a client CA is configured,
 suitable only for in-cluster / port-forward access).

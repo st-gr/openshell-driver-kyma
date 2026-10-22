@@ -790,7 +790,9 @@ gatewayConfig: {}
 # the address reaches the gateway, which then relies on its own TLS and OIDC alone.
 # With either, this Service carries only the gRPC, gw-health and gw-metrics ports;
 # the driver's health port and http-services move to a second, ClusterIP Service,
-# <fullname>-internal, so they are never public. Requires enabled: true.
+# <fullname>-internal, so they are never public. gw-health and gw-metrics are NOT
+# moved: on a LoadBalancer or NodePort Service they are public too, along with gRPC.
+# Requires enabled: true.
 # nodePort pins the gRPC port's node port (type NodePort only); null lets Kubernetes pick.
 gatewayService:
   enabled: false

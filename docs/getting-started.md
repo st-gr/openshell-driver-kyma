@@ -421,7 +421,7 @@ supervisor logs.** Either `gateway.sandboxJwt.enabled=false` (the chart
 should have failed at install in this case — check for
 `allow_unauthenticated_users = true` in
 `kubectl -n "$NS" get cm <release>-openshell-driver-kyma-gateway-config -o yaml`
-only if you set an OIDC issuer) or the driver's ClusterRole lacks
+only if you set an OIDC issuer or a client CA) or the driver's ClusterRole lacks
 `tokenreviews:create` (check
 `kubectl get clusterrole -l app.kubernetes.io/instance=<release> -o yaml`).
 

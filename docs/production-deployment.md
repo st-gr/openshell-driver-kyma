@@ -574,6 +574,125 @@ Things to know:
 
 Sandbox pods themselves are never published.
 
+## Certificates from cert-manager or Gardener
+
+By default the chart's PKI hook creates the gateway's certificates. Set
+`gateway.certManager.enabled: true` (with `gateway.tls.enabled`) to have
+cert-manager or Gardener's certificate service issue them instead:
+
+```yaml
+gateway:
+  tls:
+    enabled: true
+  certManager:
+    enabled: true
+    api: cert-manager.io          # or cert.gardener.cloud
+    # caDuration: 87600h
+    # certificateDuration: 8760h
+    # certificateRenewBefore: 720h
+    # serverDnsNames: [gw.example.org]
+```
+
+- **The issuer must already be installed.** Kyma does not ship cert-manager.
+  Install it first (or enable Gardener's certificate service for
+  `cert.gardener.cloud`); without its CRDs Helm refuses the release on the
+  unknown Issuer and Certificate kinds.
+- The chart creates, in the release namespace, a self-signed Issuer, a CA
+  Certificate, a CA Issuer, and server and client Certificates. They write the
+  same Secret names the PKI hook would have (`gateway.sandboxJwt.serverTlsSecretName`
+  and `clientTlsSecretName`), so the gateway and the sandboxes mount what they
+  always mounted. The PKI hook then creates only the sandbox JWT keys.
+- **On a first install the gateway pod shows `FailedMount` events until the
+  server Secret is issued.** That is expected: the pod starts as soon as
+  cert-manager or Gardener has written the Secret. If it stays that way, look at
+  the Certificate (`kubectl -n <namespace> describe certificate`).
+- **Durations.** All three are Go durations in hours, minutes and seconds.
+  `certificateDuration` must be at least twice `certificateRenewBefore`, for both
+  APIs, and `caDuration` must exceed `certificateDuration + certificateRenewBefore`:
+  Gardener refuses a certificate that outlives its CA, and cert-manager cuts it
+  short. The chart always sets `caDuration` explicitly (ten years by default) and
+  fails the render when the rule is broken.
+- **CA renewal.** The Istio ingress verifies the gateway against the ConfigMap
+  `<fullname>-gateway-ca`, which a post-install Job fills from the server
+  Secret's `ca.crt` (only with `gatewayIngress.enabled`). When the CA is renewed,
+  the ingress keeps trusting the old one until the Job runs again: run
+  `helm upgrade` with the same values to refresh the ConfigMap.
+- **Switching an existing install** between the PKI hook and cert-manager or
+  Gardener, in either direction: delete the server, client and JWT-keys Secrets,
+  run `helm upgrade`, restart the gateway, and recreate or restart the running
+  sandboxes, which keep their mounted copy of the old `ca.crt`. Without the
+  deletion, the hook's mixed-state refusal or the issuer's takeover decides the
+  outcome.
+
+## Credential drivers
+
+By default the gateway keeps provider credentials, encrypted, in its own
+database. `gateway.credentialDrivers` moves them to an external store; at most
+one backend can be enabled.
+
+```yaml
+gateway:
+  credentialDrivers:
+    kubernetesSecrets:
+      enabled: true
+      namespace: openshell-credentials
+      createNamespace: true
+    # or
+    vault:
+      enabled: true
+      address: https://vault.example.org:8200
+      role: openshell
+```
+
+- **Switching stores orphans stored credentials.** The credentials already
+  stored stay in the gateway database, unread; create the providers again after
+  the switch. While a driver is selected the chart renders no
+  key-encryption-key Secret or environment variable. The generated Secret is
+  kept, so switching back reuses it and the old credentials decrypt again if the
+  database was persisted.
+- **Kubernetes Secrets.** The default namespace is the release namespace. The
+  chart's Role grants `get`, `create`, `patch` and `delete` on every Secret in
+  that namespace, and it is bound to the gateway's ServiceAccount, which the
+  driver shares: the driver gains the same access. Use a dedicated namespace
+  (`namespace`, with `createNamespace: true` to have the chart create it; the
+  Namespace is kept on uninstall so that removing the gateway cannot delete the
+  credentials). The sandbox namespace is refused.
+- **Vault** (HashiCorp Vault or OpenBao). The Vault policy and the Kubernetes
+  auth role's binding are yours to set up. Non-loopback addresses must use
+  HTTPS; `caConfigMapName` names a ConfigMap whose `ca.crt` signs a private Vault
+  CA. With `networkPolicy.enabled` the pod may reach the address's port (443 for
+  https, 8200 for http without a port).
+- **SPIFFE.** `gateway.providerTokenGrants.spiffe.enabled` mounts the SPIFFE CSI
+  driver's Workload API socket (a SPIRE agent must run on the node) for dynamic
+  provider token grants.
+
+## Extra gateway settings: gatewayConfig
+
+`gatewayConfig` is upstream's passthrough for gateway settings that have no
+chart value: top-level keys name TOML tables, so an upstream snippet pastes in
+unchanged.
+
+```yaml
+gatewayConfig:
+  openshell.gateway:
+    policy_validation_failure_mode: retain_last_valid
+```
+
+It merges with the chart's own tables: a chart value fills only the keys you
+leave out. The chart owns, and refuses with a message naming the value to use
+instead, the `openshell.drivers.kyma` and `openshell.gateway.tls` tables,
+`openshell.drivers.kubernetes` (this chart's driver reads its environment), and
+the keys the gateway takes as flags (bind addresses, `compute_driver`,
+`server_sans`, the OIDC settings). Secrets never go here: inline private keys,
+URL credentials and `database_url` are refused. The generated gateway ConfigMap
+is sorted and carries no comments.
+
+## Telemetry
+
+The gateway's usage telemetry is off by default; set
+`gateway.telemetryEnabled: true` to enable it. It affects the gateway only:
+sandboxes never send telemetry.
+
 ## Known limitations
 
 - **Operator mode** (`driver.workspaceMode=operator`): the namespace owner must

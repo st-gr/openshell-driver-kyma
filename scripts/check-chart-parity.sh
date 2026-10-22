@@ -339,7 +339,7 @@ try good-p16-gardener-sans '' t "${GD16[@]}" --set 'gateway.certManager.serverDn
 try good-p16-gardener-mixed-durations '' t "${GD16[@]}" --set gateway.certManager.certificateDuration=1h30m \
 	--set gateway.certManager.certificateRenewBefore=45m --set gateway.certManager.caDuration=2h15m1s
 try good-p16-renew-half '' t "${CM15[@]}" --set gateway.certManager.certificateRenewBefore=4380h
-RENEW16='gateway.certManager.certificateDuration (8760h) must be at least twice certificateRenewBefore (5000h)'
+RENEW16='gateway.certManager.certificateDuration (8760h) must be at least twice certificateRenewBefore (5000h): the chart requires this for both cert-manager.io and cert.gardener.cloud.'
 try bad-p16-gardener-renew "$RENEW16" t "${GD16[@]}" --set gateway.certManager.certificateRenewBefore=5000h
 try bad-p16-cm-renew "$RENEW16" t "${CM15[@]}" --set gateway.certManager.certificateRenewBefore=5000h
 

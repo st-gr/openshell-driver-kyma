@@ -147,7 +147,8 @@ namespace.
 The chart refuses to render with `gatewayIngress.enabled=true` unless
 `gateway.oidc.issuer`, `audience` and `clientId` are set. Without this guard,
 an operator could combine a public host with
-`allow_unauthenticated_users=true` (set automatically when no issuer) and
+`allow_unauthenticated_users=true` (set automatically when there is neither an
+issuer nor a client CA) and
 `--disable-tls`, producing a world-writable sandbox factory.
 
 ## Provider-profile inference routing

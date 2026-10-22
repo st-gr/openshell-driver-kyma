@@ -4,6 +4,86 @@ All notable changes to openshell-driver-kyma are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.11.0] — 2026-10-22
+
+Closes the gaps between this chart and upstream OpenShell's Helm chart, where the
+capability can work on Kyma.
+
+### Added
+
+- **Gateway settings.** `gateway.name`, `gateway.policyValidationFailureMode`,
+  `gateway.enableLoopbackServiceHttp`, `gateway.enableWebsocketTunnel`,
+  `gateway.telemetryEnabled`, `gateway.otlp.{endpoint,serviceName}` (the driver's
+  `otlpEndpoint` defaults to it, and `networkPolicy` opens its port),
+  `gateway.auth.allowUnauthenticatedUsers`, and
+  `gateway.oidc.{jwksTtl,scopesClaim,jwksAllowedOrigins,dangerouslyAllowInsecureHttp,caConfigMapName}`.
+- **`gatewayConfig`**, upstream's TOML passthrough, merged with the chart's own
+  tables, with upstream's guards (no inline private keys, URL credentials or
+  `database_url`; chart-owned keys are refused with a message naming the value to
+  use).
+- **Pod and Kubernetes plumbing.** `serviceAccount.annotations` and
+  `sandboxServiceAccount.annotations`; `gateway.terminationGracePeriodSeconds`;
+  `gateway.probes.{startup,liveness,readiness}`; `gatewayService.type` and
+  `nodePort` (a non-ClusterIP type moves the driver health port and http-services
+  to a ClusterIP `<fullname>-internal` Service; gw-health and gw-metrics stay on
+  the public Service); `gateway.dbPersistence.externalDbSecret`;
+  `gateway.tls.clientCa.secretName`; `gateway.sandboxJwt.{serverDnsNames,serverIpAddresses,secretDefaultMode}`;
+  `rbac.create`; pod `hostAliases` from `driver.hostGatewayIp`.
+- **Credential drivers.** `gateway.credentialDrivers.kubernetesSecrets` and
+  `gateway.credentialDrivers.vault`, and `gateway.providerTokenGrants.spiffe` for
+  the SPIFFE Workload API.
+- **Certificates from cert-manager or Gardener.** `gateway.certManager.*`
+  (`api: cert-manager.io` or `cert.gardener.cloud`) issues the gateway's server and
+  client certificates instead of the PKI hook, and a post-install Job fills the
+  ingress CA ConfigMap from the issued CA. Opt-in; the PKI hook stays the default.
+  Kind smokes cover cert-manager, Vault and SPIFFE.
+
+### Fixed
+
+- **An mTLS-only gateway admitted callers without a client certificate.** With
+  `gateway.tls.clientCa.enabled` and no OIDC issuer the chart set
+  `allow_unauthenticated_users = true`, so a caller without a certificate was
+  admitted as the dev user. It is now true only with neither an OIDC issuer nor
+  an effective client CA (`gateway.tls.enabled` and `gateway.tls.clientCa.enabled`);
+  with a client CA the gateway authenticates users by certificate. Setting it to
+  `true` next to a client CA, as a value or through `gatewayConfig`, fails
+  the render.
+
+### Changed
+
+- **Gateway telemetry is off by default** (see Upgrading).
+- **The gateway name defaults to the release fullname**, and `driver.gatewayName`
+  defaults to it.
+- **Probe timings are upstream's**, including a startup probe with a 60 s window
+  (period 2 s, 30 failures). Liveness and readiness change too.
+- **`terminationGracePeriodSeconds` is always rendered** (default 30).
+- **The gateway ConfigMap's TOML is generated from a dict**, sorted and without
+  comments.
+- **`certificateDuration` must be at least twice `certificateRenewBefore`**, for
+  both certificate APIs; the render fails otherwise.
+
+### Upgrading
+
+- **Gateway telemetry is off by default.** Existing gateways sent anonymous
+  telemetry; they stop. `gateway.telemetryEnabled: true` restores it.
+- **mTLS-only installs require the client certificate.** An install with
+  `gateway.tls.clientCa.enabled` and no OIDC issuer now authenticates callers by
+  certificate; a caller without one is refused. Sandboxes hold a client
+  certificate too, so anyone who can read it inside a sandbox can act as a user
+  of such a gateway; use OIDC where that matters.
+- **The gateway name is now the release fullname** instead of `openshell`. It
+  appears only in observability (OCSF identity, traces); nothing persists it.
+  Set `gateway.name: openshell` to keep the old value.
+- **Probe timings are upstream's.** The gateway container gets a startup probe
+  (60 s window) and new liveness and readiness timings; set `gateway.probes.*` to
+  restore the old ones. The pod's `terminationGracePeriodSeconds` is now always
+  rendered (30). The gateway ConfigMap's TOML is regenerated sorted and without
+  comments, so the pod rolls once on upgrade.
+- **`gateway.extraArgs` flags that values now own fail the render.** The message
+  names the value to use instead.
+- **`certificateDuration` must be at least twice `certificateRenewBefore`** if you
+  use `gateway.certManager`.
+
 ## [0.10.4] — 2026-10-21
 
 Keeps stored provider credentials readable across gateway restarts.
