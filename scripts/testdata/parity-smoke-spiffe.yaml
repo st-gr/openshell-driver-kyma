@@ -1,0 +1,7 @@
+# scripts/parity-smoke.sh spiffe: the SPIFFE Workload API for provider token
+# grants, from the SPIRE agent and SPIFFE CSI driver the script installs. The
+# chart's default socket path matches the CSI driver's spire-agent.sock.
+gateway:
+  providerTokenGrants:
+    spiffe:
+      enabled: true

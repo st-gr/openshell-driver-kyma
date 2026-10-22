@@ -115,7 +115,15 @@ log "installing the chart with its pinned upstream ${UPSTREAM_VERSION} images"
 # Install the REAL chart rather than hand-assembling gateway args: no second
 # copy of the configuration to drift from deployment.yaml, and it is the path
 # a third party would actually take — which is what we are safeguarding.
+# HELM_EXTRA_VALUES (optional) names a values file added to the install;
+# scripts/parity-smoke.sh uses it to switch on one chart option per run.
+extra_values=()
+if [[ -n ${HELM_EXTRA_VALUES:-} ]]; then
+	[[ -f $HELM_EXTRA_VALUES ]] || fail "HELM_EXTRA_VALUES names no file: ${HELM_EXTRA_VALUES}"
+	extra_values=(-f "$HELM_EXTRA_VALUES")
+fi
 helm install "$RELEASE" deploy/helm/openshell-driver-kyma \
+	"${extra_values[@]}" \
 	--namespace "$NS" \
 	--set image.repository="${DRIVER_IMAGE%%:*}" \
 	--set image.tag="${DRIVER_IMAGE##*:}" \
@@ -168,8 +176,11 @@ PF_PID=$!
 trap 'kill "$PF_PID" 2>/dev/null || true' EXIT
 # Poll for the forwarded port instead of a fixed sleep: a fixed sleep is
 # exactly the kind of flake-prone guess that made ASSERT 1 unreliable before.
+# Connect and close without sending a byte: a TLS gateway logs a stray byte as
+# an ERROR ("TLS handshake failed"), which ASSERT 4 would catch, while it
+# takes a close before the handshake as benign.
 for i in $(seq 1 20); do
-	if (echo > /dev/tcp/127.0.0.1/8080) >/dev/null 2>&1; then
+	if (: <>/dev/tcp/127.0.0.1/8080) >/dev/null 2>&1; then
 		log "port-forward is up"
 		break
 	fi
@@ -183,9 +194,38 @@ done
 # --gateway-endpoint explicitly on every call instead of relying on env: it
 # also keeps the test stateless (no $HOME/.config/openshell registration to
 # leak between CI runs).
-osh() { openshell --gateway-endpoint "http://127.0.0.1:8080" "$@"; }
+#
+# A values file (HELM_EXTRA_VALUES) may switch on gateway.tls. Read what the
+# chart rendered rather than the values: with --tls-cert the gateway serves
+# HTTPS, and the CLI then needs the chart CA and a client certificate. With
+# --gateway-endpoint and a gateway name (OPENSHELL_GATEWAY, no registration
+# needed) it reads them from
+# $XDG_CONFIG_HOME/openshell/gateways/<name>/mtls/{ca.crt,tls.crt,tls.key}
+# (openshell-cli main.rs resolve_gateway, tls.rs tls_dir_for_gateway), the keys
+# of the chart's client-tls Secret. A throwaway XDG_CONFIG_HOME keeps the run
+# stateless.
+GATEWAY_URL="http://127.0.0.1:8080"
+gw_args=$(kubectl -n "$NS" get "deploy/${RELEASE}-openshell-driver-kyma" \
+	-o jsonpath='{.spec.template.spec.containers[?(@.name=="gateway")].args}') \
+	|| fail "could not read the gateway's args"
+if grep -qF -- '--tls-cert' <<<"$gw_args"; then
+	GATEWAY_URL="https://127.0.0.1:8080"
+	XDG_CONFIG_HOME="$(mktemp -d)"
+	OPENSHELL_GATEWAY=interop-smoke
+	export XDG_CONFIG_HOME OPENSHELL_GATEWAY
+	mtls_dir="${XDG_CONFIG_HOME}/openshell/gateways/${OPENSHELL_GATEWAY}/mtls"
+	mkdir -p "$mtls_dir"
+	for key in ca.crt tls.crt tls.key; do
+		kubectl -n "$NS" get secret "${RELEASE}-openshell-driver-kyma-client-tls" \
+			-o jsonpath="{.data.${key//./\\.}}" | base64 -d >"${mtls_dir}/${key}" \
+			|| fail "could not read ${key} from the client-tls Secret"
+		[[ -s ${mtls_dir}/${key} ]] || fail "the client-tls Secret has no ${key}"
+	done
+	log "the gateway serves TLS: the CLI uses ${GATEWAY_URL} with the chart's client certificate"
+fi
+osh() { openshell --gateway-endpoint "$GATEWAY_URL" "$@"; }
 # The same, bounded: `timeout` cannot run a shell function.
-osh_within() { local secs=$1; shift; timeout "$secs" openshell --gateway-endpoint "http://127.0.0.1:8080" "$@"; }
+osh_within() { local secs=$1; shift; timeout "$secs" openshell --gateway-endpoint "$GATEWAY_URL" "$@"; }
 
 # --- Assertion 1: the gateway is up and serving --------------------------
 #

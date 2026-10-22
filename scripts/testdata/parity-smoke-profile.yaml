@@ -1,0 +1,16 @@
+# Provider profile for scripts/parity-smoke.sh vault, modelled on the chart's
+# templates/inference-provider-profile.yaml: one required credential and
+# nothing else. No endpoints and no binaries, so it grants no egress; the
+# smoke only needs the gateway to store the credential (in Vault) and hand it
+# to a sandbox.
+id: smoke-generic
+display_name: Smoke generic
+description: Generic credential for the parity smoke
+category: other
+credentials:
+  - name: token
+    description: Dummy token
+    env_vars: [SMOKE_TOKEN]
+    required: true
+discovery:
+  credentials: [token]
