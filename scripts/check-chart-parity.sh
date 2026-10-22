@@ -92,6 +92,25 @@ try bad-p7-mode-zero "$MODE_ERR" t --set gateway.sandboxJwt.secretDefaultMode=0
 try bad-p7-mode-too-big "$MODE_ERR" t --set gateway.sandboxJwt.secretDefaultMode=512
 try bad-p7-mode-float "$MODE_ERR" t --set gateway.sandboxJwt.secretDefaultMode=1.5
 try bad-p7-mode-float-string "$MODE_ERR" t --set-string gateway.sandboxJwt.secretDefaultMode=1.5
+
+# 8. Gateway Service type. A LoadBalancer or NodePort Service carries only the gateway's
+# own ports; the driver health port and http-services move to <fullname>-internal.
+ING8=(--set gatewayIngress.enabled=true --set gatewayIngress.domain=example.org
+	--set gateway.oidc.issuer=https://issuer.example --set gateway.oidc.audience=osh-client
+	--set gateway.oidc.clientId=osh-client --set gateway.oidc.authOnly=true --set gateway.tls.enabled=true
+	--set gatewayIngress.serviceHosts.enabled=true --set-json 'gatewayIngress.allowedCidrs=["203.0.113.0/24"]')
+try good-p8-default '' t
+try good-p8-lb '' t --set gatewayService.type=LoadBalancer
+try good-p8-lb-ingress '' t --set gatewayService.type=LoadBalancer "${ING8[@]}"
+try good-p8-nodeport '' t --set gatewayService.type=NodePort --set gatewayService.nodePort=30443
+try bad-p8-nodeport-clusterip 'gatewayService.nodePort requires gatewayService.type=NodePort' t \
+	--set gatewayService.nodePort=30443
+try bad-p8-nodeport-lb 'gatewayService.nodePort requires gatewayService.type=NodePort' t \
+	--set gatewayService.type=LoadBalancer --set gatewayService.nodePort=30443
+try bad-p8-type 'gatewayService.type must be ClusterIP, NodePort or LoadBalancer' t --set gatewayService.type=ExternalName
+try bad-p8-lb-no-service 'gatewayService.type=LoadBalancer requires gatewayService.enabled' t \
+	--set gatewayService.enabled=false --set driver.gatewayEndpoint=http://gateway.example:8080 \
+	--set gatewayService.type=LoadBalancer
 try bad-p5-ttl 'gateway.oidc.jwksTtl must be greater than zero' t "${OIDC5[@]}" --set gateway.oidc.jwksTtl=0
 try bad-p5-origin-path 'gateway.oidc.jwksAllowedOrigins entries must not include a path or query' t "${OIDC5[@]}" \
 	--set 'gateway.oidc.jwksAllowedOrigins={https://k.example.org/path}'
@@ -472,6 +491,60 @@ for case, want in (("good-p7", ({"a": "b"}, {"c": "d"})), ("good-p7-tls", (None,
     got = (sas.get("openshell-driver"), sas.get("openshell-sandbox"))
     if got != want:
         failures.append(f"{case}: driver and sandbox service account annotations are {got}, want {want}")
+
+def services(case):
+    return {d["metadata"]["name"]: d for d in docs(case) if d.get("kind") == "Service"}
+
+def port_names(svc):
+    return [p["name"] for p in svc["spec"]["ports"]]
+
+DEFAULT_PORTS = ["health", "grpc", "gw-health", "gw-metrics"]
+svcs = services("good-p8-default")
+if list(svcs) != ["t-openshell-driver-kyma"]:
+    failures.append(f"good-p8-default: Services are {list(svcs)}, want one")
+else:
+    svc = svcs["t-openshell-driver-kyma"]
+    if svc["spec"]["type"] != "ClusterIP" or port_names(svc) != DEFAULT_PORTS:
+        failures.append(f"good-p8-default: Service is {svc['spec']['type']} {port_names(svc)}")
+
+for case in ("good-p8-lb", "good-p8-lb-ingress"):
+    svcs = services(case)
+    typed, internal = svcs.get("t-openshell-driver-kyma"), svcs.get("t-openshell-driver-kyma-internal")
+    if typed is None or internal is None:
+        failures.append(f"{case}: Services are {list(svcs)}, want the typed one and -internal")
+        continue
+    if typed["spec"]["type"] != "LoadBalancer":
+        failures.append(f"{case}: typed Service is {typed['spec']['type']}")
+    if port_names(typed) != ["grpc", "gw-health", "gw-metrics"]:
+        failures.append(f"{case}: typed Service ports are {port_names(typed)}")
+    if internal["spec"]["type"] != "ClusterIP":
+        failures.append(f"{case}: -internal Service is {internal['spec']['type']}")
+    want_internal = ["health"] + (["http-services"] if case == "good-p8-lb-ingress" else [])
+    if port_names(internal) != want_internal:
+        failures.append(f"{case}: -internal ports are {port_names(internal)}, want {want_internal}")
+    if internal["spec"]["selector"] != typed["spec"]["selector"]:
+        failures.append(f"{case}: -internal selector differs from the typed Service")
+
+def route_hosts(case, kind, name_suffix):
+    return [r["destination"]["host"] for d in docs(case) if d.get("kind") == kind
+            and d["metadata"]["name"].endswith(name_suffix)
+            for h in d["spec"]["http"] for r in h["route"]]
+
+got = route_hosts("good-p8-lb-ingress", "VirtualService", "-sandbox-services")
+if got != ["t-openshell-driver-kyma-internal.default.svc.cluster.local"]:
+    failures.append(f"good-p8-lb-ingress: services VirtualService routes to {got}, want the -internal Service")
+got = route_hosts("good-p8-lb-ingress", "VirtualService", "-kyma") + route_hosts("good-p8-lb-ingress", "VirtualService", "-gateway")
+if any("-internal" in h for h in got):
+    failures.append(f"good-p8-lb-ingress: the gRPC VirtualService routes to {got}")
+hosts = sorted(d["spec"]["host"] for d in docs("good-p8-lb-ingress") if d.get("kind") == "DestinationRule")
+if hosts != ["t-openshell-driver-kyma-internal.default.svc.cluster.local",
+             "t-openshell-driver-kyma.default.svc.cluster.local"]:
+    failures.append(f"good-p8-lb-ingress: DestinationRule hosts are {hosts}")
+
+grpc = next((p for p in services("good-p8-nodeport").get("t-openshell-driver-kyma", {"spec": {"ports": []}})["spec"]["ports"]
+             if p["name"] == "grpc"), {})
+if grpc.get("nodePort") != 30443:
+    failures.append(f"good-p8-nodeport: grpc port is {grpc}, want nodePort 30443")
 
 if failures:
     print("CHART_PARITY_FAIL:")

@@ -637,8 +637,18 @@ gatewayConfig: {}
 # unless driver.gatewayEndpoint names another address sandboxes reach the
 # gateway at: by default they dial this Service. inferenceProvider.enabled
 # requires it too: the provider hook reaches the gateway through it.
+#
+# type: ClusterIP (default), NodePort or LoadBalancer. A LoadBalancer or NodePort
+# Service bypasses gatewayIngress and its allowedCidrs fence: anyone who can reach
+# the address reaches the gateway, which then relies on its own TLS and OIDC alone.
+# With either, this Service carries only the gRPC, gw-health and gw-metrics ports;
+# the driver's health port and http-services move to a second, ClusterIP Service,
+# <fullname>-internal, so they are never public. Requires enabled: true.
+# nodePort pins the gRPC port's node port (type NodePort only); null lets Kubernetes pick.
 gatewayService:
   enabled: false
+  type: ClusterIP
+  nodePort: null
 
 # Remote access: publish the gateway through the cluster's Istio ingress gateway
 # (the Kyma gateway), so the openshell CLI and sandbox service URLs work without a

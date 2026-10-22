@@ -351,3 +351,16 @@ from 1 to 511 (288); empty = 0400. Anything else is refused.
 {{- fail (printf "%s, got the %s %v." $msg (kindOf $m) $m) -}}
 {{- end -}}
 {{- end }}
+
+{{/*
+The Service that carries the driver health port and http-services. It is the
+release's Service itself while gatewayService.type is ClusterIP; for a LoadBalancer
+or NodePort those ports move to <fullname>-internal, which stays ClusterIP.
+*/}}
+{{- define "openshell-driver-kyma.internalServiceName" -}}
+{{- if eq (default "ClusterIP" .Values.gatewayService.type) "ClusterIP" -}}
+{{- include "openshell-driver-kyma.fullname" . -}}
+{{- else -}}
+{{- printf "%s-internal" (include "openshell-driver-kyma.fullname" .) -}}
+{{- end -}}
+{{- end -}}
