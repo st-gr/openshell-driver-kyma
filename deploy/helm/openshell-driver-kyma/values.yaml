@@ -530,6 +530,21 @@ gateway:
     gatewayId: ""               # default: <fullname>
     ttlSecs: 3600               # gateway-minted sandbox JWT lifetime
 
+# Non-secret gateway settings as TOML, upstream's gatewayConfig: top-level keys
+# name TOML tables (dotted, such as "openshell.gateway"; a nested map is the same
+# table), and a list renders an array of tables. Reaches the settings that have no
+# flag or chart value, for example:
+#   gatewayConfig:
+#     openshell.gateway:
+#       policy_validation_failure_mode: retain_last_valid
+# Merged with the chart's own tables: a chart value fills only the keys left out
+# here. Refused with a message naming the value to use instead: the
+# openshell.drivers.kyma and openshell.gateway.tls tables, openshell.drivers.kubernetes
+# (this chart's driver reads its environment), and the keys the gateway takes as
+# flags (bind addresses, compute_driver, server_sans, the OIDC settings). Secrets
+# never go here: inline private keys, URL credentials and database_url are refused.
+gatewayConfig: {}
+
 # ClusterIP Service exposing the gateway's gRPC + metrics ports.
 # Requires .Values.gateway.enabled. When false, only the driver's
 # health port is exposed (existing behavior). gateway.enabled requires it,

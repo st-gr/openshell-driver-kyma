@@ -213,4 +213,15 @@ PY
     || { echo "ERROR: the OCSF render has no [openshell.gateway.ocsf_log] table; nothing to test" >&2; exit 1; }
   check_config "ocsf-$variant" "$WORK/gateway-ocsf-$variant.toml"
 done
+# gatewayConfig, upstream's TOML passthrough, merged into the chart's tables.
+render templates/gateway-config.yaml -f scripts/testdata/parity-gateway-config.yaml \
+  > "$WORK/rendered-gateway-config.yaml"
+python3 - "$WORK/rendered-gateway-config.yaml" "$WORK/gateway-passthrough.toml" <<'PY'
+import sys, yaml
+doc = yaml.safe_load(open(sys.argv[1]))
+open(sys.argv[2], "w").write(doc["data"]["gateway.toml"])
+PY
+grep -q '^ *image_preparation_timeout_seconds = 300$' "$WORK/gateway-passthrough.toml" \
+  || { echo "ERROR: the gatewayConfig render has no image_preparation_timeout_seconds; nothing to test" >&2; exit 1; }
+check_config gateway-config-passthrough "$WORK/gateway-passthrough.toml"
 echo "GATEWAY_CONFIG_ACCEPTED"

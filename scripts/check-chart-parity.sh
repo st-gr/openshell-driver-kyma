@@ -5,6 +5,9 @@
 #      upstream's _toml.tpl, parses with tomllib to exactly the tables and keys the
 #      hand-written template rendered before it (golden: defaults, and every
 #      setting that adds or changes a table).
+#   2. gatewayConfig, upstream's TOML passthrough: merged with the chart's tables
+#      (chart values fill only absent keys), with upstream's secret-boundary guards
+#      and the chart-owned tables and keys refused.
 # Every render goes through `try`: a case whose EXPECT is empty must render, any
 # other must fail the render with EXPECT in its error text.
 # check-chart-render.sh keeps the driver's configuration surface; new chart
@@ -43,6 +46,31 @@ try good-p1-full '' t --set gateway.oidc.issuer=https://issuer.example --set gat
 	--set gateway.ocsfLog.enabled=true --set gateway.grpcRateLimit.requests=120 \
 	--set gateway.grpcRateLimit.windowSeconds=60 \
 	--set-json 'driver.resourceAdmission.requiredLabels={"example.com/team":"a"}'
+
+# 2. gatewayConfig: merged, nested, arrays of tables; then each refusal.
+try good-p2-merge '' t --set-json 'gatewayConfig={"openshell.gateway":{"policy_validation_failure_mode":"retain_last_valid"},"openshell.gateway.auth":{"allow_unauthenticated_users":false}}'
+try good-p2-nested '' t --set-json 'gatewayConfig={"openshell":{"gateway":{"ssh_session_ttl_secs":600}}}'
+try good-p2-array-tables '' t --set-json 'gatewayConfig={"openshell.supervisor.middleware":[{"name":"m1","url":"http://m1.example.org"}]}'
+# Header split so secret scanners don't flag the fixture; it holds no key material.
+pem_header='-----BEGIN '"PRIVATE KEY-----"
+try bad-p2-private-key 'gatewayConfig must not contain an inline private key' t \
+	--set-json "gatewayConfig={\"openshell.gateway\":{\"x\":\"${pem_header}\"}}"
+try bad-p2-url-credentials 'gatewayConfig must not contain inline URL credentials' t \
+	--set-json 'gatewayConfig={"openshell.gateway":{"x":"http://u:p@h"}}'
+try bad-p2-database-url 'gatewayConfig must not contain database_url' t \
+	--set-json 'gatewayConfig={"openshell.gateway":{"database_url":"sqlite:///x.db"}}'
+try bad-p2-nested-and-dotted 'both as a nested map and a dotted top-level table' t \
+	--set-json 'gatewayConfig={"openshell":{"gateway":{"a":1}},"openshell.gateway":{"b":2}}'
+try bad-p2-kyma 'gatewayConfig must not set openshell.drivers.kyma' t \
+	--set-json 'gatewayConfig={"openshell.drivers.kyma":{"socket_path":"/x"}}'
+try bad-p2-kubernetes "gatewayConfig must not set openshell.drivers.kubernetes; this chart's driver is configured by environment (driver.* values)" t \
+	--set-json 'gatewayConfig={"openshell.drivers.kubernetes":{"namespace":"x"}}'
+try bad-p2-tls 'gatewayConfig must not set openshell.gateway.tls' t \
+	--set-json 'gatewayConfig={"openshell.gateway.tls":{"cert_path":"/x"}}'
+try bad-p2-bind-address 'gatewayConfig must not set openshell.gateway.bind_address' t \
+	--set-json 'gatewayConfig={"openshell.gateway":{"bind_address":"0.0.0.0"}}'
+try bad-p2-server-sans 'gatewayConfig must not set openshell.gateway.server_sans; it is chart-owned (use gateway.sandboxJwt.serverDnsNames instead)' t \
+	--set-json 'gatewayConfig={"openshell.gateway":{"server_sans":["a"]}}'
 
 uv run --quiet --no-project --python 3.12 --with pyyaml==6.0.2 python - "$WORK" "$CHART" <<'PY'
 import pathlib, sys, tomllib
@@ -160,6 +188,40 @@ for name, want in (("good-p1-defaults", GOLDEN_DEFAULT), ("good-p1-full", GOLDEN
     got = flatten(gateway_toml(name))
     if got != want:
         failures.append(f"{name}: the gateway TOML differs from the golden: {diff(got, want)}")
+
+# 2. gatewayConfig merged into the chart's tables, each table rendered once.
+def gateway_toml_text(name):
+    cm = next((d for d in docs(name) if d.get("kind") == "ConfigMap"
+               and d["metadata"]["name"].endswith("-gateway-config")), None)
+    return cm["data"]["gateway.toml"] if cm else ""
+
+merged = gateway_toml("good-p2-merge")
+gw = merged.get("openshell", {}).get("gateway", {})
+if gw.get("policy_validation_failure_mode") != "retain_last_valid":
+    failures.append("good-p2-merge: openshell.gateway.policy_validation_failure_mode is "
+                    f"{gw.get('policy_validation_failure_mode')!r}, want 'retain_last_valid'")
+if gw.get("log_level") != "info":
+    failures.append(f"good-p2-merge: the chart's log_level was lost from the merged table: {gw}")
+if gw.get("auth", {}).get("allow_unauthenticated_users") is not False:
+    failures.append("good-p2-merge: openshell.gateway.auth.allow_unauthenticated_users is "
+                    f"{gw.get('auth', {}).get('allow_unauthenticated_users')!r}, want False")
+text = gateway_toml_text("good-p2-merge")
+for header in ("[openshell.gateway]", "[openshell.gateway.auth]"):
+    count = sum(1 for line in text.splitlines() if line == header)
+    if count != 1:
+        failures.append(f"good-p2-merge: {header} appears {count} times, want 1")
+
+nested = gateway_toml("good-p2-nested")
+if nested.get("openshell", {}).get("gateway", {}).get("ssh_session_ttl_secs") != 600:
+    failures.append("good-p2-nested: openshell.gateway.ssh_session_ttl_secs is not 600: "
+                    f"{nested.get('openshell', {}).get('gateway')}")
+if nested.get("openshell", {}).get("version") != 2:
+    failures.append(f"good-p2-nested: openshell.version is not 2: {nested.get('openshell')}")
+
+arrays = gateway_toml("good-p2-array-tables")
+middleware = arrays.get("openshell", {}).get("supervisor", {}).get("middleware")
+if middleware != [{"name": "m1", "url": "http://m1.example.org"}]:
+    failures.append(f"good-p2-array-tables: openshell.supervisor.middleware is {middleware!r}")
 
 if failures:
     print("CHART_PARITY_FAIL:")

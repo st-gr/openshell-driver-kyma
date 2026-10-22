@@ -3,18 +3,126 @@ The gateway TOML as a dict, rendered by openshell-driver-kyma.gatewayToml
 (_toml.tpl), as upstream's chart renders its gatewayConfig. Keys are dotted TOML
 table names, values the tables' keys. Returns JSON; gateway-config.yaml checks the
 values first.
+
+The dict starts from gatewayConfig (upstream's passthrough), its nested maps
+normalised to dotted tables, so that a user table and the chart's table of the
+same name render once. Chart values then fill only the keys the user left out
+(tomlDefault), or set keys the chart owns (tomlOwned). The tables and keys the
+chart owns through flags or the driver's environment are refused outright: the
+gateway would silently override them, or the driver would never see them.
 */}}
+
+{{/* tomlDefault (dict "config" $c "table" "openshell.gateway" "key" "name" "value" $v):
+set table.key to value only when gatewayConfig left it out. */}}
+{{- define "openshell-driver-kyma.tomlDefault" -}}
+{{- $table := get .config .table | default dict -}}
+{{- if not (hasKey $table .key) -}}
+{{- $_ := set $table .key .value -}}
+{{- end -}}
+{{- $_ := set .config .table $table -}}
+{{- end -}}
+
+{{/* tomlOwned (dict "config" $c "table" "openshell.gateway" "key" "name" "value" $v
+"valuePath" "gateway.x"): set table.key to value; gatewayConfig may repeat the
+same value but not set another. valuePath names the chart value to use instead. */}}
+{{- define "openshell-driver-kyma.tomlOwned" -}}
+{{- $table := get .config .table | default dict -}}
+{{- if and (hasKey $table .key) (ne (toJson (get $table .key)) (toJson .value)) -}}
+{{- fail (printf "gatewayConfig must not set %s.%s; it is chart-owned (use %s instead)" .table .key .valuePath) -}}
+{{- end -}}
+{{- $_ := set $table .key .value -}}
+{{- $_ := set .config .table $table -}}
+{{- end -}}
+
+{{/* tomlFlatten (dict "out" $out "user" $gatewayConfig "name" $tableName "table" $map):
+write the table and every nested map in it to $out as dotted tables. A nested map
+whose dotted name gatewayConfig also defines fails with upstream's message (its
+_toml.tpl renders such a map inline, so it checks the same conflict before
+serializing). A key containing a dot stays an inline table: as a table name it
+would split into the wrong path. */}}
+{{- define "openshell-driver-kyma.tomlFlatten" -}}
+{{- $fields := dict -}}
+{{- $hasNested := false -}}
+{{- range $key, $value := .table -}}
+{{- if and (kindIs "map" $value) (not (contains "." $key)) -}}
+{{- $nested := printf "%s.%s" $.name $key -}}
+{{- if hasKey $.user $nested -}}
+{{- fail (printf "gatewayConfig defines %q both as a nested map and a dotted top-level table; use only the dotted top-level key" $nested) -}}
+{{- end -}}
+{{- $hasNested = true -}}
+{{- include "openshell-driver-kyma.tomlFlatten" (dict "out" $.out "user" $.user "name" $nested "table" $value) -}}
+{{- else -}}
+{{- $_ := set $fields $key $value -}}
+{{- end -}}
+{{- end -}}
+{{- if or $fields (not $hasNested) -}}
+{{- $_ := set .out .name $fields -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "openshell-driver-kyma.gatewayConfigDict" -}}
+{{- $user := .Values.gatewayConfig | default dict | deepCopy -}}
 {{- $config := dict -}}
-{{- $_ := set $config "openshell" (dict "version" 2) -}}
-{{- $gateway := dict "log_level" .Values.driver.logLevel -}}
+{{- range $name, $table := $user -}}
+{{- if kindIs "map" $table -}}
+{{- include "openshell-driver-kyma.tomlFlatten" (dict "out" $config "user" $user "name" $name "table" $table) -}}
+{{- else -}}
+{{- /* Arrays of tables, and anything else _toml.tpl refuses with its own message. */ -}}
+{{- $_ := set $config $name $table -}}
+{{- end -}}
+{{- end -}}
+{{- /* Chart-owned tables: the driver's socket and admission policy (the driver must
+acknowledge the same policy), upstream's own driver (this chart's driver reads its
+environment, so a table would do nothing), and the TLS paths the gateway takes as flags. */ -}}
+{{- $ownedTables := dict
+    "openshell.drivers.kyma" "it is chart-owned (use driver.socket, driver.allowDriverConfig and driver.resourceAdmission instead)"
+    "openshell.drivers.kubernetes" "this chart's driver is configured by environment (driver.* values)"
+    "openshell.gateway.tls" "it is chart-owned (use gateway.tls.* instead)" -}}
+{{- range $name := keys $config | sortAlpha -}}
+{{- range $owned := keys $ownedTables | sortAlpha -}}
+{{- if or (eq $name $owned) (hasPrefix (printf "%s." $owned) $name) -}}
+{{- fail (printf "gatewayConfig must not set %s; %s" $owned (get $ownedTables $owned)) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- /* Chart-owned keys the gateway takes as flags (a flag wins over the TOML, so the
+key would silently do nothing). database_url is refused by _toml.tpl in every table. */ -}}
+{{- $ownedKeys := dict
+    "openshell.gateway" (dict
+      "bind_address" "gateway.grpcPort"
+      "health_bind_address" "gateway.healthPort"
+      "metrics_bind_address" "gateway.metricsPort"
+      "compute_driver" "driver.* values"
+      "server_sans" "gateway.sandboxJwt.serverDnsNames")
+    "openshell.gateway.oidc" (dict
+      "issuer" "gateway.oidc.issuer"
+      "audience" "gateway.oidc.audience"
+      "roles_claim" "gateway.oidc.rolesClaim"
+      "admin_role" "gateway.oidc.adminRole"
+      "user_role" "gateway.oidc.userRole"
+      "jwks_ttl_secs" "gateway.oidc.jwksTtl"
+      "scopes_claim" "gateway.oidc.scopesClaim"
+      "jwks_allowed_origins" "gateway.oidc.jwksAllowedOrigins"
+      "dangerously_allow_insecure_http" "gateway.oidc.dangerouslyAllowInsecureHttp") -}}
+{{- range $tableName := keys $ownedKeys | sortAlpha -}}
+{{- $table := get $config $tableName -}}
+{{- if kindIs "map" $table -}}
+{{- $owned := get $ownedKeys $tableName -}}
+{{- range $key := keys $owned | sortAlpha -}}
+{{- if hasKey $table $key -}}
+{{- fail (printf "gatewayConfig must not set %s.%s; it is chart-owned (use %s instead)" $tableName $key (get $owned $key)) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- include "openshell-driver-kyma.tomlDefault" (dict "config" $config "table" "openshell" "key" "version" "value" 2) -}}
+{{- include "openshell-driver-kyma.tomlDefault" (dict "config" $config "table" "openshell.gateway" "key" "log_level" "value" .Values.driver.logLevel) -}}
 {{- $rateRequests := int (.Values.gateway.grpcRateLimit.requests | default 0) -}}
 {{- $rateWindow := int (.Values.gateway.grpcRateLimit.windowSeconds | default 0) -}}
 {{- if gt $rateRequests 0 -}}
-{{- $_ := set $gateway "grpc_rate_limit_requests" $rateRequests -}}
-{{- $_ := set $gateway "grpc_rate_limit_window_seconds" $rateWindow -}}
+{{- include "openshell-driver-kyma.tomlDefault" (dict "config" $config "table" "openshell.gateway" "key" "grpc_rate_limit_requests" "value" $rateRequests) -}}
+{{- include "openshell-driver-kyma.tomlDefault" (dict "config" $config "table" "openshell.gateway" "key" "grpc_rate_limit_window_seconds" "value" $rateWindow) -}}
 {{- end -}}
-{{- $_ := set $config "openshell.gateway" $gateway -}}
 {{- /* When OIDC is not configured, every gRPC request would otherwise be
 rejected with Unauthenticated/missing-authorization-header — including
 `openshell sandbox create` from the CLI. Allow unauthenticated user
@@ -22,32 +130,35 @@ calls in that case so the chart is usable in-cluster behind a port-
 forward or a Service-mesh-controlled APIRule. This setting covers user
 calls only; supervisor->gateway calls authenticate separately, via the
 driver's AuthenticateSandbox and (when enabled) the sandbox-JWT issuer. */ -}}
-{{- $_ := set $config "openshell.gateway.auth" (dict "allow_unauthenticated_users" (not .Values.gateway.oidc.issuer)) -}}
+{{- include "openshell-driver-kyma.tomlDefault" (dict "config" $config "table" "openshell.gateway.auth" "key" "allow_unauthenticated_users" "value" (not .Values.gateway.oidc.issuer)) -}}
 {{- /* The provider credentials' key-encryption key, from the Secret the gateway
 container takes this variable from (gateway.credentialStorage). */ -}}
-{{- $_ := set $config "openshell.gateway.credential_storage" (dict "key_encryption_key_env" "OPENSHELL_GATEWAY_CREDENTIAL_KEY_ENCRYPTION_KEY") -}}
+{{- include "openshell-driver-kyma.tomlDefault" (dict "config" $config "table" "openshell.gateway.credential_storage" "key" "key_encryption_key_env" "value" "OPENSHELL_GATEWAY_CREDENTIAL_KEY_ENCRYPTION_KEY") -}}
 {{- /* Only when sandboxJwt is enabled: paths to the signing material (mounted
 from the JWT Secret) so the gateway can mint per-sandbox JWTs in IssueSandboxToken. */ -}}
 {{- if .Values.gateway.sandboxJwt.enabled -}}
-{{- $_ := set $config "openshell.gateway.gateway_jwt" (dict
+{{- range $key, $value := dict
     "signing_key_path" "/etc/openshell-jwt/signing.pem"
     "public_key_path" "/etc/openshell-jwt/public.pem"
     "kid_path" "/etc/openshell-jwt/kid"
     "gateway_id" (include "openshell-driver-kyma.gatewayId" .)
-    "ttl_secs" .Values.gateway.sandboxJwt.ttlSecs) -}}
+    "ttl_secs" .Values.gateway.sandboxJwt.ttlSecs -}}
+{{- include "openshell-driver-kyma.tomlDefault" (dict "config" $config "table" "openshell.gateway.gateway_jwt" "key" $key "value" $value) -}}
+{{- end -}}
 {{- end -}}
 {{- /* gateway.ocsfLog: the gateway's OCSF audit events as JSONL. */ -}}
 {{- $ocsf := .Values.gateway.ocsfLog -}}
 {{- if $ocsf.enabled -}}
-{{- $ocsfLog := dict "path" $ocsf.path "rotation" $ocsf.rotation
+{{- range $key, $value := dict "path" $ocsf.path "rotation" $ocsf.rotation
     "queue_capacity" (int $ocsf.queueCapacity) "queue_max_bytes" (int $ocsf.queueMaxBytes) -}}
-{{- if eq $ocsf.rotation "daily" -}}
-{{- $_ := set $ocsfLog "max_files" (int $ocsf.maxFiles) -}}
+{{- include "openshell-driver-kyma.tomlDefault" (dict "config" $config "table" "openshell.gateway.ocsf_log" "key" $key "value" $value) -}}
+{{- end -}}
+{{- if eq (get (get $config "openshell.gateway.ocsf_log") "rotation") "daily" -}}
+{{- include "openshell-driver-kyma.tomlDefault" (dict "config" $config "table" "openshell.gateway.ocsf_log" "key" "max_files" "value" (int $ocsf.maxFiles)) -}}
 {{- end -}}
 {{- with toString $ocsf.schemaVersion -}}
-{{- $_ := set $ocsfLog "schema_version" . -}}
+{{- include "openshell-driver-kyma.tomlDefault" (dict "config" $config "table" "openshell.gateway.ocsf_log" "key" "schema_version" "value" .) -}}
 {{- end -}}
-{{- $_ := set $config "openshell.gateway.ocsf_log" $ocsfLog -}}
 {{- end -}}
 {{- /* Schema-v2 access path for an external compute driver reached over
 --compute-driver-socket. The gateway also derives its resource-admission
