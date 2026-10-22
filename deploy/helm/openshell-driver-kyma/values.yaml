@@ -23,9 +23,14 @@ image:
 # Role/RoleBinding (and the ClusterRole/Binding when sandboxJwt.enabled)
 # pointing at whatever SA name `serviceAccount.name` resolves to, so
 # the existing SA gets the same scoped permissions.
+#
+# `annotations` lands on that SA, for example a cloud workload-identity
+# annotation. There is one SA for the whole pod, so it applies to the driver
+# container as well as the gateway.
 serviceAccount:
   create: true
   name: openshell-driver
+  annotations: {}
 
 # Cluster-scoped RBAC of the driver (upstream's rbac.clusterScoped, since v0.1.3). Set
 # create=false for a namespace-admin install: a cluster admin then applies the
@@ -50,6 +55,7 @@ rbac:
 sandboxServiceAccount:
   create: true
   name: openshell-sandbox
+  annotations: {}
 
 # Driver configuration. The driver container takes no command-line arguments:
 # every key below renders as an environment variable in
@@ -212,6 +218,8 @@ driver:
   # it to the release namespace, where shared-mode sandboxes find it only if
   # `namespace` is the release namespace.
   clientTlsSecretName: ""
+  # IP the sandboxes reach the gateway host on. Also the pod's hostAliases entry
+  # for host.docker.internal and host.openshell.internal.
   hostGatewayIp: ""
   providerSpiffeWorkloadApiSocket: ""
   # Operator mode: select namespaces by label, or by a file of names mounted
@@ -360,6 +368,26 @@ podLabels: {}
 # single source of truth.
 gateway:
   enabled: false
+  # Grace period of the whole pod (gateway and driver) on shutdown.
+  terminationGracePeriodSeconds: 30
+  # Gateway container probes (upstream's timings). Each map is merged over the
+  # defaults shown, so set only the keys you change. The driver container's
+  # probes are not configurable.
+  probes:
+    startup:
+      periodSeconds: 2
+      timeoutSeconds: 1
+      failureThreshold: 30
+    liveness:
+      initialDelaySeconds: 2
+      periodSeconds: 5
+      timeoutSeconds: 1
+      failureThreshold: 3
+    readiness:
+      initialDelaySeconds: 1
+      periodSeconds: 2
+      timeoutSeconds: 1
+      failureThreshold: 3
   image:
     # Pinned by digest to the gateway image upstream published for `v0.1.4`,
     # the same release as `upstream.version`, the Cargo.toml tag, the
@@ -584,6 +612,9 @@ gateway:
     # namespace name (openshell-<gatewayId>-<workspace>).
     gatewayId: ""               # default: <fullname>
     ttlSecs: 3600               # gateway-minted sandbox JWT lifetime
+    # File mode of the keys Secret mounted into the gateway pod: a string such
+    # as "0440" (read as octal) or an integer (288 is 0440). Empty = 0400.
+    secretDefaultMode: ""
 
 # Non-secret gateway settings as TOML, upstream's gatewayConfig: top-level keys
 # name TOML tables (dotted, such as "openshell.gateway"; a nested map is the same

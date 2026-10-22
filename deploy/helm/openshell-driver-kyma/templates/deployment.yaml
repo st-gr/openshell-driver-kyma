@@ -40,6 +40,14 @@ spec:
         {{- end }}
     spec:
       serviceAccountName: {{ include "openshell-driver-kyma.serviceAccountName" . }}
+      terminationGracePeriodSeconds: {{ .Values.gateway.terminationGracePeriodSeconds | int }}
+      {{- with .Values.driver.hostGatewayIp }}
+      hostAliases:
+        - ip: {{ . | quote }}
+          hostnames:
+            - host.docker.internal
+            - host.openshell.internal
+      {{- end }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -218,18 +226,21 @@ spec:
             - name: gw-metrics
               containerPort: {{ .Values.gateway.metricsPort }}
               protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: gw-health
+            {{- toYaml (merge (deepCopy ($.Values.gateway.probes.startup | default dict)) (dict "periodSeconds" 2 "timeoutSeconds" 1 "failureThreshold" 30)) | nindent 12 }}
           livenessProbe:
             httpGet:
               path: /healthz
               port: gw-health
-            initialDelaySeconds: 5
-            periodSeconds: 10
+            {{- toYaml (merge (deepCopy ($.Values.gateway.probes.liveness | default dict)) (dict "initialDelaySeconds" 2 "periodSeconds" 5 "timeoutSeconds" 1 "failureThreshold" 3)) | nindent 12 }}
           readinessProbe:
             httpGet:
               path: /readyz
               port: gw-health
-            initialDelaySeconds: 2
-            periodSeconds: 5
+            {{- toYaml (merge (deepCopy ($.Values.gateway.probes.readiness | default dict)) (dict "initialDelaySeconds" 1 "periodSeconds" 2 "timeoutSeconds" 1 "failureThreshold" 3)) | nindent 12 }}
           resources:
             {{- toYaml .Values.gateway.resources | nindent 12 }}
           securityContext:
@@ -325,13 +336,13 @@ spec:
         - name: sandbox-jwt
           secret:
             secretName: {{ include "openshell-driver-kyma.jwtSecretName" . }}
-            defaultMode: 0o400
+            defaultMode: {{ include "openshell-driver-kyma.secretDefaultMode" . }}
         {{- end }}
         {{- if .Values.gateway.tls.enabled }}
         - name: gateway-tls
           secret:
             secretName: {{ include "openshell-driver-kyma.serverTlsSecretName" . }}
-            defaultMode: 0o400
+            defaultMode: {{ include "openshell-driver-kyma.secretDefaultMode" . }}
         {{- end }}
         {{- if and .Values.gateway.oidc.issuer .Values.gateway.oidc.caConfigMapName }}
         - name: oidc-ca

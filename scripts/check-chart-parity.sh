@@ -76,6 +76,13 @@ try good-p5-oidc '' t "${OIDC5[@]}" --set gateway.oidc.jwksTtl=600 --set gateway
 	--set gateway.oidc.dangerouslyAllowInsecureHttp=true
 try good-p5-oidc-ca '' t "${OIDC5[@]}" --set gateway.oidc.caConfigMapName=issuer-ca
 try good-p5-ca-no-issuer '' t --set gateway.oidc.caConfigMapName=issuer-ca
+
+# 7. Pod plumbing: SA annotations, grace period, probe timings, host aliases, JWT Secret mode.
+try good-p7 '' t --set serviceAccount.annotations.a=b --set sandboxServiceAccount.annotations.c=d \
+	--set gateway.terminationGracePeriodSeconds=60 --set gateway.probes.liveness.periodSeconds=20 \
+	--set-string gateway.sandboxJwt.secretDefaultMode=0440 --set driver.hostGatewayIp=10.0.0.1
+try good-p7-tls '' t --set gateway.tls.enabled=true
+try good-p7-int-mode '' t --set gateway.sandboxJwt.secretDefaultMode=288
 try bad-p5-ttl 'gateway.oidc.jwksTtl must be greater than zero' t "${OIDC5[@]}" --set gateway.oidc.jwksTtl=0
 try bad-p5-origin-path 'gateway.oidc.jwksAllowedOrigins entries must not include a path or query' t "${OIDC5[@]}" \
 	--set 'gateway.oidc.jwksAllowedOrigins={https://k.example.org/path}'
@@ -395,6 +402,61 @@ if ca_state("good-p5-ca-no-issuer") != (None, [], []):
     failures.append(f"good-p5-ca-no-issuer: CA wiring rendered without an issuer: {ca_state('good-p5-ca-no-issuer')}")
 if ca_state("good-p5-default") != (None, [], []):
     failures.append("good-p5-default: CA wiring rendered without caConfigMapName")
+
+# 7. Pod plumbing.
+GW_PROBES = {
+    "startupProbe": {"httpGet": {"path": "/healthz", "port": "gw-health"},
+                     "periodSeconds": 2, "timeoutSeconds": 1, "failureThreshold": 30},
+    "livenessProbe": {"httpGet": {"path": "/healthz", "port": "gw-health"},
+                      "initialDelaySeconds": 2, "periodSeconds": 5, "timeoutSeconds": 1, "failureThreshold": 3},
+    "readinessProbe": {"httpGet": {"path": "/readyz", "port": "gw-health"},
+                       "initialDelaySeconds": 1, "periodSeconds": 2, "timeoutSeconds": 1, "failureThreshold": 3},
+}
+DRIVER_PROBES = {
+    "livenessProbe": {"httpGet": {"path": "/healthz", "port": "health"},
+                      "initialDelaySeconds": 5, "periodSeconds": 10, "timeoutSeconds": 3, "failureThreshold": 3},
+}
+
+def mode_of(case, volume):
+    return next((v["secret"].get("defaultMode") for v in pod_spec(case).get("volumes", [])
+                 if v["name"] == volume), "no such volume")
+
+def service_accounts(case):
+    return {d["metadata"]["name"]: d["metadata"].get("annotations")
+            for d in docs(case) if d.get("kind") == "ServiceAccount"}
+
+for case in ("good-p7", "good-p7-tls", "good-p7-int-mode"):
+    spec = pod_spec(case)
+    gw = gateway_container(case)
+    want = {k: dict(v) for k, v in GW_PROBES.items()}
+    if case == "good-p7":
+        want["livenessProbe"]["periodSeconds"] = 20
+    for key, probe in want.items():
+        if gw.get(key) != probe:
+            failures.append(f"{case}: gateway {key} is {gw.get(key)}, want {probe}")
+    drv = driver_container(case)
+    if drv.get("livenessProbe") != DRIVER_PROBES["livenessProbe"]:
+        failures.append(f"{case}: driver livenessProbe changed: {drv.get('livenessProbe')}")
+    if "startupProbe" in drv:
+        failures.append(f"{case}: driver gained a startupProbe")
+    grace = spec.get("terminationGracePeriodSeconds")
+    if grace != (60 if case == "good-p7" else 30):
+        failures.append(f"{case}: terminationGracePeriodSeconds is {grace}")
+    want_mode = 288 if case in ("good-p7", "good-p7-int-mode") else 256
+    if mode_of(case, "sandbox-jwt") != want_mode:
+        failures.append(f"{case}: sandbox-jwt defaultMode is {mode_of(case, 'sandbox-jwt')}, want {want_mode}")
+    if case == "good-p7-tls" and mode_of(case, "gateway-tls") != 256:
+        failures.append(f"{case}: gateway-tls defaultMode is {mode_of(case, 'gateway-tls')}, want 256")
+    aliases = spec.get("hostAliases")
+    want_aliases = ([{"ip": "10.0.0.1", "hostnames": ["host.docker.internal", "host.openshell.internal"]}]
+                    if case == "good-p7" else None)
+    if aliases != want_aliases:
+        failures.append(f"{case}: hostAliases is {aliases}, want {want_aliases}")
+for case, want in (("good-p7", ({"a": "b"}, {"c": "d"})), ("good-p7-tls", (None, None))):
+    sas = service_accounts(case)
+    got = (sas.get("openshell-driver"), sas.get("openshell-sandbox"))
+    if got != want:
+        failures.append(f"{case}: driver and sandbox service account annotations are {got}, want {want}")
 
 if failures:
     print("CHART_PARITY_FAIL:")

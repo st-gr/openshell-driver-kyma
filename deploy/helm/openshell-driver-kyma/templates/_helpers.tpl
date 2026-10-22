@@ -329,3 +329,12 @@ The driver's ClusterRole: rbac.clusterScoped.clusterRoleName, else
 {{- define "openshell-driver-kyma.clusterRoleName" -}}
 {{- default (printf "%s-driver-%s" (include "openshell-driver-kyma.fullname" .) .Release.Namespace) .Values.rbac.clusterScoped.clusterRoleName -}}
 {{- end -}}
+
+{{/*
+File mode of the gateway's mounted Secrets (sandbox JWT keys, server TLS), as a
+decimal integer. gateway.sandboxJwt.secretDefaultMode is a string such as "0440"
+(sprig's int reads the leading 0 as octal) or an integer (288); empty = 0400.
+*/}}
+{{- define "openshell-driver-kyma.secretDefaultMode" -}}
+{{- with .Values.gateway.sandboxJwt.secretDefaultMode }}{{ . | int }}{{ else }}256{{ end -}}
+{{- end }}
