@@ -480,10 +480,11 @@ gateway:
   #
   # When `tls.clientCa.enabled: true` (mTLS), the chart additionally
   # passes `--tls-client-ca /etc/openshell-tls/server/ca.crt` so the
-  # gateway requires + verifies a client cert signed by the same self-
-  # signed CA. Without an OIDC issuer the gateway then also authenticates
-  # users by that certificate, and the chart no longer sets
-  # allow_unauthenticated_users (gateway.auth.allowUnauthenticatedUsers). Use this when fronting the gateway with an mTLS-enforcing
+  # gateway verifies a client cert signed by the same self-signed CA.
+  # Without an OIDC issuer the gateway then also authenticates users by
+  # that certificate, and the chart no longer sets allow_unauthenticated_users
+  # (gateway.auth.allowUnauthenticatedUsers). Use this when fronting the
+  # gateway with an mTLS-enforcing
   # reverse proxy, OR when distributing the chart's client-tls Secret to
   # a small set of admins as a simple SPIFFE-ish auth model. Not with
   # gatewayIngress: the ingress gateway presents no client certificate.

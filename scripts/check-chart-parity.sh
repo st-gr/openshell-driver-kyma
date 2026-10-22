@@ -95,6 +95,18 @@ try bad-p6-ca-true 'gateway.auth.allowUnauthenticatedUsers=true would admit call
 try bad-p6-ca-config-true 'gatewayConfig openshell.gateway.auth.allow_unauthenticated_users=true would admit callers without a client certificate; remove it to require the certificate' t \
 	"${TLS6[@]}" --set-json 'gatewayConfig={"openshell.gateway.auth":{"allow_unauthenticated_users":true}}'
 
+try bad-p6-extra-ca 'gateway.extraArgs sets --tls-client-ca; use gateway.tls.clientCa instead' t \
+	--set gateway.tls.enabled=true --set-json 'gateway.extraArgs=["--tls-client-ca=/x"]'
+try bad-p6-extra-cert 'gateway.extraArgs sets --tls-cert; use gateway.tls.enabled instead' t \
+	--set-json 'gateway.extraArgs=["--tls-cert","/x"]'
+try bad-p6-extra-disable 'gateway.extraArgs sets --disable-tls; use gateway.tls.enabled instead' t \
+	--set-json 'gateway.extraArgs=["--disable-tls"]'
+try good-p6-ca-no-tls '' t --set gateway.tls.clientCa.enabled=true
+try good-p6-ca-no-tls-true '' t --set gateway.tls.clientCa.enabled=true --set gateway.auth.allowUnauthenticatedUsers=true
+try good-p6-oidc-mtls '' t "${TLS6[@]}" "${OIDC5[@]}"
+try bad-p6-ca-nested-true 'gatewayConfig openshell.gateway.auth.allow_unauthenticated_users=true would admit callers without a client certificate' t \
+	"${TLS6[@]}" --set-json 'gatewayConfig={"openshell":{"gateway":{"auth":{"allow_unauthenticated_users":true}}}}'
+
 # 2. gatewayConfig: merged, nested, arrays of tables; then each refusal.
 try good-p2-merge '' t --set-json 'gatewayConfig={"openshell.gateway":{"policy_validation_failure_mode":"retain_last_valid"},"openshell.gateway.auth":{"allow_unauthenticated_users":false}}'
 try good-p2-nested '' t --set-json 'gatewayConfig={"openshell":{"gateway":{"ssh_session_ttl_secs":600}}}'
@@ -305,6 +317,13 @@ if any(a.startswith("--enable-mtls-auth") for a in gateway_container("good-p6-mt
 p6 = gateway_toml("good-p6-explicit-false").get("openshell", {}).get("gateway", {}).get("auth")
 if p6 != {"allow_unauthenticated_users": False}:
     failures.append(f"good-p6-explicit-false: the auth table is {p6!r}, want allow_unauthenticated_users = False")
+
+def p6_allow(case):
+    return gateway_toml(case).get("openshell", {}).get("gateway", {}).get("auth", {}).get("allow_unauthenticated_users")
+
+for case, want in (("good-p6-ca-no-tls", True), ("good-p6-ca-no-tls-true", True), ("good-p6-oidc-mtls", False)):
+    if p6_allow(case) is not want:
+        failures.append(f"{case}: allow_unauthenticated_users is {p6_allow(case)!r}, want {want!r}")
 
 # 2. gatewayConfig merged into the chart's tables, each table rendered once.
 def gateway_toml_text(name):

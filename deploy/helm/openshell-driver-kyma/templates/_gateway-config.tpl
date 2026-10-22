@@ -129,7 +129,8 @@ key would silently do nothing). database_url is refused by _toml.tpl in every ta
 {{- end -}}
 {{- /* Who may call as a user. Computed (gateway.auth.allowUnauthenticatedUsers
 null): true only when nothing authenticates callers, that is with neither an OIDC
-issuer nor a client CA. Without it every gRPC request would be rejected with
+issuer nor an effective client CA (TLS on and gateway.tls.clientCa.enabled, which
+is when the chart passes --tls-client-ca). Without it every gRPC request would be rejected with
 Unauthenticated/missing-authorization-header, `openshell sandbox create` from the
 CLI included. With a client CA and no issuer the gateway enables mTLS user
 authentication itself (upstream v0.1.4), so false makes it require the certificate.
@@ -139,7 +140,7 @@ sandbox-JWT issuer. */ -}}
 {{- $fromConfig := hasKey (get $config "openshell.gateway.auth" | default dict) "allow_unauthenticated_users" -}}
 {{- $allowUnauth := .Values.gateway.auth.allowUnauthenticatedUsers -}}
 {{- if kindIs "invalid" $allowUnauth -}}
-{{- $allowUnauth = and (not .Values.gateway.oidc.issuer) (not .Values.gateway.tls.clientCa.enabled) -}}
+{{- $allowUnauth = and (not .Values.gateway.oidc.issuer) (not (and .Values.gateway.tls.enabled .Values.gateway.tls.clientCa.enabled)) -}}
 {{- else if not (kindIs "bool" $allowUnauth) -}}
 {{- fail (printf "gateway.auth.allowUnauthenticatedUsers must be a boolean (true or false) or null, got the %s %q." (kindOf $allowUnauth) (toString $allowUnauth)) -}}
 {{- end -}}

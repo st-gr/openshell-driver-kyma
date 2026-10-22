@@ -21,6 +21,10 @@ of openshell-driver-kyma.gatewayArgGuards.
 {{- define "openshell-driver-kyma.gatewayArgGuards" -}}
 {{- if .Values.gateway.enabled -}}
 {{- include "openshell-driver-kyma.extraArgsGuard" (dict "args" .Values.gateway.extraArgs "flags" (dict
+  "--tls-cert" "gateway.tls.enabled"
+  "--tls-key" "gateway.tls.enabled"
+  "--disable-tls" "gateway.tls.enabled"
+  "--tls-client-ca" "gateway.tls.clientCa"
   "--oidc-jwks-ttl" "gateway.oidc.jwksTtl"
   "--oidc-scopes-claim" "gateway.oidc.scopesClaim"
   "--oidc-jwks-allowed-origins" "gateway.oidc.jwksAllowedOrigins"
@@ -35,7 +39,7 @@ dict, gatewayConfig merged and the chart's value applied), `root`, and `fromConf
 (true when gatewayConfig set the key), which picks the subject of the message.
 */}}
 {{- define "openshell-driver-kyma.mtlsAuthGuard" -}}
-{{- if .root.Values.gateway.tls.clientCa.enabled -}}
+{{- if and .root.Values.gateway.tls.enabled .root.Values.gateway.tls.clientCa.enabled -}}
 {{- $auth := get .config "openshell.gateway.auth" | default dict -}}
 {{- if eq (toJson (get $auth "allow_unauthenticated_users")) "true" -}}
 {{- $subject := ternary "gatewayConfig openshell.gateway.auth.allow_unauthenticated_users=true" "gateway.auth.allowUnauthenticatedUsers=true" .fromConfig -}}
