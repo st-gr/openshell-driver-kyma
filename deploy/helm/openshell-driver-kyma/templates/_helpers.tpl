@@ -196,7 +196,11 @@ selected credential driver.
 {{- define "openshell-driver-kyma.vaultAddress" -}}
 {{- if eq (include "openshell-driver-kyma.credentialDriver" .) "vault" -}}
 {{- $config := include "openshell-driver-kyma.userGatewayTable" (list . "openshell.credential_drivers.vault") | fromJson -}}
-{{- get $config "address" | default .Values.gateway.credentialDrivers.vault.address -}}
+{{- $address := get $config "address" | default .Values.gateway.credentialDrivers.vault.address | toString | trim -}}
+{{- if regexMatch "\\s" $address -}}
+{{- fail (printf "the Vault credential driver address must not contain whitespace, got %q" $address) -}}
+{{- end -}}
+{{- $address -}}
 {{- end -}}
 {{- end }}
 

@@ -372,6 +372,16 @@ try good-q1-ns-default '' t --namespace osh-a
 try good-q1-ns-explicit '' t --namespace osh-a --set namespace=osh-sb
 try bad-q1-k8s-secrets-defaults 'gateway.credentialDrivers.kubernetesSecrets.namespace must not be the sandbox namespace "osh-a"' t \
 	--namespace osh-a --set gateway.credentialDrivers.kubernetesSecrets.enabled=true
+# Values of the wrong shape fail with a message naming them, not a template error.
+TABLE2='must be a table (a map of keys)'
+try bad-q2-config-scalar-table "gatewayConfig openshell.gateway.auth $TABLE2" t \
+	--set-json 'gatewayConfig={"openshell.gateway.auth":5}'
+try bad-q2-config-string-table "gatewayConfig openshell.gateway $TABLE2" t --set-json 'gatewayConfig={"openshell.gateway":"x"}'
+try bad-q2-config-nested-scalar "gatewayConfig openshell.gateway $TABLE2" t --set-json 'gatewayConfig={"openshell":{"gateway":5}}'
+try good-q2-auth-null '' t --set-json gateway.auth=null
+try bad-q2-auth-string 'gateway.auth must be a map' t --set-string gateway.auth=x
+try bad-q2-vault-space 'the Vault credential driver address must not contain whitespace' t \
+	--set gateway.credentialDrivers.vault.enabled=true --set-string 'gateway.credentialDrivers.vault.address=https://vault.example.org :8200'
 
 uv run --quiet --no-project --python 3.12 --with pyyaml==6.0.2 python - "$WORK" "$CHART" <<'PY'
 import pathlib, sys, tomllib
