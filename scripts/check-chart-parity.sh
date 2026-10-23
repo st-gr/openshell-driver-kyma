@@ -423,6 +423,10 @@ try good-q5-name-config '' t --set-json 'gatewayConfig={"openshell.gateway":{"na
 # Under gateway.certManager the --server-san refusal names certManager's own key.
 try bad-q7-extra-san-cm 'gateway.extraArgs sets --server-san; use gateway.certManager.serverDnsNames instead' t \
 	"${CM15[@]}" --set-json 'gateway.extraArgs=["--server-san=x.example.org"]'
+# The twice-renewBefore boundary on Gardener too; the driver's OTLP default with the gateway elsewhere.
+try good-q8-gardener-renew-half '' t "${GD16[@]}" --set gateway.certManager.certificateRenewBefore=4380h
+try bad-q8-gardener-renew-over "${RENEW16/5000h/4381h}" t "${GD16[@]}" --set gateway.certManager.certificateRenewBefore=4381h
+try good-q8-otlp-gateway-off '' t "${OFF4[@]}" --set gateway.otlp.endpoint=http://otel.example.org:4318
 
 uv run --quiet --no-project --python 3.12 --with pyyaml==6.0.2 python - "$WORK" "$CHART" <<'PY'
 import pathlib, sys, tomllib
@@ -1232,6 +1236,16 @@ for case in ("good-p1-defaults", "good-p15-cm-ingress", "good-p16-gardener-ingre
         annotations = d["metadata"].get("annotations") or {}
         if "helm.sh/hook" in annotations and "hook-succeeded" not in annotations.get("helm.sh/hook-delete-policy", ""):
             failures.append(f"{case}: hook {d['kind']} {d['metadata']['name']} is not deleted when its hook succeeds")
+
+# 19. With the gateway elsewhere the driver still exports to gateway.otlp.endpoint, and the pod may dial it.
+case = "good-q8-otlp-gateway-off"
+got = env_of(driver_container(case)).get("OPENSHELL_OTLP_ENDPOINT", {}).get("value")
+if got != "http://otel.example.org:4318":
+    failures.append(f"{case}: the driver's OPENSHELL_OTLP_ENDPOINT is {got!r}, want gateway.otlp.endpoint")
+if 4318 not in (pod_egress_ports(case) or []):
+    failures.append(f"{case}: the pod NetworkPolicy egress ports are {pod_egress_ports(case)!r}, want 4318 among them")
+if any(c["name"] == "gateway" for c in (pod_spec(case) or {}).get("containers", [])):
+    failures.append(f"{case}: a gateway container rendered with gateway.enabled=false")
 
 if failures:
     print("CHART_PARITY_FAIL:")
