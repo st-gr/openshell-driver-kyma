@@ -403,6 +403,10 @@ try bad-q3-creds-ns 'gateway.credentialDrivers.kubernetesSecrets.namespace must 
 	"${K8S12[@]}" --set namespace=osh-sandboxes --set gateway.credentialDrivers.kubernetesSecrets.namespace=Bad_NS
 try bad-q3-jwks-float 'gateway.oidc.jwksTtl must be a positive integer' t "${OIDC5[@]}" --set gateway.oidc.jwksTtl=1.5
 try bad-q3-jwks-string 'gateway.oidc.jwksTtl must be a positive integer' t "${OIDC5[@]}" --set-string gateway.oidc.jwksTtl=abc
+# With the gateway elsewhere (gateway.enabled=false), gateway.* settings neither fail nor steer the driver.
+OFF4=(--set gateway.enabled=false --set driver.gatewayEndpoint=http://gateway.example:8080)
+try good-q4-db-url-gateway-off '' t "${OFF4[@]}" --set gateway.dbPersistence.dbUrl=postgres://db.example:5432/osh
+try good-q4-spiffe-gateway-off '' t "${OFF4[@]}" --set gateway.providerTokenGrants.spiffe.enabled=true
 
 uv run --quiet --no-project --python 3.12 --with pyyaml==6.0.2 python - "$WORK" "$CHART" <<'PY'
 import pathlib, sys, tomllib
@@ -1184,6 +1188,13 @@ for case, want in (("good-q1-ns-default", "osh-a"), ("good-q1-ns-explicit", "osh
     env = env_of(driver_container(case)).get("OPENSHELL_SANDBOX_NAMESPACE", {}).get("value")
     if env != want:
         failures.append(f"{case}: the driver's OPENSHELL_SANDBOX_NAMESPACE is {env!r}, want {want!r}")
+
+# 19. The gateway's SPIFFE socket is no default for the driver when the gateway runs elsewhere.
+case = "good-q4-spiffe-gateway-off"
+if "OPENSHELL_PROVIDER_SPIFFE_WORKLOAD_API_SOCKET" in env_of(driver_container(case)):
+    failures.append(f"{case}: the driver got the gateway's SPIFFE socket although the gateway runs elsewhere")
+if any(v.get("name") == "spiffe-workload-api" for v in (pod_spec(case) or {}).get("volumes", [])):
+    failures.append(f"{case}: the pod mounts the SPIFFE Workload API although the gateway runs elsewhere")
 
 if failures:
     print("CHART_PARITY_FAIL:")

@@ -205,11 +205,11 @@ selected credential driver.
 {{- end }}
 
 {{/*
-The SPIFFE Workload API socket path of the gateway, when
-gateway.providerTokenGrants.spiffe is enabled; empty otherwise.
+The SPIFFE Workload API socket path of the in-pod gateway, when it runs
+(gateway.enabled) with gateway.providerTokenGrants.spiffe enabled; empty otherwise.
 */}}
 {{- define "openshell-driver-kyma.gatewaySpiffeSocket" -}}
-{{- if .Values.gateway.providerTokenGrants.spiffe.enabled -}}
+{{- if and .Values.gateway.enabled .Values.gateway.providerTokenGrants.spiffe.enabled -}}
 {{- .Values.gateway.providerTokenGrants.spiffe.workloadApiSocketPath -}}
 {{- end -}}
 {{- end }}
