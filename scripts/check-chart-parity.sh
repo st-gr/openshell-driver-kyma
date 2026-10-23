@@ -1222,6 +1222,14 @@ toml_name = gateway_toml(case).get("openshell", {}).get("gateway", {}).get("name
 if (got, toml_name) != ("from-config", "from-config"):
     failures.append(f"{case}: driver OPENSHELL_GATEWAY_NAME {got!r} and TOML name {toml_name!r}, want both 'from-config'")
 
+# 19. Hook objects (Jobs and their ServiceAccounts and RBAC) are deleted once their hook
+# succeeds: before-hook-creation alone leaves them behind after `helm uninstall`.
+for case in ("good-p1-defaults", "good-p15-cm-ingress", "good-p16-gardener-ingress"):
+    for d in docs(case):
+        annotations = d["metadata"].get("annotations") or {}
+        if "helm.sh/hook" in annotations and "hook-succeeded" not in annotations.get("helm.sh/hook-delete-policy", ""):
+            failures.append(f"{case}: hook {d['kind']} {d['metadata']['name']} is not deleted when its hook succeeds")
+
 if failures:
     print("CHART_PARITY_FAIL:")
     for f in failures:

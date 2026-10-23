@@ -16,7 +16,8 @@
 # Idempotency: certgen is hook-weight -20 with hook-delete-policy
 # before-hook-creation,hook-succeeded. On reinstall the prior Job is
 # deleted; if the JWT Secret already exists from a prior install, certgen
-# detects that (K8sAction::SkipExists) and does nothing.
+# detects that (K8sAction::SkipExists) and does nothing. Its ServiceAccount
+# and RBAC go with it once the hooks succeed, so `helm uninstall` leaves none.
 {{- /* With gateway.certManager.enabled, cert-manager (cert-manager-pki.yaml) owns the
   server and client Secrets: the hook runs `generate-certs --jwt-only` and creates
   only the JWT keys, and the ingress gateway's CA ConfigMap is written after install
@@ -33,7 +34,7 @@ metadata:
   annotations:
     helm.sh/hook: pre-install,pre-upgrade
     helm.sh/hook-weight: "-30"
-    helm.sh/hook-delete-policy: before-hook-creation
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -45,7 +46,7 @@ metadata:
   annotations:
     helm.sh/hook: pre-install,pre-upgrade
     helm.sh/hook-weight: "-30"
-    helm.sh/hook-delete-policy: before-hook-creation
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
 rules:
   - apiGroups: [""]
     resources: ["secrets"]
@@ -68,7 +69,7 @@ metadata:
   annotations:
     helm.sh/hook: pre-install,pre-upgrade
     helm.sh/hook-weight: "-30"
-    helm.sh/hook-delete-policy: before-hook-creation
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
