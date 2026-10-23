@@ -407,6 +407,19 @@ try bad-q3-jwks-string 'gateway.oidc.jwksTtl must be a positive integer' t "${OI
 OFF4=(--set gateway.enabled=false --set driver.gatewayEndpoint=http://gateway.example:8080)
 try good-q4-db-url-gateway-off '' t "${OFF4[@]}" --set gateway.dbPersistence.dbUrl=postgres://db.example:5432/osh
 try good-q4-spiffe-gateway-off '' t "${OFF4[@]}" --set gateway.providerTokenGrants.spiffe.enabled=true
+# Every flag the chart passes to the gateway is refused in extraArgs, naming its value.
+for pair in --config:gatewayConfig --bind-address:gateway.grpcPort --port:gateway.grpcPort \
+	--health-port:gateway.healthPort --metrics-port:gateway.metricsPort --compute-driver:driver.socket \
+	--compute-driver-socket:driver.socket --oidc-issuer:gateway.oidc.issuer --oidc-audience:gateway.oidc.audience \
+	--oidc-roles-claim:gateway.oidc.rolesClaim --oidc-admin-role:gateway.oidc.adminRole \
+	--oidc-user-role:gateway.oidc.userRole; do
+	flag=${pair%%:*}
+	try "bad-q5-extra${flag}" "gateway.extraArgs sets ${flag}; use ${pair#*:}" t \
+		--set-json "gateway.extraArgs=[\"${flag}=x\"]"
+done
+# An OTLP endpoint and a gateway name set through gatewayConfig reach the driver and the egress.
+try good-q5-otlp-config '' t --set-json 'gatewayConfig={"openshell.gateway.otlp":{"endpoint":"http://otel.example.org:4318"}}'
+try good-q5-name-config '' t --set-json 'gatewayConfig={"openshell.gateway":{"name":"from-config"}}'
 
 uv run --quiet --no-project --python 3.12 --with pyyaml==6.0.2 python - "$WORK" "$CHART" <<'PY'
 import pathlib, sys, tomllib
@@ -1195,6 +1208,19 @@ if "OPENSHELL_PROVIDER_SPIFFE_WORKLOAD_API_SOCKET" in env_of(driver_container(ca
     failures.append(f"{case}: the driver got the gateway's SPIFFE socket although the gateway runs elsewhere")
 if any(v.get("name") == "spiffe-workload-api" for v in (pod_spec(case) or {}).get("volumes", [])):
     failures.append(f"{case}: the pod mounts the SPIFFE Workload API although the gateway runs elsewhere")
+
+# 19. gatewayConfig's OTLP endpoint and gateway name: the driver and the egress follow them.
+case = "good-q5-otlp-config"
+got = env_of(driver_container(case)).get("OPENSHELL_OTLP_ENDPOINT", {}).get("value")
+if got != "http://otel.example.org:4318":
+    failures.append(f"{case}: the driver's OPENSHELL_OTLP_ENDPOINT is {got!r}, want the gatewayConfig endpoint")
+if 4318 not in (pod_egress_ports(case) or []):
+    failures.append(f"{case}: the pod NetworkPolicy egress ports are {pod_egress_ports(case)!r}, want 4318 among them")
+case = "good-q5-name-config"
+got = env_of(driver_container(case)).get("OPENSHELL_GATEWAY_NAME", {}).get("value")
+toml_name = gateway_toml(case).get("openshell", {}).get("gateway", {}).get("name")
+if (got, toml_name) != ("from-config", "from-config"):
+    failures.append(f"{case}: driver OPENSHELL_GATEWAY_NAME {got!r} and TOML name {toml_name!r}, want both 'from-config'")
 
 if failures:
     print("CHART_PARITY_FAIL:")

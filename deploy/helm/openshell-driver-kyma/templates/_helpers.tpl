@@ -304,7 +304,8 @@ so the variable is not passed.
 {{- end -}}
 
 {{/*
-The gateway's name: gateway.name, else the chart fullname. The gateway uses it
+The gateway's name: gatewayConfig's openshell.gateway name (the TOML renders the
+same), else gateway.name, else the chart fullname. The gateway uses it
 for its OCSF identity, its OTel resource and the in-process driver build context;
 the external driver only for its OTel resource, and nothing persists it, so the
 default can follow the fullname. driver.gatewayName defaults to it.
@@ -314,7 +315,8 @@ default can follow the fullname. driver.gatewayName defaults to it.
 {{- if and $name (not (trim (toString $name))) -}}
 {{- fail "gateway.name must not be empty; leave it unset for the chart fullname." -}}
 {{- end -}}
-{{- default (include "openshell-driver-kyma.fullname" .) $name -}}
+{{- $config := include "openshell-driver-kyma.userGatewayTable" (list . "openshell.gateway") | fromJson -}}
+{{- get $config "name" | default $name | default (include "openshell-driver-kyma.fullname" .) -}}
 {{- end -}}
 
 {{/*
@@ -370,9 +372,16 @@ scheme, so upstream exports nothing there and there is no port to open.
 {{- end -}}
 {{- end -}}
 
-{{/* The driver's OTLP endpoint: driver.otlpEndpoint, else gateway.otlp.endpoint. */}}
+{{/* The gateway's OTLP endpoint: gatewayConfig's openshell.gateway.otlp endpoint, else
+gateway.otlp.endpoint (the TOML renders the same). */}}
+{{- define "openshell-driver-kyma.gatewayOtlpEndpoint" -}}
+{{- $config := include "openshell-driver-kyma.userGatewayTable" (list . "openshell.gateway.otlp") | fromJson -}}
+{{- get $config "endpoint" | default .Values.gateway.otlp.endpoint -}}
+{{- end -}}
+
+{{/* The driver's OTLP endpoint: driver.otlpEndpoint, else the gateway's. */}}
 {{- define "openshell-driver-kyma.driverOtlpEndpoint" -}}
-{{- default .Values.gateway.otlp.endpoint .Values.driver.otlpEndpoint -}}
+{{- default (include "openshell-driver-kyma.gatewayOtlpEndpoint" .) .Values.driver.otlpEndpoint -}}
 {{- end -}}
 
 {{/*
@@ -384,7 +393,7 @@ Each OTLP endpoint's port comes from openshell-driver-kyma.otlpPort.
 {{- define "openshell-driver-kyma.egressPorts" -}}
 {{- $endpoints := list (include "openshell-driver-kyma.driverOtlpEndpoint" .) -}}
 {{- if .Values.gateway.enabled -}}
-{{- $endpoints = prepend $endpoints .Values.gateway.otlp.endpoint -}}
+{{- $endpoints = prepend $endpoints (include "openshell-driver-kyma.gatewayOtlpEndpoint" .) -}}
 {{- end -}}
 {{- $ports := list -}}
 {{- range $endpoints -}}

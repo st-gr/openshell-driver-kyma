@@ -21,6 +21,18 @@ of openshell-driver-kyma.gatewayArgGuards.
 {{- define "openshell-driver-kyma.gatewayArgGuards" -}}
 {{- if .Values.gateway.enabled -}}
 {{- include "openshell-driver-kyma.extraArgsGuard" (dict "args" .Values.gateway.extraArgs "flags" (dict
+  "--config" "gatewayConfig"
+  "--bind-address" "gateway.grpcPort (the chart binds all addresses)"
+  "--port" "gateway.grpcPort"
+  "--health-port" "gateway.healthPort"
+  "--metrics-port" "gateway.metricsPort"
+  "--compute-driver" "driver.socket (the chart runs the kyma driver)"
+  "--compute-driver-socket" "driver.socket"
+  "--oidc-issuer" "gateway.oidc.issuer"
+  "--oidc-audience" "gateway.oidc.audience"
+  "--oidc-roles-claim" "gateway.oidc.rolesClaim"
+  "--oidc-admin-role" "gateway.oidc.adminRole"
+  "--oidc-user-role" "gateway.oidc.userRole"
   "--db-url" "gateway.dbPersistence.enabled=true with dbUrl, or externalDbSecret"
   "--tls-cert" "gateway.tls.enabled"
   "--tls-key" "gateway.tls.enabled"
