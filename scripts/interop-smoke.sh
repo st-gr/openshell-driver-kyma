@@ -272,6 +272,7 @@ ${gw_logs_raw}"
 # BETWEEN the field name, the `=`, and the value — a literal
 # `advertised_driver=kyma` never matches. Strip them before asserting, which
 # also makes the failure output readable.
+# shellcheck disable=SC2001 # a repeated character class needs a regex, not ${var//}
 gw_logs=$(sed $'s/\033\\[[0-9;]*m//g' <<<"$gw_logs_raw")
 
 grep -q "Compute driver connected" <<<"$gw_logs" || fail "gateway never accepted the compute driver:

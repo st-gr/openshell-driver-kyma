@@ -10,7 +10,10 @@
 {{- include "openshell-driver-kyma.workspaceGuards" . -}}
 {{- include "openshell-driver-kyma.sandboxEnvGuards" . -}}
 {{- include "openshell-driver-kyma.driverValueGuards" . -}}
-{{- $dbMode := ternary (include "openshell-driver-kyma.gatewayDbMode" .) "" .Values.gateway.enabled -}}
+{{- $dbMode := "" -}}
+{{- if .Values.gateway.enabled -}}
+{{- $dbMode = include "openshell-driver-kyma.gatewayDbMode" . -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

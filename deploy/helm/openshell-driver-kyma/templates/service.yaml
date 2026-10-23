@@ -5,6 +5,10 @@
 {{- if and (not (kindIs "invalid" .Values.gatewayService.nodePort)) (ne $type "NodePort") -}}
 {{- fail "gatewayService.nodePort requires gatewayService.type=NodePort" -}}
 {{- end -}}
+{{- $nodePort := .Values.gatewayService.nodePort -}}
+{{- if and (not (kindIs "invalid" $nodePort)) (not (and (regexMatch "^[0-9]+$" (toString $nodePort)) (ge (int $nodePort) 30000) (le (int $nodePort) 32767))) -}}
+{{- fail (printf "gatewayService.nodePort must be an integer from 30000 to 32767 (Kubernetes' default NodePort range), got %q" (toString $nodePort)) -}}
+{{- end -}}
 {{- if and (ne $type "ClusterIP") (not .Values.gatewayService.enabled) -}}
 {{- fail (printf "gatewayService.type=%s requires gatewayService.enabled=true" $type) -}}
 {{- end -}}

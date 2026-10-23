@@ -22,6 +22,13 @@ Create a default fully qualified app name.
 {{- end }}
 
 {{/*
+The sandbox namespace: .Values.namespace, or the release namespace when it is empty.
+*/}}
+{{- define "openshell-driver-kyma.sandboxNamespace" -}}
+{{- default .Release.Namespace .Values.namespace -}}
+{{- end }}
+
+{{/*
 Common labels.
 */}}
 {{- define "openshell-driver-kyma.labels" -}}
@@ -189,16 +196,20 @@ selected credential driver.
 {{- define "openshell-driver-kyma.vaultAddress" -}}
 {{- if eq (include "openshell-driver-kyma.credentialDriver" .) "vault" -}}
 {{- $config := include "openshell-driver-kyma.userGatewayTable" (list . "openshell.credential_drivers.vault") | fromJson -}}
-{{- get $config "address" | default .Values.gateway.credentialDrivers.vault.address -}}
+{{- $address := get $config "address" | default .Values.gateway.credentialDrivers.vault.address | toString | trim -}}
+{{- if regexMatch "\\s" $address -}}
+{{- fail (printf "the Vault credential driver address must not contain whitespace, got %q" $address) -}}
+{{- end -}}
+{{- $address -}}
 {{- end -}}
 {{- end }}
 
 {{/*
-The SPIFFE Workload API socket path of the gateway, when
-gateway.providerTokenGrants.spiffe is enabled; empty otherwise.
+The SPIFFE Workload API socket path of the in-pod gateway, when it runs
+(gateway.enabled) with gateway.providerTokenGrants.spiffe enabled; empty otherwise.
 */}}
 {{- define "openshell-driver-kyma.gatewaySpiffeSocket" -}}
-{{- if .Values.gateway.providerTokenGrants.spiffe.enabled -}}
+{{- if and .Values.gateway.enabled .Values.gateway.providerTokenGrants.spiffe.enabled -}}
 {{- .Values.gateway.providerTokenGrants.spiffe.workloadApiSocketPath -}}
 {{- end -}}
 {{- end }}
@@ -293,7 +304,8 @@ so the variable is not passed.
 {{- end -}}
 
 {{/*
-The gateway's name: gateway.name, else the chart fullname. The gateway uses it
+The gateway's name: gatewayConfig's openshell.gateway name (the TOML renders the
+same), else gateway.name, else the chart fullname. The gateway uses it
 for its OCSF identity, its OTel resource and the in-process driver build context;
 the external driver only for its OTel resource, and nothing persists it, so the
 default can follow the fullname. driver.gatewayName defaults to it.
@@ -301,9 +313,10 @@ default can follow the fullname. driver.gatewayName defaults to it.
 {{- define "openshell-driver-kyma.gatewayName" -}}
 {{- $name := .Values.gateway.name -}}
 {{- if and $name (not (trim (toString $name))) -}}
-{{- fail "gateway.name must not be empty; leave it unset for the chart fullname." -}}
+{{- fail "gateway.name must not be blank; leave it empty or unset for the chart fullname." -}}
 {{- end -}}
-{{- default (include "openshell-driver-kyma.fullname" .) $name -}}
+{{- $config := include "openshell-driver-kyma.userGatewayTable" (list . "openshell.gateway") | fromJson -}}
+{{- get $config "name" | default $name | default (include "openshell-driver-kyma.fullname" .) -}}
 {{- end -}}
 
 {{/*
@@ -359,9 +372,16 @@ scheme, so upstream exports nothing there and there is no port to open.
 {{- end -}}
 {{- end -}}
 
-{{/* The driver's OTLP endpoint: driver.otlpEndpoint, else gateway.otlp.endpoint. */}}
+{{/* The gateway's OTLP endpoint: gatewayConfig's openshell.gateway.otlp endpoint, else
+gateway.otlp.endpoint (the TOML renders the same). */}}
+{{- define "openshell-driver-kyma.gatewayOtlpEndpoint" -}}
+{{- $config := include "openshell-driver-kyma.userGatewayTable" (list . "openshell.gateway.otlp") | fromJson -}}
+{{- get $config "endpoint" | default .Values.gateway.otlp.endpoint -}}
+{{- end -}}
+
+{{/* The driver's OTLP endpoint: driver.otlpEndpoint, else the gateway's. */}}
 {{- define "openshell-driver-kyma.driverOtlpEndpoint" -}}
-{{- default .Values.gateway.otlp.endpoint .Values.driver.otlpEndpoint -}}
+{{- default (include "openshell-driver-kyma.gatewayOtlpEndpoint" .) .Values.driver.otlpEndpoint -}}
 {{- end -}}
 
 {{/*
@@ -373,7 +393,7 @@ Each OTLP endpoint's port comes from openshell-driver-kyma.otlpPort.
 {{- define "openshell-driver-kyma.egressPorts" -}}
 {{- $endpoints := list (include "openshell-driver-kyma.driverOtlpEndpoint" .) -}}
 {{- if .Values.gateway.enabled -}}
-{{- $endpoints = prepend $endpoints .Values.gateway.otlp.endpoint -}}
+{{- $endpoints = prepend $endpoints (include "openshell-driver-kyma.gatewayOtlpEndpoint" .) -}}
 {{- end -}}
 {{- $ports := list -}}
 {{- range $endpoints -}}

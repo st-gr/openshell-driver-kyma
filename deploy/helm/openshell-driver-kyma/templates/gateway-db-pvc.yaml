@@ -3,7 +3,7 @@
 # /var/lib/openshell/openshell.db; without this PVC, every pod restart
 # wipes the provider/inference configs.
 #
-# Skipped when gateway.dbPersistence.dbUrl is set (external DB path —
+# Skipped with an external DB (gateway.dbPersistence.dbUrl or externalDbSecret:
 # Postgres or similar; the gateway pod doesn't write to local disk).
 apiVersion: v1
 kind: PersistentVolumeClaim

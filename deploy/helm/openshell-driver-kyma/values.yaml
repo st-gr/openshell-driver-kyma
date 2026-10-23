@@ -1,14 +1,15 @@
 # Default values for openshell-driver-kyma.
 # Override with `helm install ... -f my-values.yaml --set ...`.
 
-# Sandbox provisioning namespace. The driver creates Sandbox CRs here.
+# Sandbox provisioning namespace. The driver creates Sandbox CRs here; empty
+# means the release namespace. Set it explicitly to keep sandboxes elsewhere.
 # Cluster-admin should label this namespace
 # `pod-security.kubernetes.io/enforce: privileged`, the level the chart's CI
 # runs at. Upstream v0.1.4's sandbox pods request no privileges (non-root, all
 # capabilities dropped, RuntimeDefault seccomp), so a stricter level may admit
 # them, but only `privileged` is verified here. The provider hook runs as
 # root, which `restricted` refuses.
-namespace: openshell-system
+namespace: ""
 
 image:
   repository: ghcr.io/st-gr/openshell-driver-kyma
@@ -283,8 +284,9 @@ upstream:
 
 networkPolicy:
   # NetworkPolicies the chart renders:
-  #   - one for the driver+gateway pod (its egress: DNS, 443 and, with
-  #     driver.otlpEndpoint, the collector's port);
+  #   - one for the driver+gateway pod (its egress: DNS, 443 and the ports of
+  #     the OTLP collectors (driver.otlpEndpoint, gateway.otlp.endpoint) and of
+  #     the Vault credential driver);
   #   - in shared mode with gateway.enabled, `<fullname>-sandbox-ssh` in the
   #     sandbox namespace, which restricts SSH ingress (TCP 2222) on OpenShell
   #     sandbox pods to the driver+gateway pod. It mirrors upstream's chart of the
@@ -520,10 +522,10 @@ gateway:
   # gateway verifies a client cert signed by the same self-signed CA.
   # Without an OIDC issuer the gateway then also authenticates users by
   # that certificate, and the chart no longer sets allow_unauthenticated_users
-  # (gateway.auth.allowUnauthenticatedUsers). Use this when fronting the
-  # gateway with an mTLS-enforcing
-  # reverse proxy, OR when distributing the chart's client-tls Secret to
-  # a small set of admins as a simple SPIFFE-ish auth model. Not with
+  # (gateway.auth.allowUnauthenticatedUsers). Use this when distributing the
+  # chart's client-tls Secret to a small set of admins as a simple SPIFFE-ish
+  # auth model. A reverse proxy in front must itself present a client
+  # certificate signed by this CA, or the gateway refuses every call. Not with
   # gatewayIngress: the ingress gateway presents no client certificate.
   tls:
     enabled: false

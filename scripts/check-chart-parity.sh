@@ -57,7 +57,7 @@ try bad-p3-websocket-string 'gateway.enableWebsocketTunnel must be a boolean' t 
 	--set-string gateway.enableWebsocketTunnel=true
 try bad-p3-loopback-string 'gateway.enableLoopbackServiceHttp must be a boolean' t \
 	--set-string gateway.enableLoopbackServiceHttp=false
-try bad-p3-empty-name 'gateway.name must not be empty' t --set-string 'gateway.name= '
+try bad-p3-empty-name 'gateway.name must not be blank' t --set-string 'gateway.name= '
 
 # 4. Telemetry (off by default, gateway only) and the gateway's OTLP export.
 try good-p4-telemetry-on '' t --set gateway.telemetryEnabled=true
@@ -152,7 +152,7 @@ try bad-p9-long 'gateway.dbPersistence.externalDbSecret must be no more than 253
 try bad-p9-extra-db-url 'gateway.extraArgs sets --db-url; use gateway.dbPersistence.enabled=true with dbUrl, or externalDbSecret instead' t \
 	--set-json 'gateway.extraArgs=["--db-url=sqlite:x"]'
 
-try bad-p5-ttl 'gateway.oidc.jwksTtl must be greater than zero' t "${OIDC5[@]}" --set gateway.oidc.jwksTtl=0
+try bad-p5-ttl 'gateway.oidc.jwksTtl must be a positive integer' t "${OIDC5[@]}" --set gateway.oidc.jwksTtl=0
 try bad-p5-origin-path 'gateway.oidc.jwksAllowedOrigins entries must not include a path or query' t "${OIDC5[@]}" \
 	--set 'gateway.oidc.jwksAllowedOrigins={https://k.example.org/path}'
 try bad-p5-insecure-string 'gateway.oidc.dangerouslyAllowInsecureHttp must be a boolean' t "${OIDC5[@]}" \
@@ -231,25 +231,28 @@ try bad-p11-extra-san 'gateway.extraArgs sets --server-san; use gateway.sandboxJ
 # 12. The Kubernetes Secrets credential driver: provider credentials in Secrets, no KEK.
 K8S12=(--set gateway.credentialDrivers.kubernetesSecrets.enabled=true)
 try good-p12-k8s '' t "${K8S12[@]}" --set gateway.credentialDrivers.kubernetesSecrets.namespace=osh-creds
-try good-p12-k8s-default-ns '' t "${K8S12[@]}"
+# Credentials in the release namespace need sandboxes elsewhere (the sandbox namespace defaults to it).
+try good-p12-k8s-default-ns '' t "${K8S12[@]}" --set namespace=osh-sandboxes
 try good-p12-create-ns '' t "${K8S12[@]}" --set gateway.credentialDrivers.kubernetesSecrets.namespace=osh-creds \
 	--set gateway.credentialDrivers.kubernetesSecrets.createNamespace=true
 try good-p12-no-rbac '' t "${K8S12[@]}" --set gateway.credentialDrivers.kubernetesSecrets.namespace=osh-creds \
 	--set gateway.credentialDrivers.kubernetesSecrets.rbac.create=false
 try good-p12-no-rbac-global '' t "${K8S12[@]}" --set gateway.credentialDrivers.kubernetesSecrets.namespace=osh-creds \
 	--set rbac.create=false
-try good-p12-via-config '' t --set-json 'gatewayConfig={"openshell.gateway":{"credential_drivers":["kubernetes-secrets"]}}'
+try good-p12-via-config '' t --set namespace=osh-sandboxes --set-json 'gatewayConfig={"openshell.gateway":{"credential_drivers":["kubernetes-secrets"]}}'
 try good-p12-via-config-nested '' t \
 	--set-json 'gatewayConfig={"openshell":{"gateway":{"credential_drivers":["kubernetes-secrets"]},"credential_drivers":{"kubernetes-secrets":{"namespace":"osh-creds"}}}}'
-try good-p12-existing-kek '' t "${K8S12[@]}" --set gateway.credentialStorage.existingSecret=my-kek
+try good-p12-existing-kek '' t "${K8S12[@]}" --set namespace=osh-sandboxes \
+	--set gateway.credentialStorage.existingSecret=my-kek
 try bad-p12-sandbox-ns 'gateway.credentialDrivers.kubernetesSecrets.namespace must not be the sandbox namespace' t \
-	"${K8S12[@]}" --set gateway.credentialDrivers.kubernetesSecrets.namespace=openshell-system
+	"${K8S12[@]}" --set namespace=openshell-system --set gateway.credentialDrivers.kubernetesSecrets.namespace=openshell-system
 try bad-p12-sandbox-release-ns 'gateway.credentialDrivers.kubernetesSecrets.namespace must not be the sandbox namespace' t \
 	"${K8S12[@]}" --namespace openshell-system
 try bad-p12-sandbox-config-ns 'gateway.credentialDrivers.kubernetesSecrets.namespace must not be the sandbox namespace' t \
+	--set namespace=openshell-system \
 	--set-json 'gatewayConfig={"openshell.gateway":{"credential_drivers":["kubernetes-secrets"]},"openshell.credential_drivers.kubernetes-secrets":{"namespace":"openshell-system"}}'
 try bad-p12-create-release-ns 'gateway.credentialDrivers.kubernetesSecrets.createNamespace requires gateway.credentialDrivers.kubernetesSecrets.namespace to name a namespace other than the release namespace' t \
-	"${K8S12[@]}" --set gateway.credentialDrivers.kubernetesSecrets.createNamespace=true
+	"${K8S12[@]}" --set namespace=osh-sandboxes --set gateway.credentialDrivers.kubernetesSecrets.createNamespace=true
 try bad-p12-two-drivers 'gatewayConfig.openshell.gateway.credential_drivers may select only one backend' t \
 	--set-json 'gatewayConfig={"openshell.gateway":{"credential_drivers":["a","b"]}}'
 try bad-p12-no-drivers 'gatewayConfig.openshell.gateway.credential_drivers must select exactly one backend or be omitted/null to use the chart default' t \
@@ -362,6 +365,68 @@ try good-p16-renew-half '' t "${CM15[@]}" --set gateway.certManager.certificateR
 RENEW16='gateway.certManager.certificateDuration (8760h) must be at least twice certificateRenewBefore (5000h): the chart requires this for both cert-manager.io and cert.gardener.cloud.'
 try bad-p16-gardener-renew "$RENEW16" t "${GD16[@]}" --set gateway.certManager.certificateRenewBefore=5000h
 try bad-p16-cm-renew "$RENEW16" t "${CM15[@]}" --set gateway.certManager.certificateRenewBefore=5000h
+
+# 19. 0.11.1 fixes.
+# The sandbox namespace defaults to the release namespace; namespace= overrides it.
+try good-q1-ns-default '' t --namespace osh-a
+try good-q1-ns-explicit '' t --namespace osh-a --set namespace=osh-sb
+try bad-q1-k8s-secrets-defaults 'gateway.credentialDrivers.kubernetesSecrets.namespace must not be the sandbox namespace "osh-a"' t \
+	--namespace osh-a --set gateway.credentialDrivers.kubernetesSecrets.enabled=true
+# Values of the wrong shape fail with a message naming them, not a template error.
+TABLE2='must be a table (a map of keys)'
+try bad-q2-config-scalar-table "gatewayConfig openshell.gateway.auth $TABLE2" t \
+	--set-json 'gatewayConfig={"openshell.gateway.auth":5}'
+try bad-q2-config-string-table "gatewayConfig openshell.gateway $TABLE2" t --set-json 'gatewayConfig={"openshell.gateway":"x"}'
+try bad-q2-config-nested-scalar "gatewayConfig openshell.gateway $TABLE2" t --set-json 'gatewayConfig={"openshell":{"gateway":5}}'
+try good-q2-auth-null '' t --set-json gateway.auth=null
+try bad-q2-auth-string 'gateway.auth must be a map' t --set-string gateway.auth=x
+try bad-q2-vault-space 'the Vault credential driver address must not contain whitespace' t \
+	--set gateway.credentialDrivers.vault.enabled=true --set-string 'gateway.credentialDrivers.vault.address=https://vault.example.org :8200'
+# Validation: rbac.create is a boolean; nodePort in the default range; real IPv6 SANs;
+# a DNS-1123 credentials namespace; an integer JWKS TTL.
+try bad-q3-rbac-string 'rbac.create must be a boolean' t --set-string rbac.create=false
+NP3=(--set gatewayService.type=NodePort "${OIDC5[@]}")
+NODEPORT3='gatewayService.nodePort must be an integer from 30000 to 32767'
+try good-q3-nodeport-low '' t "${NP3[@]}" --set gatewayService.nodePort=30000
+try good-q3-nodeport-high '' t "${NP3[@]}" --set gatewayService.nodePort=32767
+try bad-q3-nodeport-below "$NODEPORT3" t "${NP3[@]}" --set gatewayService.nodePort=8080
+try bad-q3-nodeport-above "$NODEPORT3" t "${NP3[@]}" --set gatewayService.nodePort=32768
+try bad-q3-nodeport-string "$NODEPORT3" t "${NP3[@]}" --set-string gatewayService.nodePort=abc
+try good-q3-ipv6 '' t --set-json 'gateway.sandboxJwt.serverIpAddresses=["::1","fd00::5","2001:db8:0:0:0:0:0:1","::"]'
+IP3='gateway.sandboxJwt.serverIpAddresses entries must be IP addresses'
+try bad-q3-ipv6-colons "$IP3" t --set-json 'gateway.sandboxJwt.serverIpAddresses=["::::"]'
+try bad-q3-ipv6-two-gaps "$IP3" t --set-json 'gateway.sandboxJwt.serverIpAddresses=["1::2::3"]'
+try bad-q3-ipv6-long-group "$IP3" t --set-json 'gateway.sandboxJwt.serverIpAddresses=["12345::1"]'
+try bad-q3-ipv6-nine-groups "$IP3" t --set-json 'gateway.sandboxJwt.serverIpAddresses=["1:2:3:4:5:6:7:8:9"]'
+try bad-q3-ipv6-seven-groups "$IP3" t --set-json 'gateway.sandboxJwt.serverIpAddresses=["1:2:3:4:5:6:7"]'
+try bad-q3-creds-ns 'gateway.credentialDrivers.kubernetesSecrets.namespace must be a valid namespace name' t \
+	"${K8S12[@]}" --set namespace=osh-sandboxes --set gateway.credentialDrivers.kubernetesSecrets.namespace=Bad_NS
+try bad-q3-jwks-float 'gateway.oidc.jwksTtl must be a positive integer' t "${OIDC5[@]}" --set gateway.oidc.jwksTtl=1.5
+try bad-q3-jwks-string 'gateway.oidc.jwksTtl must be a positive integer' t "${OIDC5[@]}" --set-string gateway.oidc.jwksTtl=abc
+# With the gateway elsewhere (gateway.enabled=false), gateway.* settings neither fail nor steer the driver.
+OFF4=(--set gateway.enabled=false --set driver.gatewayEndpoint=http://gateway.example:8080)
+try good-q4-db-url-gateway-off '' t "${OFF4[@]}" --set gateway.dbPersistence.dbUrl=postgres://db.example:5432/osh
+try good-q4-spiffe-gateway-off '' t "${OFF4[@]}" --set gateway.providerTokenGrants.spiffe.enabled=true
+# Every flag the chart passes to the gateway is refused in extraArgs, naming its value.
+for pair in --config:gatewayConfig --bind-address:gateway.grpcPort --port:gateway.grpcPort \
+	--health-port:gateway.healthPort --metrics-port:gateway.metricsPort --compute-driver:driver.socket \
+	--compute-driver-socket:driver.socket --oidc-issuer:gateway.oidc.issuer --oidc-audience:gateway.oidc.audience \
+	--oidc-roles-claim:gateway.oidc.rolesClaim --oidc-admin-role:gateway.oidc.adminRole \
+	--oidc-user-role:gateway.oidc.userRole; do
+	flag=${pair%%:*}
+	try "bad-q5-extra${flag}" "gateway.extraArgs sets ${flag}; use ${pair#*:}" t \
+		--set-json "gateway.extraArgs=[\"${flag}=x\"]"
+done
+# An OTLP endpoint and a gateway name set through gatewayConfig reach the driver and the egress.
+try good-q5-otlp-config '' t --set-json 'gatewayConfig={"openshell.gateway.otlp":{"endpoint":"http://otel.example.org:4318"}}'
+try good-q5-name-config '' t --set-json 'gatewayConfig={"openshell.gateway":{"name":"from-config"}}'
+# Under gateway.certManager the --server-san refusal names certManager's own key.
+try bad-q7-extra-san-cm 'gateway.extraArgs sets --server-san; use gateway.certManager.serverDnsNames instead' t \
+	"${CM15[@]}" --set-json 'gateway.extraArgs=["--server-san=x.example.org"]'
+# The twice-renewBefore boundary on Gardener too; the driver's OTLP default with the gateway elsewhere.
+try good-q8-gardener-renew-half '' t "${GD16[@]}" --set gateway.certManager.certificateRenewBefore=4380h
+try bad-q8-gardener-renew-over "${RENEW16/5000h/4381h}" t "${GD16[@]}" --set gateway.certManager.certificateRenewBefore=4381h
+try good-q8-otlp-gateway-off '' t "${OFF4[@]}" --set gateway.otlp.endpoint=http://otel.example.org:4318
 
 uv run --quiet --no-project --python 3.12 --with pyyaml==6.0.2 python - "$WORK" "$CHART" <<'PY'
 import pathlib, sys, tomllib
@@ -1131,6 +1196,56 @@ for case in ("good-p16-gardener", "good-p16-gardener-ingress"):
 got = job_args("good-p16-gardener-ingress", BACKEND_CA)
 if got != want_backend_args:
     failures.append(f"good-p16-gardener-ingress: the backend-CA Job args are {got}, want {want_backend_args}")
+
+# 19. The sandbox namespace: the release namespace unless `namespace` names another.
+SANDBOX_NS_OBJECTS = {("ServiceAccount", "openshell-sandbox"), ("Role", FN), ("RoleBinding", FN),
+                      ("NetworkPolicy", f"{FN}-sandbox-ssh")}
+for case, want in (("good-q1-ns-default", "osh-a"), ("good-q1-ns-explicit", "osh-sb")):
+    got = {(d["kind"], d["metadata"]["name"]): d["metadata"].get("namespace") for d in docs(case)
+           if (d["kind"], d["metadata"]["name"]) in SANDBOX_NS_OBJECTS}
+    if got != {k: want for k in SANDBOX_NS_OBJECTS}:
+        failures.append(f"{case}: the sandbox-namespace objects are in {got}, want all in {want!r}")
+    env = env_of(driver_container(case)).get("OPENSHELL_SANDBOX_NAMESPACE", {}).get("value")
+    if env != want:
+        failures.append(f"{case}: the driver's OPENSHELL_SANDBOX_NAMESPACE is {env!r}, want {want!r}")
+
+# 19. The gateway's SPIFFE socket is no default for the driver when the gateway runs elsewhere.
+case = "good-q4-spiffe-gateway-off"
+if "OPENSHELL_PROVIDER_SPIFFE_WORKLOAD_API_SOCKET" in env_of(driver_container(case)):
+    failures.append(f"{case}: the driver got the gateway's SPIFFE socket although the gateway runs elsewhere")
+if any(v.get("name") == "spiffe-workload-api" for v in (pod_spec(case) or {}).get("volumes", [])):
+    failures.append(f"{case}: the pod mounts the SPIFFE Workload API although the gateway runs elsewhere")
+
+# 19. gatewayConfig's OTLP endpoint and gateway name: the driver and the egress follow them.
+case = "good-q5-otlp-config"
+got = env_of(driver_container(case)).get("OPENSHELL_OTLP_ENDPOINT", {}).get("value")
+if got != "http://otel.example.org:4318":
+    failures.append(f"{case}: the driver's OPENSHELL_OTLP_ENDPOINT is {got!r}, want the gatewayConfig endpoint")
+if 4318 not in (pod_egress_ports(case) or []):
+    failures.append(f"{case}: the pod NetworkPolicy egress ports are {pod_egress_ports(case)!r}, want 4318 among them")
+case = "good-q5-name-config"
+got = env_of(driver_container(case)).get("OPENSHELL_GATEWAY_NAME", {}).get("value")
+toml_name = gateway_toml(case).get("openshell", {}).get("gateway", {}).get("name")
+if (got, toml_name) != ("from-config", "from-config"):
+    failures.append(f"{case}: driver OPENSHELL_GATEWAY_NAME {got!r} and TOML name {toml_name!r}, want both 'from-config'")
+
+# 19. Hook objects (Jobs and their ServiceAccounts and RBAC) are deleted once their hook
+# succeeds: before-hook-creation alone leaves them behind after `helm uninstall`.
+for case in ("good-p1-defaults", "good-p15-cm-ingress", "good-p16-gardener-ingress"):
+    for d in docs(case):
+        annotations = d["metadata"].get("annotations") or {}
+        if "helm.sh/hook" in annotations and "hook-succeeded" not in annotations.get("helm.sh/hook-delete-policy", ""):
+            failures.append(f"{case}: hook {d['kind']} {d['metadata']['name']} is not deleted when its hook succeeds")
+
+# 19. With the gateway elsewhere the driver still exports to gateway.otlp.endpoint, and the pod may dial it.
+case = "good-q8-otlp-gateway-off"
+got = env_of(driver_container(case)).get("OPENSHELL_OTLP_ENDPOINT", {}).get("value")
+if got != "http://otel.example.org:4318":
+    failures.append(f"{case}: the driver's OPENSHELL_OTLP_ENDPOINT is {got!r}, want gateway.otlp.endpoint")
+if 4318 not in (pod_egress_ports(case) or []):
+    failures.append(f"{case}: the pod NetworkPolicy egress ports are {pod_egress_ports(case)!r}, want 4318 among them")
+if any(c["name"] == "gateway" for c in (pod_spec(case) or {}).get("containers", [])):
+    failures.append(f"{case}: a gateway container rendered with gateway.enabled=false")
 
 if failures:
     print("CHART_PARITY_FAIL:")

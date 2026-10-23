@@ -4,6 +4,52 @@ All notable changes to openshell-driver-kyma are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.11.1] — 2026-10-23
+
+Fixes the minor findings the 0.11.0 reviews and the live rollout deferred.
+
+### Fixed
+
+- **`namespace` (the sandbox namespace) defaults to the release namespace.** It
+  defaulted to `openshell-system`, so a second release installed elsewhere
+  rendered its sandbox Role, RoleBinding, NetworkPolicy and ServiceAccount into
+  the first release's namespace.
+- **Clear refusals instead of template errors** for a scalar where the chart writes
+  a `gatewayConfig` table, `gateway.auth` set to a string, and a Vault address with
+  whitespace. `gateway.auth: null` now means the defaults.
+- **Validation:** `rbac.create` must be a boolean (the string `"false"` rendered
+  RBAC); `gatewayService.nodePort` must be in 30000–32767; IPv6 server SANs are
+  checked group by group; the Kubernetes Secrets credential namespace must be a
+  DNS-1123 label; `gateway.oidc.jwksTtl` must be a positive integer.
+- **`gateway.enabled=false`:** the gateway DB guards no longer run, and
+  `gateway.providerTokenGrants.spiffe` no longer hands the driver the in-pod
+  gateway's socket.
+- **`gatewayConfig` reaches the driver:** an OTLP endpoint or gateway name set
+  there now also sets the driver's `OPENSHELL_OTLP_ENDPOINT` and
+  `OPENSHELL_GATEWAY_NAME` and opens the collector's egress port.
+- **`gateway.extraArgs`** also refuses `--config`, `--bind-address`, `--port`,
+  `--health-port`, `--metrics-port`, `--compute-driver`, `--compute-driver-socket`,
+  `--oidc-issuer`, `--oidc-audience`, `--oidc-roles-claim`, `--oidc-admin-role` and
+  `--oidc-user-role`, which the chart sets.
+- **Hook cleanup:** the PKI and backend-CA hooks' ServiceAccounts and RBAC are
+  deleted once the hooks succeed; `helm uninstall` left them behind.
+- Refusal messages and values comments that named the wrong key or described
+  0.10 behaviour.
+
+### Upgrading
+
+- With `namespace` unset, sandboxes now go to the release namespace. Installs into
+  `openshell-system` (the documented path) see no change. If you installed elsewhere
+  and relied on the old default, set `namespace: openshell-system`.
+- Because of that default, `gateway.credentialDrivers.kubernetesSecrets` with all
+  defaults now fails: the credentials namespace (release namespace) would be the
+  sandbox namespace. Set `gateway.credentialDrivers.kubernetesSecrets.namespace` to
+  a dedicated namespace.
+- Values that rendered before but now fail: a non-boolean `rbac.create`, a
+  `nodePort` outside 30000–32767, a fractional or textual `jwksTtl`, a malformed
+  IPv6 SAN, and the `extraArgs` flags listed above. Each message names the value
+  to fix.
+
 ## [0.11.0] — 2026-10-22
 
 Closes the gaps between this chart and upstream OpenShell's Helm chart, where the
@@ -34,8 +80,8 @@ capability can work on Kyma.
   the SPIFFE Workload API.
 - **Certificates from cert-manager or Gardener.** `gateway.certManager.*`
   (`api: cert-manager.io` or `cert.gardener.cloud`) issues the gateway's server and
-  client certificates instead of the PKI hook, and a post-install Job fills the
-  ingress CA ConfigMap from the issued CA. Opt-in; the PKI hook stays the default.
+  client certificates instead of the PKI hook, and, with `gatewayIngress`, a
+  post-install Job fills the ingress CA ConfigMap from the issued CA. Opt-in; the PKI hook stays the default.
   Kind smokes cover cert-manager, Vault and SPIFFE.
 
 ### Fixed

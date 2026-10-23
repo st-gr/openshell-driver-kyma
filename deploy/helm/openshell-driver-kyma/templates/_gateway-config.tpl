@@ -12,9 +12,30 @@ chart owns through flags or the driver's environment are refused outright: the
 gateway would silently override them, or the driver would never see them.
 */}}
 
+{{/* tomlTableGuard (dict "config" $c "table" "openshell.gateway"): refuses a table the
+chart writes that gatewayConfig set to something other than a map, directly or as a
+key of its parent table. */}}
+{{- define "openshell-driver-kyma.tomlTableGuard" -}}
+{{- $parts := splitList "." .table -}}
+{{- $parent := get .config (initial $parts | join ".") -}}
+{{- $values := list -}}
+{{- if hasKey .config .table -}}
+{{- $values = append $values (get .config .table) -}}
+{{- end -}}
+{{- if and (gt (len $parts) 1) (kindIs "map" $parent) (hasKey $parent (last $parts)) -}}
+{{- $values = append $values (get $parent (last $parts)) -}}
+{{- end -}}
+{{- range $value := $values -}}
+{{- if not (or (kindIs "map" $value) (kindIs "invalid" $value)) -}}
+{{- fail (printf "gatewayConfig %s must be a table (a map of keys), got the %s %q" $.table (kindOf $value) (toString $value)) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
 {{/* tomlDefault (dict "config" $c "table" "openshell.gateway" "key" "name" "value" $v):
 set table.key to value only when gatewayConfig left it out. */}}
 {{- define "openshell-driver-kyma.tomlDefault" -}}
+{{- include "openshell-driver-kyma.tomlTableGuard" . -}}
 {{- $table := get .config .table | default dict -}}
 {{- if not (hasKey $table .key) -}}
 {{- $_ := set $table .key .value -}}
@@ -26,6 +47,7 @@ set table.key to value only when gatewayConfig left it out. */}}
 "valuePath" "gateway.x"): set table.key to value; gatewayConfig may repeat the
 same value but not set another. valuePath names the chart value to use instead. */}}
 {{- define "openshell-driver-kyma.tomlOwned" -}}
+{{- include "openshell-driver-kyma.tomlTableGuard" . -}}
 {{- $table := get .config .table | default dict -}}
 {{- if and (hasKey $table .key) (ne (toJson (get $table .key)) (toJson .value)) -}}
 {{- fail (printf "gatewayConfig must not set %s.%s; it is chart-owned (use %s instead)" .table .key .valuePath) -}}
@@ -137,8 +159,13 @@ authentication itself (upstream v0.1.4), so false makes it require the certifica
 This setting covers user calls only; supervisor->gateway calls authenticate
 separately, via the driver's AuthenticateSandbox and (when enabled) the
 sandbox-JWT issuer. */ -}}
+{{- include "openshell-driver-kyma.tomlTableGuard" (dict "config" $config "table" "openshell.gateway.auth") -}}
 {{- $fromConfig := hasKey (get $config "openshell.gateway.auth" | default dict) "allow_unauthenticated_users" -}}
-{{- $allowUnauth := .Values.gateway.auth.allowUnauthenticatedUsers -}}
+{{- $authValues := .Values.gateway.auth | default dict -}}
+{{- if not (kindIs "map" $authValues) -}}
+{{- fail (printf "gateway.auth must be a map (e.g. {allowUnauthenticatedUsers: null}), got the %s %q." (kindOf $authValues) (toString $authValues)) -}}
+{{- end -}}
+{{- $allowUnauth := index $authValues "allowUnauthenticatedUsers" -}}
 {{- if kindIs "invalid" $allowUnauth -}}
 {{- $allowUnauth = and (not .Values.gateway.oidc.issuer) (not (and .Values.gateway.tls.enabled .Values.gateway.tls.clientCa.enabled)) -}}
 {{- else if not (kindIs "bool" $allowUnauth) -}}

@@ -14,7 +14,7 @@ scripts/check-chart-render.sh fails CI when an upstream option is missing here.
 - name: OPENSHELL_LOG_LEVEL
   value: {{ $d.logLevel | quote }}
 - name: OPENSHELL_SANDBOX_NAMESPACE
-  value: {{ .Values.namespace | quote }}
+  value: {{ include "openshell-driver-kyma.sandboxNamespace" . | quote }}
 - name: OPENSHELL_WORKSPACE_MODE
   value: {{ $d.workspaceMode | quote }}
 - name: OPENSHELL_GATEWAY_ID

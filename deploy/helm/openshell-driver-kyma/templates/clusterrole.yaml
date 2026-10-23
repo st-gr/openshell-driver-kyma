@@ -1,4 +1,7 @@
 {{- $cluster := .Values.rbac.clusterScoped -}}
+{{- if not (kindIs "bool" .Values.rbac.create) -}}
+{{- fail (printf "rbac.create must be a boolean (true or false), got the %s %q." (kindOf .Values.rbac.create) (toString .Values.rbac.create)) -}}
+{{- end -}}
 {{- if not (kindIs "bool" $cluster.create) -}}
 {{- fail (printf "rbac.clusterScoped.create must be a boolean (true or false), got the %s %q." (kindOf $cluster.create) (toString $cluster.create)) -}}
 {{- end -}}
@@ -57,7 +60,7 @@ rules:
       {{- end }}
   {{- if ne $mode "shared" }}
   # Cluster-wide workload rights, for sandboxes in namespaces other than
-  # .Values.namespace.
+  # the sandbox namespace.
   - apiGroups: ["agents.x-k8s.io"]
     resources: ["sandboxes", "sandboxes/status"]
     verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]

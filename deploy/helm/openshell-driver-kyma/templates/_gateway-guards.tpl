@@ -20,13 +20,26 @@ of openshell-driver-kyma.gatewayArgGuards.
 {{/* The flags the chart sets from values, and the value that sets each. */}}
 {{- define "openshell-driver-kyma.gatewayArgGuards" -}}
 {{- if .Values.gateway.enabled -}}
+{{- $sans := ternary "gateway.certManager.serverDnsNames" "gateway.sandboxJwt.serverDnsNames" (eq (toJson .Values.gateway.certManager.enabled) "true") -}}
 {{- include "openshell-driver-kyma.extraArgsGuard" (dict "args" .Values.gateway.extraArgs "flags" (dict
+  "--config" "gatewayConfig"
+  "--bind-address" "gateway.grpcPort (the chart binds all addresses)"
+  "--port" "gateway.grpcPort"
+  "--health-port" "gateway.healthPort"
+  "--metrics-port" "gateway.metricsPort"
+  "--compute-driver" "driver.socket (the chart runs the kyma driver)"
+  "--compute-driver-socket" "driver.socket"
+  "--oidc-issuer" "gateway.oidc.issuer"
+  "--oidc-audience" "gateway.oidc.audience"
+  "--oidc-roles-claim" "gateway.oidc.rolesClaim"
+  "--oidc-admin-role" "gateway.oidc.adminRole"
+  "--oidc-user-role" "gateway.oidc.userRole"
   "--db-url" "gateway.dbPersistence.enabled=true with dbUrl, or externalDbSecret"
   "--tls-cert" "gateway.tls.enabled"
   "--tls-key" "gateway.tls.enabled"
   "--disable-tls" "gateway.tls.enabled"
   "--tls-client-ca" "gateway.tls.clientCa"
-  "--server-san" "gateway.sandboxJwt.serverDnsNames"
+  "--server-san" $sans
   "--oidc-jwks-ttl" "gateway.oidc.jwksTtl"
   "--oidc-scopes-claim" "gateway.oidc.scopesClaim"
   "--oidc-jwks-allowed-origins" "gateway.oidc.jwksAllowedOrigins"
@@ -69,7 +82,7 @@ may stay unauthenticated.
 {{- end -}}
 {{- if $published -}}
 {{- if and $type (ne $type "ClusterIP") (not $v.gateway.oidc.issuer) (not (and $v.gateway.tls.enabled $v.gateway.tls.clientCa.enabled)) -}}
-{{- fail (printf "gatewayService.type=%s publishes the gateway; set gateway.oidc.issuer or enable gateway.tls with gateway.tls.clientCa" $type) -}}
+{{- fail (printf "gatewayService.type=%s publishes the gateway; set gateway.oidc.issuer or enable gateway.tls with gateway.tls.clientCa.enabled" $type) -}}
 {{- end -}}
 {{- $auth := get .config "openshell.gateway.auth" | default dict -}}
 {{- if eq (toJson (get $auth "allow_unauthenticated_users")) "true" -}}
@@ -117,7 +130,10 @@ message, our keys).
 {{- define "openshell-driver-kyma.credentialDriverGuards" -}}
 {{- if and .Values.gateway.enabled (eq (include "openshell-driver-kyma.credentialDriver" .) "kubernetes-secrets") -}}
 {{- $namespace := include "openshell-driver-kyma.credentialSecretsNamespace" . -}}
-{{- if eq $namespace .Values.namespace -}}
+{{- if not (and (le (len $namespace) 63) (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $namespace)) -}}
+{{- fail (printf "gateway.credentialDrivers.kubernetesSecrets.namespace must be a valid namespace name (a DNS-1123 label of at most 63 characters), got %q" $namespace) -}}
+{{- end -}}
+{{- if eq $namespace (include "openshell-driver-kyma.sandboxNamespace" .) -}}
 {{- fail (printf "gateway.credentialDrivers.kubernetesSecrets.namespace must not be the sandbox namespace %q, where the driver keeps sandbox bootstrap Secrets; name a dedicated namespace (empty means the release namespace)" $namespace) -}}
 {{- end -}}
 {{- if and .Values.gateway.credentialDrivers.kubernetesSecrets.createNamespace (eq $namespace .Release.Namespace) -}}
