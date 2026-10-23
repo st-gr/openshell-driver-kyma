@@ -84,6 +84,32 @@ path: every call would fail, and so would the install. */ -}}
 {{- end -}}
 {{- end -}}
 
+{{/*
+"true" when the string is an IPv6 address in hex groups (no embedded IPv4): at most
+one "::", groups of 1 to 4 hex digits, eight groups without "::", at most seven with it.
+*/}}
+{{- define "openshell-driver-kyma.isIPv6" -}}
+{{- $halves := splitList "::" . -}}
+{{- $ok := le (len $halves) 2 -}}
+{{- $count := 0 -}}
+{{- range $half := $halves -}}
+{{- if $half -}}
+{{- range $group := splitList ":" $half -}}
+{{- if not (regexMatch "^[0-9a-fA-F]{1,4}$" $group) -}}
+{{- $ok = false -}}
+{{- end -}}
+{{- $count = add1 $count -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if eq (len $halves) 1 -}}
+{{- $ok = and $ok (eq (int $count) 8) -}}
+{{- else -}}
+{{- $ok = and $ok (le (int $count) 7) -}}
+{{- end -}}
+{{- if $ok -}}true{{- end -}}
+{{- end -}}
+
 {{- define "openshell-driver-kyma.gatewayTlsGuards" -}}
 {{- /* A string is always true in a template: "false" would switch TLS on. */ -}}
 {{- if not (kindIs "bool" .Values.gateway.tls.enabled) -}}
@@ -101,7 +127,7 @@ path: every call would fail, and so would the install. */ -}}
 {{- end -}}
 {{- range $values.serverIpAddresses -}}
 {{- $ip := toString . -}}
-{{- if not (or (regexMatch "^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$" $ip) (regexMatch "^[0-9a-fA-F:]*:[0-9a-fA-F:]*$" $ip)) -}}
+{{- if not (or (regexMatch "^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$" $ip) (include "openshell-driver-kyma.isIPv6" $ip)) -}}
 {{- fail (printf "gateway.%s.serverIpAddresses entries must be IP addresses, got %q." $block $ip) -}}
 {{- end -}}
 {{- end -}}

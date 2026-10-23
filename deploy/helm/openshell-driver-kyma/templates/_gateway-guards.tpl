@@ -117,6 +117,9 @@ message, our keys).
 {{- define "openshell-driver-kyma.credentialDriverGuards" -}}
 {{- if and .Values.gateway.enabled (eq (include "openshell-driver-kyma.credentialDriver" .) "kubernetes-secrets") -}}
 {{- $namespace := include "openshell-driver-kyma.credentialSecretsNamespace" . -}}
+{{- if not (and (le (len $namespace) 63) (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $namespace)) -}}
+{{- fail (printf "gateway.credentialDrivers.kubernetesSecrets.namespace must be a valid namespace name (a DNS-1123 label of at most 63 characters), got %q" $namespace) -}}
+{{- end -}}
 {{- if eq $namespace (include "openshell-driver-kyma.sandboxNamespace" .) -}}
 {{- fail (printf "gateway.credentialDrivers.kubernetesSecrets.namespace must not be the sandbox namespace %q, where the driver keeps sandbox bootstrap Secrets; name a dedicated namespace (empty means the release namespace)" $namespace) -}}
 {{- end -}}

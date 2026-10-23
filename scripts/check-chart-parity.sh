@@ -152,7 +152,7 @@ try bad-p9-long 'gateway.dbPersistence.externalDbSecret must be no more than 253
 try bad-p9-extra-db-url 'gateway.extraArgs sets --db-url; use gateway.dbPersistence.enabled=true with dbUrl, or externalDbSecret instead' t \
 	--set-json 'gateway.extraArgs=["--db-url=sqlite:x"]'
 
-try bad-p5-ttl 'gateway.oidc.jwksTtl must be greater than zero' t "${OIDC5[@]}" --set gateway.oidc.jwksTtl=0
+try bad-p5-ttl 'gateway.oidc.jwksTtl must be a positive integer' t "${OIDC5[@]}" --set gateway.oidc.jwksTtl=0
 try bad-p5-origin-path 'gateway.oidc.jwksAllowedOrigins entries must not include a path or query' t "${OIDC5[@]}" \
 	--set 'gateway.oidc.jwksAllowedOrigins={https://k.example.org/path}'
 try bad-p5-insecure-string 'gateway.oidc.dangerouslyAllowInsecureHttp must be a boolean' t "${OIDC5[@]}" \
@@ -382,6 +382,27 @@ try good-q2-auth-null '' t --set-json gateway.auth=null
 try bad-q2-auth-string 'gateway.auth must be a map' t --set-string gateway.auth=x
 try bad-q2-vault-space 'the Vault credential driver address must not contain whitespace' t \
 	--set gateway.credentialDrivers.vault.enabled=true --set-string 'gateway.credentialDrivers.vault.address=https://vault.example.org :8200'
+# Validation: rbac.create is a boolean; nodePort in the default range; real IPv6 SANs;
+# a DNS-1123 credentials namespace; an integer JWKS TTL.
+try bad-q3-rbac-string 'rbac.create must be a boolean' t --set-string rbac.create=false
+NP3=(--set gatewayService.type=NodePort "${OIDC5[@]}")
+NODEPORT3='gatewayService.nodePort must be an integer from 30000 to 32767'
+try good-q3-nodeport-low '' t "${NP3[@]}" --set gatewayService.nodePort=30000
+try good-q3-nodeport-high '' t "${NP3[@]}" --set gatewayService.nodePort=32767
+try bad-q3-nodeport-below "$NODEPORT3" t "${NP3[@]}" --set gatewayService.nodePort=8080
+try bad-q3-nodeport-above "$NODEPORT3" t "${NP3[@]}" --set gatewayService.nodePort=32768
+try bad-q3-nodeport-string "$NODEPORT3" t "${NP3[@]}" --set-string gatewayService.nodePort=abc
+try good-q3-ipv6 '' t --set-json 'gateway.sandboxJwt.serverIpAddresses=["::1","fd00::5","2001:db8:0:0:0:0:0:1","::"]'
+IP3='gateway.sandboxJwt.serverIpAddresses entries must be IP addresses'
+try bad-q3-ipv6-colons "$IP3" t --set-json 'gateway.sandboxJwt.serverIpAddresses=["::::"]'
+try bad-q3-ipv6-two-gaps "$IP3" t --set-json 'gateway.sandboxJwt.serverIpAddresses=["1::2::3"]'
+try bad-q3-ipv6-long-group "$IP3" t --set-json 'gateway.sandboxJwt.serverIpAddresses=["12345::1"]'
+try bad-q3-ipv6-nine-groups "$IP3" t --set-json 'gateway.sandboxJwt.serverIpAddresses=["1:2:3:4:5:6:7:8:9"]'
+try bad-q3-ipv6-seven-groups "$IP3" t --set-json 'gateway.sandboxJwt.serverIpAddresses=["1:2:3:4:5:6:7"]'
+try bad-q3-creds-ns 'gateway.credentialDrivers.kubernetesSecrets.namespace must be a valid namespace name' t \
+	"${K8S12[@]}" --set namespace=osh-sandboxes --set gateway.credentialDrivers.kubernetesSecrets.namespace=Bad_NS
+try bad-q3-jwks-float 'gateway.oidc.jwksTtl must be a positive integer' t "${OIDC5[@]}" --set gateway.oidc.jwksTtl=1.5
+try bad-q3-jwks-string 'gateway.oidc.jwksTtl must be a positive integer' t "${OIDC5[@]}" --set-string gateway.oidc.jwksTtl=abc
 
 uv run --quiet --no-project --python 3.12 --with pyyaml==6.0.2 python - "$WORK" "$CHART" <<'PY'
 import pathlib, sys, tomllib

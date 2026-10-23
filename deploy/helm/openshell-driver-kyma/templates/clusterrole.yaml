@@ -1,4 +1,7 @@
 {{- $cluster := .Values.rbac.clusterScoped -}}
+{{- if not (kindIs "bool" .Values.rbac.create) -}}
+{{- fail (printf "rbac.create must be a boolean (true or false), got the %s %q." (kindOf .Values.rbac.create) (toString .Values.rbac.create)) -}}
+{{- end -}}
 {{- if not (kindIs "bool" $cluster.create) -}}
 {{- fail (printf "rbac.clusterScoped.create must be a boolean (true or false), got the %s %q." (kindOf $cluster.create) (toString $cluster.create)) -}}
 {{- end -}}

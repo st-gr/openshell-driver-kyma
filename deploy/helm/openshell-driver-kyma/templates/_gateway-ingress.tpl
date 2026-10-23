@@ -81,8 +81,8 @@ openshell-user and rejects a gateway with exactly one of them empty
 {{- if ne (empty $oidc.adminRole) (empty $oidc.userRole) -}}
 {{- fail "gateway.oidc.adminRole and gateway.oidc.userRole must be set together: upstream refuses a gateway with only one of them (both for RBAC, or neither)." -}}
 {{- end -}}
-{{- if lt (int $oidc.jwksTtl) 1 -}}
-{{- fail (printf "gateway.oidc.jwksTtl must be greater than zero, got %v." $oidc.jwksTtl) -}}
+{{- if not (regexMatch "^[1-9][0-9]*$" (toString $oidc.jwksTtl)) -}}
+{{- fail (printf "gateway.oidc.jwksTtl must be a positive integer (seconds), got %q." (toString $oidc.jwksTtl)) -}}
 {{- end -}}
 {{- if not (kindIs "bool" $oidc.dangerouslyAllowInsecureHttp) -}}
 {{- fail (printf "gateway.oidc.dangerouslyAllowInsecureHttp must be a boolean (true or false), got the %s %q." (kindOf $oidc.dangerouslyAllowInsecureHttp) (toString $oidc.dangerouslyAllowInsecureHttp)) -}}
