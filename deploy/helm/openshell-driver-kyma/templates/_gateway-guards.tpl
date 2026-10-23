@@ -20,6 +20,7 @@ of openshell-driver-kyma.gatewayArgGuards.
 {{/* The flags the chart sets from values, and the value that sets each. */}}
 {{- define "openshell-driver-kyma.gatewayArgGuards" -}}
 {{- if .Values.gateway.enabled -}}
+{{- $sans := ternary "gateway.certManager.serverDnsNames" "gateway.sandboxJwt.serverDnsNames" (eq (toJson .Values.gateway.certManager.enabled) "true") -}}
 {{- include "openshell-driver-kyma.extraArgsGuard" (dict "args" .Values.gateway.extraArgs "flags" (dict
   "--config" "gatewayConfig"
   "--bind-address" "gateway.grpcPort (the chart binds all addresses)"
@@ -38,7 +39,7 @@ of openshell-driver-kyma.gatewayArgGuards.
   "--tls-key" "gateway.tls.enabled"
   "--disable-tls" "gateway.tls.enabled"
   "--tls-client-ca" "gateway.tls.clientCa"
-  "--server-san" "gateway.sandboxJwt.serverDnsNames"
+  "--server-san" $sans
   "--oidc-jwks-ttl" "gateway.oidc.jwksTtl"
   "--oidc-scopes-claim" "gateway.oidc.scopesClaim"
   "--oidc-jwks-allowed-origins" "gateway.oidc.jwksAllowedOrigins"
@@ -81,7 +82,7 @@ may stay unauthenticated.
 {{- end -}}
 {{- if $published -}}
 {{- if and $type (ne $type "ClusterIP") (not $v.gateway.oidc.issuer) (not (and $v.gateway.tls.enabled $v.gateway.tls.clientCa.enabled)) -}}
-{{- fail (printf "gatewayService.type=%s publishes the gateway; set gateway.oidc.issuer or enable gateway.tls with gateway.tls.clientCa" $type) -}}
+{{- fail (printf "gatewayService.type=%s publishes the gateway; set gateway.oidc.issuer or enable gateway.tls with gateway.tls.clientCa.enabled" $type) -}}
 {{- end -}}
 {{- $auth := get .config "openshell.gateway.auth" | default dict -}}
 {{- if eq (toJson (get $auth "allow_unauthenticated_users")) "true" -}}

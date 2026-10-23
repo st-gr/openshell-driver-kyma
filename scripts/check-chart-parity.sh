@@ -57,7 +57,7 @@ try bad-p3-websocket-string 'gateway.enableWebsocketTunnel must be a boolean' t 
 	--set-string gateway.enableWebsocketTunnel=true
 try bad-p3-loopback-string 'gateway.enableLoopbackServiceHttp must be a boolean' t \
 	--set-string gateway.enableLoopbackServiceHttp=false
-try bad-p3-empty-name 'gateway.name must not be empty' t --set-string 'gateway.name= '
+try bad-p3-empty-name 'gateway.name must not be blank' t --set-string 'gateway.name= '
 
 # 4. Telemetry (off by default, gateway only) and the gateway's OTLP export.
 try good-p4-telemetry-on '' t --set gateway.telemetryEnabled=true
@@ -420,6 +420,9 @@ done
 # An OTLP endpoint and a gateway name set through gatewayConfig reach the driver and the egress.
 try good-q5-otlp-config '' t --set-json 'gatewayConfig={"openshell.gateway.otlp":{"endpoint":"http://otel.example.org:4318"}}'
 try good-q5-name-config '' t --set-json 'gatewayConfig={"openshell.gateway":{"name":"from-config"}}'
+# Under gateway.certManager the --server-san refusal names certManager's own key.
+try bad-q7-extra-san-cm 'gateway.extraArgs sets --server-san; use gateway.certManager.serverDnsNames instead' t \
+	"${CM15[@]}" --set-json 'gateway.extraArgs=["--server-san=x.example.org"]'
 
 uv run --quiet --no-project --python 3.12 --with pyyaml==6.0.2 python - "$WORK" "$CHART" <<'PY'
 import pathlib, sys, tomllib

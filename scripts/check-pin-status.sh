@@ -164,7 +164,7 @@ fi
 # one moment it decides something: after the images check has already passed
 # and the script is about to declare the pin's reason evaporated.
 cli_ships_entrypoint() {
-	local version=$1 url tmp
+	local version=$1
 	# Checks the RELEASE ASSET, not the PyPI wheel. The wheel will never carry
 	# the binary again: NVIDIA/OpenShell#2321 removed it deliberately and added
 	# a test asserting it cannot come back. Asking the wheel would hold a pin

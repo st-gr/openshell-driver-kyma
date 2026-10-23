@@ -313,7 +313,7 @@ default can follow the fullname. driver.gatewayName defaults to it.
 {{- define "openshell-driver-kyma.gatewayName" -}}
 {{- $name := .Values.gateway.name -}}
 {{- if and $name (not (trim (toString $name))) -}}
-{{- fail "gateway.name must not be empty; leave it unset for the chart fullname." -}}
+{{- fail "gateway.name must not be blank; leave it empty or unset for the chart fullname." -}}
 {{- end -}}
 {{- $config := include "openshell-driver-kyma.userGatewayTable" (list . "openshell.gateway") | fromJson -}}
 {{- get $config "name" | default $name | default (include "openshell-driver-kyma.fullname" .) -}}

@@ -137,7 +137,7 @@ one "::", groups of 1 to 4 hex digits, eight groups without "::", at most seven 
 {{- fail "gateway.tls.enabled=true requires gateway.enabled=true (no in-pod gateway sidecar to terminate TLS on)." -}}
 {{- end -}}
 {{- if not .Values.gateway.sandboxJwt.enabled -}}
-{{- fail "gateway.tls.enabled=true requires gateway.sandboxJwt.enabled=true — the chart's gateway-jwt-pki-hook is what creates the server-tls Secret. Either flip sandboxJwt on, or pre-create a kubernetes.io/tls Secret named per gateway.sandboxJwt.serverTlsSecretName and disable the hook." -}}
+{{- fail "gateway.tls.enabled=true requires gateway.sandboxJwt.enabled=true: the chart's gateway-jwt-pki-hook creates the sandbox-JWT keys and, without gateway.certManager, the server-tls Secret." -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
