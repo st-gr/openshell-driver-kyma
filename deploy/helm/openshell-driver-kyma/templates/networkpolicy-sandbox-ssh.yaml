@@ -20,7 +20,7 @@ apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: {{ include "openshell-driver-kyma.fullname" . }}-sandbox-ssh
-  namespace: {{ .Values.namespace }}
+  namespace: {{ include "openshell-driver-kyma.sandboxNamespace" . }}
   labels:
     {{- include "openshell-driver-kyma.labels" . | nindent 4 }}
 spec:

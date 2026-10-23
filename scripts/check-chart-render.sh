@@ -762,6 +762,7 @@ if env is not None and ("OPENSHELL_K8S_SANDBOX_UID" in env or "OPENSHELL_K8S_SAN
     failures.append("an unset sandbox UID/GID was still passed to the driver")
 
 # Checks 4 and 5 need the sandbox namespace and the Deployment that runs the driver.
+# Empty means the release namespace of each render.
 sandbox_namespace = (yaml.safe_load(values) or {}).get("namespace")
 
 def driver_deployment(documents, where):
@@ -873,10 +874,11 @@ for render in sorted(work.glob("r*.yaml")) + [work / "good-all-options.yaml"]:
     for d in policies:
         name, spec = d["metadata"]["name"], d.get("spec") or {}
         if d in ssh:
-            if d["metadata"].get("namespace") != sandbox_namespace or spec != ssh_restriction(
+            want_ns = sandbox_namespace or pod["metadata"].get("namespace")
+            if d["metadata"].get("namespace") != want_ns or spec != ssh_restriction(
                     pod["metadata"].get("namespace")):
                 failures.append(f"{render.name}: NetworkPolicy {name} is not upstream's SSH-ingress "
-                                f"restriction in the sandbox namespace {sandbox_namespace}: {spec}")
+                                f"restriction in the sandbox namespace {want_ns}: {spec}")
             continue
         selector = spec.get("podSelector") or {}
         labels = selector.get("matchLabels") or {}
@@ -1018,7 +1020,8 @@ for name, (namespaced, cluster_wide) in EXPECTED.items():
     actual = effective_rules(docs(work / f"{name}.yaml"), name)
     if actual is None:
         continue
-    expected = table(sandbox_namespace, namespaced) | table("cluster", cluster_wide)
+    # These renders run in the release namespace "default".
+    expected = table(sandbox_namespace or "default", namespaced) | table("cluster", cluster_wide)
     failures.extend(f"{name}: missing {show(r)}" for r in sorted(expected - actual, key=str))
     failures.extend(f"{name}: extra {show(r)}" for r in sorted(actual - expected, key=str))
 

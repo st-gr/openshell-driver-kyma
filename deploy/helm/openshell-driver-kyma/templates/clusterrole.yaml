@@ -57,7 +57,7 @@ rules:
       {{- end }}
   {{- if ne $mode "shared" }}
   # Cluster-wide workload rights, for sandboxes in namespaces other than
-  # .Values.namespace.
+  # the sandbox namespace.
   - apiGroups: ["agents.x-k8s.io"]
     resources: ["sandboxes", "sandboxes/status"]
     verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]

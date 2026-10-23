@@ -22,6 +22,13 @@ Create a default fully qualified app name.
 {{- end }}
 
 {{/*
+The sandbox namespace: .Values.namespace, or the release namespace when it is empty.
+*/}}
+{{- define "openshell-driver-kyma.sandboxNamespace" -}}
+{{- default .Release.Namespace .Values.namespace -}}
+{{- end }}
+
+{{/*
 Common labels.
 */}}
 {{- define "openshell-driver-kyma.labels" -}}

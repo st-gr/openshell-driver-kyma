@@ -1,14 +1,15 @@
 # Default values for openshell-driver-kyma.
 # Override with `helm install ... -f my-values.yaml --set ...`.
 
-# Sandbox provisioning namespace. The driver creates Sandbox CRs here.
+# Sandbox provisioning namespace. The driver creates Sandbox CRs here; empty
+# means the release namespace. Set it explicitly to keep sandboxes elsewhere.
 # Cluster-admin should label this namespace
 # `pod-security.kubernetes.io/enforce: privileged`, the level the chart's CI
 # runs at. Upstream v0.1.4's sandbox pods request no privileges (non-root, all
 # capabilities dropped, RuntimeDefault seccomp), so a stricter level may admit
 # them, but only `privileged` is verified here. The provider hook runs as
 # root, which `restricted` refuses.
-namespace: openshell-system
+namespace: ""
 
 image:
   repository: ghcr.io/st-gr/openshell-driver-kyma

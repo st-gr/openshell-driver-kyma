@@ -117,7 +117,7 @@ message, our keys).
 {{- define "openshell-driver-kyma.credentialDriverGuards" -}}
 {{- if and .Values.gateway.enabled (eq (include "openshell-driver-kyma.credentialDriver" .) "kubernetes-secrets") -}}
 {{- $namespace := include "openshell-driver-kyma.credentialSecretsNamespace" . -}}
-{{- if eq $namespace .Values.namespace -}}
+{{- if eq $namespace (include "openshell-driver-kyma.sandboxNamespace" .) -}}
 {{- fail (printf "gateway.credentialDrivers.kubernetesSecrets.namespace must not be the sandbox namespace %q, where the driver keeps sandbox bootstrap Secrets; name a dedicated namespace (empty means the release namespace)" $namespace) -}}
 {{- end -}}
 {{- if and .Values.gateway.credentialDrivers.kubernetesSecrets.createNamespace (eq $namespace .Release.Namespace) -}}

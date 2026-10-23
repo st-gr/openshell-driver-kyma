@@ -231,25 +231,28 @@ try bad-p11-extra-san 'gateway.extraArgs sets --server-san; use gateway.sandboxJ
 # 12. The Kubernetes Secrets credential driver: provider credentials in Secrets, no KEK.
 K8S12=(--set gateway.credentialDrivers.kubernetesSecrets.enabled=true)
 try good-p12-k8s '' t "${K8S12[@]}" --set gateway.credentialDrivers.kubernetesSecrets.namespace=osh-creds
-try good-p12-k8s-default-ns '' t "${K8S12[@]}"
+# Credentials in the release namespace need sandboxes elsewhere (the sandbox namespace defaults to it).
+try good-p12-k8s-default-ns '' t "${K8S12[@]}" --set namespace=osh-sandboxes
 try good-p12-create-ns '' t "${K8S12[@]}" --set gateway.credentialDrivers.kubernetesSecrets.namespace=osh-creds \
 	--set gateway.credentialDrivers.kubernetesSecrets.createNamespace=true
 try good-p12-no-rbac '' t "${K8S12[@]}" --set gateway.credentialDrivers.kubernetesSecrets.namespace=osh-creds \
 	--set gateway.credentialDrivers.kubernetesSecrets.rbac.create=false
 try good-p12-no-rbac-global '' t "${K8S12[@]}" --set gateway.credentialDrivers.kubernetesSecrets.namespace=osh-creds \
 	--set rbac.create=false
-try good-p12-via-config '' t --set-json 'gatewayConfig={"openshell.gateway":{"credential_drivers":["kubernetes-secrets"]}}'
+try good-p12-via-config '' t --set namespace=osh-sandboxes --set-json 'gatewayConfig={"openshell.gateway":{"credential_drivers":["kubernetes-secrets"]}}'
 try good-p12-via-config-nested '' t \
 	--set-json 'gatewayConfig={"openshell":{"gateway":{"credential_drivers":["kubernetes-secrets"]},"credential_drivers":{"kubernetes-secrets":{"namespace":"osh-creds"}}}}'
-try good-p12-existing-kek '' t "${K8S12[@]}" --set gateway.credentialStorage.existingSecret=my-kek
+try good-p12-existing-kek '' t "${K8S12[@]}" --set namespace=osh-sandboxes \
+	--set gateway.credentialStorage.existingSecret=my-kek
 try bad-p12-sandbox-ns 'gateway.credentialDrivers.kubernetesSecrets.namespace must not be the sandbox namespace' t \
-	"${K8S12[@]}" --set gateway.credentialDrivers.kubernetesSecrets.namespace=openshell-system
+	"${K8S12[@]}" --set namespace=openshell-system --set gateway.credentialDrivers.kubernetesSecrets.namespace=openshell-system
 try bad-p12-sandbox-release-ns 'gateway.credentialDrivers.kubernetesSecrets.namespace must not be the sandbox namespace' t \
 	"${K8S12[@]}" --namespace openshell-system
 try bad-p12-sandbox-config-ns 'gateway.credentialDrivers.kubernetesSecrets.namespace must not be the sandbox namespace' t \
+	--set namespace=openshell-system \
 	--set-json 'gatewayConfig={"openshell.gateway":{"credential_drivers":["kubernetes-secrets"]},"openshell.credential_drivers.kubernetes-secrets":{"namespace":"openshell-system"}}'
 try bad-p12-create-release-ns 'gateway.credentialDrivers.kubernetesSecrets.createNamespace requires gateway.credentialDrivers.kubernetesSecrets.namespace to name a namespace other than the release namespace' t \
-	"${K8S12[@]}" --set gateway.credentialDrivers.kubernetesSecrets.createNamespace=true
+	"${K8S12[@]}" --set namespace=osh-sandboxes --set gateway.credentialDrivers.kubernetesSecrets.createNamespace=true
 try bad-p12-two-drivers 'gatewayConfig.openshell.gateway.credential_drivers may select only one backend' t \
 	--set-json 'gatewayConfig={"openshell.gateway":{"credential_drivers":["a","b"]}}'
 try bad-p12-no-drivers 'gatewayConfig.openshell.gateway.credential_drivers must select exactly one backend or be omitted/null to use the chart default' t \
@@ -362,6 +365,13 @@ try good-p16-renew-half '' t "${CM15[@]}" --set gateway.certManager.certificateR
 RENEW16='gateway.certManager.certificateDuration (8760h) must be at least twice certificateRenewBefore (5000h): the chart requires this for both cert-manager.io and cert.gardener.cloud.'
 try bad-p16-gardener-renew "$RENEW16" t "${GD16[@]}" --set gateway.certManager.certificateRenewBefore=5000h
 try bad-p16-cm-renew "$RENEW16" t "${CM15[@]}" --set gateway.certManager.certificateRenewBefore=5000h
+
+# 19. 0.11.1 fixes.
+# The sandbox namespace defaults to the release namespace; namespace= overrides it.
+try good-q1-ns-default '' t --namespace osh-a
+try good-q1-ns-explicit '' t --namespace osh-a --set namespace=osh-sb
+try bad-q1-k8s-secrets-defaults 'gateway.credentialDrivers.kubernetesSecrets.namespace must not be the sandbox namespace "osh-a"' t \
+	--namespace osh-a --set gateway.credentialDrivers.kubernetesSecrets.enabled=true
 
 uv run --quiet --no-project --python 3.12 --with pyyaml==6.0.2 python - "$WORK" "$CHART" <<'PY'
 import pathlib, sys, tomllib
@@ -1131,6 +1141,18 @@ for case in ("good-p16-gardener", "good-p16-gardener-ingress"):
 got = job_args("good-p16-gardener-ingress", BACKEND_CA)
 if got != want_backend_args:
     failures.append(f"good-p16-gardener-ingress: the backend-CA Job args are {got}, want {want_backend_args}")
+
+# 19. The sandbox namespace: the release namespace unless `namespace` names another.
+SANDBOX_NS_OBJECTS = {("ServiceAccount", "openshell-sandbox"), ("Role", FN), ("RoleBinding", FN),
+                      ("NetworkPolicy", f"{FN}-sandbox-ssh")}
+for case, want in (("good-q1-ns-default", "osh-a"), ("good-q1-ns-explicit", "osh-sb")):
+    got = {(d["kind"], d["metadata"]["name"]): d["metadata"].get("namespace") for d in docs(case)
+           if (d["kind"], d["metadata"]["name"]) in SANDBOX_NS_OBJECTS}
+    if got != {k: want for k in SANDBOX_NS_OBJECTS}:
+        failures.append(f"{case}: the sandbox-namespace objects are in {got}, want all in {want!r}")
+    env = env_of(driver_container(case)).get("OPENSHELL_SANDBOX_NAMESPACE", {}).get("value")
+    if env != want:
+        failures.append(f"{case}: the driver's OPENSHELL_SANDBOX_NAMESPACE is {env!r}, want {want!r}")
 
 if failures:
     print("CHART_PARITY_FAIL:")
