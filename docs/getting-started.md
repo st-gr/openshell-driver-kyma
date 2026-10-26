@@ -130,7 +130,7 @@ The last line proves the gateway is talking to the driver over the shared
 Unix socket. If it is missing, check the driver container's logs.
 
 Reach the gateway from your laptop, create a sandbox, get a shell in it
-(install the v0.1.4 CLI first, see [install-cli.md](install-cli.md)):
+(install the v0.1.5 CLI first, see [install-cli.md](install-cli.md)):
 
 ```bash
 kubectl -n "$NS" port-forward svc/ods-openshell-driver-kyma 8080:8080 &
@@ -226,7 +226,7 @@ How the routing works (per
   that endpoint.
 - The key is bound to the endpoint's host and port (the path of `baseUrl` is
   not part of the binding). `binaries` gates which processes may reach the
-  endpoint; upstream v0.1.4 still resolves a static key like this one by
+  endpoint; upstream v0.1.5 still resolves a static key like this one by
   endpoint, not by calling binary, so treat the endpoint as the scope.
 - An in-cluster upstream needs no NetworkPolicy from this chart. Upstream
   gives each supervisor pod its own egress policy (allow-all) and gives

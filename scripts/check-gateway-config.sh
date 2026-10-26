@@ -169,7 +169,7 @@ check_args remote-access \
   --set gateway.oidc.clientId=osh-client \
   --set gateway.oidc.authOnly=true \
   --set gateway.tls.enabled=true
-# Upstream v0.1.4's mTLS operators (`--enable-operator-auth`, OU=operator certificates)
+# Upstream v0.1.5's mTLS operators (`--enable-operator-auth`, OU=operator certificates)
 # have no chart value, as in upstream's chart: they are reached through gateway.extraArgs,
 # and need TLS and the client CA, so the pinned image must accept that command line.
 check_args operator-auth \

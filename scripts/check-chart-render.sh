@@ -198,6 +198,11 @@ try bad-3g-labels-list 'driver.resourceAdmission.requiredLabels' t --set-json 'd
 # renders, and reaches both sides as empty (check 2).
 try bad-3g-admission-empty-labels 'driver.resourceAdmission.requiredLabels' t \
 	--set driver.resourceAdmission.enabled=true --set-json 'driver.resourceAdmission.requiredLabels={}'
+# Upstream v0.1.5: the OCSF schema version needs the OCSF endpoint (clap `requires`), and
+# the pod annotation/label allowlists refuse the openshell.ai and agents.x-k8s.io domains.
+try bad-3g-ocsf-version-alone 'driver.otlpOcsfSchemaVersion' t --set driver.otlpOcsfSchemaVersion=1.5.0
+try bad-3g-reserved-label 'driver.allowedPodLabels' t --set-json 'driver.allowedPodLabels=["openshell.ai/*"]'
+try bad-3g-reserved-annotation 'driver.allowedPodAnnotations' t --set-json 'driver.allowedPodAnnotations=["x.agents.x-k8s.io/a"]'
 try good-3g-admission-null-labels '' t --set driver.resourceAdmission.enabled=true --set-json 'driver.resourceAdmission.requiredLabels=null'
 try good-3g-admission-some-labels '' t --set driver.resourceAdmission.enabled=true \
 	--set-json 'driver.resourceAdmission.requiredLabels={"example.com/approved":"yes"}'
@@ -456,7 +461,7 @@ try bad-9-ocsf-queue 'gateway.ocsfLog.queueCapacity' t --set gateway.ocsfLog.ena
 try bad-9-ocsf-max-files 'gateway.ocsfLog.maxFiles' t --set gateway.ocsfLog.enabled=true --set gateway.ocsfLog.maxFiles=0
 try bad-9-ocsf-enabled-string 'gateway.ocsfLog.enabled must be a boolean' t --set-string gateway.ocsfLog.enabled=false
 # 10. Upstream's gateway-wide gRPC rate limit (its chart's server.grpcRateLimit): both values
-# positive, or both 0 to leave it off; upstream's chart refuses anything else. Since v0.1.4
+# positive, or both 0 to leave it off; upstream's chart refuses anything else. Since v0.1.5
 # it also bounds the gateway's unauthenticated reflection service.
 try good-10-rate-limit '' t --set gateway.grpcRateLimit.requests=120 --set gateway.grpcRateLimit.windowSeconds=60
 try bad-10-rate-limit-one 'gateway.grpcRateLimit requires both requests and windowSeconds' t --set gateway.grpcRateLimit.requests=120
@@ -939,7 +944,7 @@ def effective_rules(documents, where):
 
 SANDBOX_VERBS = ["create", "delete", "get", "list", "patch", "update", "watch"]
 # Blocks of (apiGroup, resource, verbs[, resourceNames]) rows. Upstream's come from
-# the v0.1.4 templates of deploy/helm/openshell (role.yaml for shared mode, whose
+# the v0.1.5 templates of deploy/helm/openshell (role.yaml for shared mode, whose
 # Role holds the namespaced rights; clusterrole.yaml for the cluster-wide rights of
 # every mode and the namespaced rights of the other modes); the line numbers refer to those.
 PVC_GET = [("", "persistentvolumeclaims", ["get"])]           # role.yaml:13-18, clusterrole.yaml:18-22; with allowDriverConfig

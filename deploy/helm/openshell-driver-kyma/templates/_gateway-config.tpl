@@ -155,7 +155,7 @@ issuer nor an effective client CA (TLS on and gateway.tls.clientCa.enabled, whic
 is when the chart passes --tls-client-ca). Without it every gRPC request would be rejected with
 Unauthenticated/missing-authorization-header, `openshell sandbox create` from the
 CLI included. With a client CA and no issuer the gateway enables mTLS user
-authentication itself (upstream v0.1.4), so false makes it require the certificate.
+authentication itself (upstream v0.1.5), so false makes it require the certificate.
 This setting covers user calls only; supervisor->gateway calls authenticate
 separately, via the driver's AuthenticateSandbox and (when enabled) the
 sandbox-JWT issuer. */ -}}

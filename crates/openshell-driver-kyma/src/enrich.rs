@@ -20,6 +20,20 @@ pub const KAGENTI_TYPE_LABEL: &str = "kagenti.io/type";
 pub const KAGENTI_TYPE_VALUE: &str = "agent";
 pub const CLAUDE_TELEMETRY_ENV: &str = "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC";
 
+/// Add the labels `enrich` sets to the operator's pod label allowlist.
+///
+/// Upstream (v0.1.5 and later) rejects a `CreateSandbox` whose template carries a
+/// pod label outside `allowed_pod_labels`, and it checks the request after
+/// `enrich` has added ours, so without these entries every create would fail.
+/// Entries already present are not repeated.
+pub fn allow_enriched_labels(allowed_pod_labels: &mut Vec<String>) {
+    for key in [ISTIO_INJECT_LABEL, KAGENTI_TYPE_LABEL] {
+        if !allowed_pod_labels.iter().any(|entry| entry == key) {
+            allowed_pod_labels.push(key.to_string());
+        }
+    }
+}
+
 /// What hook 1 adds to every sandbox.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EnrichConfig {
@@ -63,6 +77,26 @@ mod tests {
                 "http://proxy:8080".to_string(),
             )],
         }
+    }
+
+    #[test]
+    fn enriched_labels_pass_upstreams_pod_label_allowlist() {
+        use openshell_driver_kubernetes::KubernetesComputeConfig;
+
+        let mut sandbox = DriverSandbox::default();
+        enrich(&mut sandbox, &config());
+        let labels = sandbox.spec.unwrap().template.unwrap().labels;
+
+        let mut cfg = KubernetesComputeConfig::default();
+        assert!(labels.keys().any(|key| !cfg.pod_label_allowed(key)));
+        allow_enriched_labels(&mut cfg.allowed_pod_labels);
+        cfg.validate_allowed_pod_labels().unwrap();
+        assert!(labels.keys().all(|key| cfg.pod_label_allowed(key)));
+        // Operator entries are kept and nothing is added twice.
+        cfg.allowed_pod_labels.push("app".to_string());
+        allow_enriched_labels(&mut cfg.allowed_pod_labels);
+        assert_eq!(cfg.allowed_pod_labels.len(), 3);
+        assert!(cfg.pod_label_allowed("app"));
     }
 
     #[test]
