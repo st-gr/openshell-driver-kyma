@@ -4,6 +4,40 @@ All notable changes to openshell-driver-kyma are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.11.2] — 2026-10-26
+
+Moves to upstream OpenShell v0.1.5 (from v0.1.4): the three `openshell-*` crates,
+`upstream.version` and the gateway, supervisor and sandbox-runtime image digests.
+
+### Changed upstream in v0.1.5
+
+- **Pod annotation and label allowlists** (`OPENSHELL_K8S_ALLOWED_POD_ANNOTATIONS`,
+  `OPENSHELL_K8S_ALLOWED_POD_LABELS`). Upstream now rejects any template pod
+  annotation or label whose key is not allowlisted; the default is to reject all,
+  and `openshell.ai` / `agents.x-k8s.io` keys can never be allowlisted.
+  **This would have broken us:** our enrich hook adds `sidecar.istio.io/inject`
+  and `kagenti.io/type` to every sandbox template, and upstream checks the
+  request after that, so every `CreateSandbox` would have failed. The driver now
+  adds those two keys to the allowlist at startup
+  (`enrich::allow_enriched_labels`), after the operator's own entries.
+- **OCSF export and gateway name for supervisors** (`OPENSHELL_OTLP_OCSF_ENDPOINT`,
+  `OPENSHELL_OTLP_OCSF_SCHEMA_VERSION`; `OPENSHELL_GATEWAY_NAME` now also reaches
+  supervisors). Mirrored in `upstream_args.rs`.
+- Chart: gateway container `seccompProfile: RuntimeDefault`, a configurable
+  `pkiInitJob.securityContext`, and `server.dataStorageSize` / `dataStorageClass`
+  for the StatefulSet gateway PVC. This chart already runs its gateway and hooks
+  non-root with RuntimeDefault seccomp and has its own DB PVC template, so nothing
+  changed. RBAC, the SSH-ingress NetworkPolicy and the workspace-mode rules are
+  unchanged between the two tags; only line references moved. The rest of
+  upstream's `main.rs` is unchanged (no `main.rs` mirror change).
+
+### Added
+
+- `driver.otlpOcsfEndpoint`, `driver.otlpOcsfSchemaVersion`,
+  `driver.allowedPodAnnotations` and `driver.allowedPodLabels`, rendering the new
+  upstream variables, with render-time refusals for a schema version without an
+  endpoint and for reserved domains.
+
 ## [0.11.1] — 2026-10-23
 
 Fixes the minor findings the 0.11.0 reviews and the live rollout deferred.

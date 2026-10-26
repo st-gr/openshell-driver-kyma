@@ -6,7 +6,7 @@ was the structural reference for this project. This document captures the
 concrete differences between it and the Kyma driver.
 
 The Kyma driver runs upstream OpenShell's Kubernetes driver
-(`openshell-driver-kubernetes`, release v0.1.4) unchanged, so provisioning,
+(`openshell-driver-kubernetes`, release v0.1.5) unchanged, so provisioning,
 sandbox authentication and isolation are upstream's, and it adds two things
 of its own: request enrichment (the Istio opt-out and Kagenti labels, plus
 configured sandbox environment) and Pod Security labels on the namespaces the
@@ -175,7 +175,7 @@ and no command that sets a cluster-wide inference route:
   supervisor pod, which substitutes the real key in requests to the profile's
   host and port and dials the upstream.
 - The key is bound to that host and port. `binaries` gates which processes may
-  reach the endpoint; upstream v0.1.4 still resolves a static key like this
+  reach the endpoint; upstream v0.1.5 still resolves a static key like this
   one by endpoint, not by calling binary.
 
 Chart blocks behind this:

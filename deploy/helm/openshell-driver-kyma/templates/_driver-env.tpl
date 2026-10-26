@@ -44,6 +44,22 @@ scripts/check-chart-render.sh fails CI when an upstream option is missing here.
 {{- end }}
 - name: OPENSHELL_GATEWAY_NAME
   value: {{ default (include "openshell-driver-kyma.gatewayName" .) $d.gatewayName | quote }}
+{{- with $d.otlpOcsfEndpoint }}
+- name: OPENSHELL_OTLP_OCSF_ENDPOINT
+  value: {{ . | quote }}
+{{- end }}
+{{- with $d.otlpOcsfSchemaVersion }}
+- name: OPENSHELL_OTLP_OCSF_SCHEMA_VERSION
+  value: {{ . | quote }}
+{{- end }}
+{{- with $d.allowedPodAnnotations }}
+- name: OPENSHELL_K8S_ALLOWED_POD_ANNOTATIONS
+  value: {{ join "," . | quote }}
+{{- end }}
+{{- with $d.allowedPodLabels }}
+- name: OPENSHELL_K8S_ALLOWED_POD_LABELS
+  value: {{ join "," . | quote }}
+{{- end }}
 {{- with $d.operatorNamespaceLabel }}
 - name: OPENSHELL_OPERATOR_NAMESPACE_LABEL
   value: {{ . | quote }}
@@ -177,7 +193,7 @@ Unset (nil or "") gives an empty string, so the variable is omitted and upstream
 resolves the identity itself. A set value must be a whole number in
 [1, 4294967294], upstream's range (openshell-policy MIN_SANDBOX_UID and
 MAX_SANDBOX_UID, checked by validate_sandbox_identity_config in
-openshell-driver-kubernetes src/config.rs:577); anything else fails the render
+openshell-driver-kubernetes src/config.rs:625); anything else fails the render
 naming the key. So 0 is refused instead of silently dropped, and a fraction
 instead of truncated. Digit strings are accepted, other strings are not.
 
@@ -281,6 +297,17 @@ sandbox creation failed. */ -}}
 {{- $parts := splitList "/" (trimPrefix "/" $sock) -}}
 {{- if or (not (hasPrefix "/" $sock)) (hasSuffix "/" $sock) (lt (len $parts) 4) (has "" $parts) -}}
 {{- fail (printf "driver.socket %q must be an absolute path with at least three directories (e.g. /var/run/openshell/driver.sock; 0.8.0's /var/run/openshell-driver.sock no longer works): upstream's driver refuses to start unless its own uid owns the socket's parent directory, so the chart mounts the shared emptyDir at the grandparent (which must not be a top-level directory) and the driver creates the parent." $sock) -}}
+{{- end -}}
+{{- if and .Values.driver.otlpOcsfSchemaVersion (not .Values.driver.otlpOcsfEndpoint) -}}
+{{- fail "driver.otlpOcsfSchemaVersion requires driver.otlpOcsfEndpoint: upstream's driver refuses OPENSHELL_OTLP_OCSF_SCHEMA_VERSION without OPENSHELL_OTLP_OCSF_ENDPOINT (v0.1.5)." -}}
+{{- end -}}
+{{- range $field := list "allowedPodAnnotations" "allowedPodLabels" -}}
+{{- range $entry := (index $.Values.driver $field) -}}
+{{- $domain := first (splitList "/" (toString $entry)) -}}
+{{- if or (eq $domain "openshell.ai") (hasSuffix ".openshell.ai" $domain) (eq $domain "agents.x-k8s.io") (hasSuffix ".agents.x-k8s.io" $domain) -}}
+{{- fail (printf "driver.%s entry %q is in a domain reserved for OpenShell and Agent Sandbox (openshell.ai, agents.x-k8s.io); upstream's driver refuses to start with it (config.rs validate_pod_metadata_allowlist, v0.1.5)." $field (toString $entry)) -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 {{- $allow := .Values.driver.allowDriverConfig -}}
 {{- if not (kindIs "bool" $allow) -}}

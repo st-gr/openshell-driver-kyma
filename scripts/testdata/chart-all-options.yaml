@@ -28,6 +28,10 @@ driver:
   bindAddress: 127.0.0.1:50062
   otlpEndpoint: http://collector.example:4317
   gatewayName: all-options
+  otlpOcsfEndpoint: http://ocsf-collector.example:4317
+  otlpOcsfSchemaVersion: "1.5.0"
+  allowedPodAnnotations: [example.com/*, team.org/owner]
+  allowedPodLabels: [app, labels.example.com/*]
   clientTlsSecretName: example-client-tls
   hostGatewayIp: 192.0.2.1
   gatewayEndpoint: http://gateway.example:8080

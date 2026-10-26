@@ -49,6 +49,18 @@ pub struct UpstreamArgs {
     #[arg(long, env = "OPENSHELL_OTLP_ENDPOINT")]
     pub otlp_endpoint: Option<String>,
 
+    /// OTLP/gRPC collector endpoint for supervisor OCSF event export.
+    #[arg(long, env = "OPENSHELL_OTLP_OCSF_ENDPOINT")]
+    pub otlp_ocsf_endpoint: Option<String>,
+
+    /// OCSF schema version that supervisors downgrade exported events to.
+    #[arg(
+        long,
+        env = "OPENSHELL_OTLP_OCSF_SCHEMA_VERSION",
+        requires = "otlp_ocsf_endpoint"
+    )]
+    pub otlp_ocsf_schema_version: Option<String>,
+
     #[arg(long, env = "OPENSHELL_GATEWAY_NAME")]
     pub gateway_name: Option<String>,
 
@@ -90,6 +102,16 @@ pub struct UpstreamArgs {
         value_delimiter = ','
     )]
     pub sandbox_image_pull_secrets: Vec<String>,
+
+    #[arg(
+        long,
+        env = "OPENSHELL_K8S_ALLOWED_POD_ANNOTATIONS",
+        value_delimiter = ','
+    )]
+    pub allowed_pod_annotations: Vec<String>,
+
+    #[arg(long, env = "OPENSHELL_K8S_ALLOWED_POD_LABELS", value_delimiter = ',')]
+    pub allowed_pod_labels: Vec<String>,
 
     #[arg(long, env = "OPENSHELL_MANAGED_SSH_INGRESS_ENABLED")]
     pub managed_ssh_ingress_enabled: bool,
@@ -252,6 +274,13 @@ pub fn compute_config(
         proxy_ca_bundle: args.proxy_ca_bundle,
         grpc_endpoint: args.grpc_endpoint.unwrap_or_default(),
         supervisor_otlp_endpoint: args.otlp_endpoint.clone(),
+        supervisor_gateway_name: args.gateway_name.clone(),
+        supervisor_ocsf_export: args.otlp_ocsf_endpoint.clone().map(|endpoint| {
+            openshell_core::sandbox_env::OcsfOtlpExport {
+                endpoint,
+                schema_version: args.otlp_ocsf_schema_version.clone(),
+            }
+        }),
         ssh_socket_path: args.sandbox_ssh_socket_path,
         client_tls_secret_name: args.client_tls_secret_name.unwrap_or_default(),
         host_gateway_ip: args.host_gateway_ip.unwrap_or_default(),
@@ -266,6 +295,8 @@ pub fn compute_config(
             .unwrap_or_default(),
         default_runtime_class_name: std::env::var("OPENSHELL_K8S_DEFAULT_RUNTIME_CLASS_NAME")
             .unwrap_or_default(),
+        allowed_pod_annotations: args.allowed_pod_annotations,
+        allowed_pod_labels: args.allowed_pod_labels,
         sa_token_ttl_secs: args.sa_token_ttl_secs,
         provider_spiffe_workload_api_socket_path: args
             .provider_spiffe_workload_api_socket_path
@@ -350,6 +381,48 @@ mod tests {
             config.supervisor_otlp_endpoint.as_deref(),
             Some("http://collector.example:4317")
         );
+    }
+
+    // v0.1.5: OCSF export, the gateway name and the pod metadata allowlists
+    // reach upstream's config.
+    #[test]
+    fn compute_config_carries_v0_1_5_options() {
+        let args = parse(&[
+            "--gateway-name",
+            "gw",
+            "--otlp-ocsf-endpoint",
+            "http://ocsf.example:4317",
+            "--otlp-ocsf-schema-version",
+            "1.5.0",
+            "--allowed-pod-annotations",
+            "example.com/*,team.org/owner",
+            "--allowed-pod-labels",
+            "app",
+        ]);
+        let config = compute_config(args, BTreeMap::new());
+        assert_eq!(config.supervisor_gateway_name.as_deref(), Some("gw"));
+        let export = config
+            .supervisor_ocsf_export
+            .as_ref()
+            .expect("OCSF export set");
+        assert_eq!(export.endpoint, "http://ocsf.example:4317");
+        assert_eq!(export.schema_version.as_deref(), Some("1.5.0"));
+        assert!(config.pod_annotation_allowed("example.com/a"));
+        assert!(config.pod_label_allowed("app"));
+        assert!(!config.pod_label_allowed("team"));
+    }
+
+    #[test]
+    fn ocsf_schema_version_requires_the_endpoint() {
+        let result = Probe::try_parse_from([
+            "openshell-driver-kyma",
+            "--otlp-ocsf-schema-version",
+            "1.5.0",
+        ]);
+        assert!(result.is_err());
+        assert!(compute_config(parse(&[]), BTreeMap::new())
+            .supervisor_ocsf_export
+            .is_none());
     }
 
     #[test]
