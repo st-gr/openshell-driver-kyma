@@ -191,7 +191,7 @@ cat > /tmp/draft.md <<'EOF'
 
 Three things shipped this week:
 - Helm chart published as OCI artifact.
-- Driver release on upstream OpenShell v0.1.4.
+- Driver release on upstream OpenShell v0.1.6.
 - E2E live-cluster smoke succeeded.
 
 Two things outstanding:

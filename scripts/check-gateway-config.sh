@@ -211,10 +211,14 @@ check_args oidc-extras \
 # (no --db-url flag). Positive evidence that the pinned gateway reads it: a URL with an
 # unknown scheme is rejected with that URL in the error, which a gateway that ignored the
 # variable could not produce (it would stop at the unrelated state-directory failure).
+# Since upstream v0.1.6 the gateway refuses to start without a user-authentication method
+# before it reads the database URL, so the probe configures an (unreachable, never
+# contacted) OIDC issuer.
 check_args external-db-secret --set gateway.dbPersistence.externalDbSecret=osh-db
 rc=0
 out="$(docker run --rm -e OPENSHELL_DB_URL=bogus://example/db --entrypoint openshell-gateway "$IMAGE" \
-  --compute-driver kyma --compute-driver-socket /run/openshell/driver.sock --disable-tls 2>&1)" || rc=$?
+  --compute-driver kyma --compute-driver-socket /run/openshell/driver.sock --disable-tls \
+  --oidc-issuer https://issuer.example --oidc-audience probe 2>&1)" || rc=$?
 if ! grep -q "unsupported database URL scheme: bogus://example/db" <<<"$out"; then
   echo "GATEWAY_DB_URL_ENV_NOT_READ (exit $rc); output:" >&2
   head -10 <<<"$out" >&2

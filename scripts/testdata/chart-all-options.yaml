@@ -27,6 +27,10 @@ driver:
   sandboxSshSocketPath: /run/example-ssh.sock
   bindAddress: 127.0.0.1:50062
   otlpEndpoint: http://collector.example:4317
+  otlpOcsfEndpoint: http://ocsf-collector.example:4317
+  otlpOcsfSchemaVersion: "1.3"
+  allowedPodAnnotations: [example.com/team, example.org/*]
+  allowedPodLabels: [example.com/cost-center]
   gatewayName: all-options
   clientTlsSecretName: example-client-tls
   hostGatewayIp: 192.0.2.1

@@ -17,8 +17,9 @@ use openshell_core::proto::compute::v1::{
     DeleteWorkspaceRequest, DeleteWorkspaceResponse, DriverSandbox, EnsureWorkspaceRequest,
     EnsureWorkspaceResponse, GetCapabilitiesRequest, GetCapabilitiesResponse, GetSandboxRequest,
     GetSandboxResponse, ListSandboxesRequest, ListSandboxesResponse, StartSandboxRequest,
-    StartSandboxResponse, StopSandboxRequest, StopSandboxResponse, ValidateSandboxCreateRequest,
-    ValidateSandboxCreateResponse, WatchSandboxesRequest,
+    StartSandboxResponse, StopSandboxRequest, StopSandboxResponse, SuspendSandboxRequest,
+    SuspendSandboxResponse, ValidateSandboxCreateRequest, ValidateSandboxCreateResponse,
+    WatchSandboxesRequest,
 };
 use tonic::{Request, Response, Status};
 
@@ -162,6 +163,13 @@ impl<S: ComputeDriver> ComputeDriver for KymaComputeDriver<S> {
         request: Request<StartSandboxRequest>,
     ) -> Result<Response<StartSandboxResponse>, Status> {
         self.inner.start_sandbox(request).await
+    }
+
+    async fn suspend_sandbox(
+        &self,
+        request: Request<SuspendSandboxRequest>,
+    ) -> Result<Response<SuspendSandboxResponse>, Status> {
+        self.inner.suspend_sandbox(request).await
     }
 
     async fn delete_sandbox(
@@ -361,6 +369,13 @@ mod tests {
             self.record("start_sandbox");
             Ok(Response::new(StartSandboxResponse::default()))
         }
+        async fn suspend_sandbox(
+            &self,
+            _request: Request<SuspendSandboxRequest>,
+        ) -> Result<Response<SuspendSandboxResponse>, Status> {
+            self.record("suspend_sandbox");
+            Ok(Response::new(SuspendSandboxResponse::default()))
+        }
         async fn delete_sandbox(
             &self,
             request: Request<DeleteSandboxRequest>,
@@ -520,6 +535,10 @@ mod tests {
             .await
             .unwrap();
         driver
+            .suspend_sandbox(Request::new(Default::default()))
+            .await
+            .unwrap();
+        driver
             .delete_sandbox(Request::new(Default::default()))
             .await
             .unwrap();
@@ -547,6 +566,7 @@ mod tests {
                 "create_sandbox",
                 "stop_sandbox",
                 "start_sandbox",
+                "suspend_sandbox",
                 "delete_sandbox",
                 "watch_sandboxes",
                 "ensure_workspace",
