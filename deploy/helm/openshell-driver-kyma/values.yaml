@@ -232,6 +232,8 @@ driver:
   # (`example.com/*`). Empty rejects every caller-supplied annotation or label.
   # Keys in openshell.ai and agents.x-k8s.io are always rejected and upstream's
   # driver refuses to start with such an entry.
+  # The driver always adds the two labels it sets itself (sidecar.istio.io/inject,
+  # kagenti.io/type) to allowedPodLabels.
   allowedPodAnnotations: []
   allowedPodLabels: []
   gatewayName: ""            # "" = gateway.name, else the chart fullname

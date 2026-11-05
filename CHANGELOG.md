@@ -14,6 +14,11 @@ sandbox-runtime image digests to upstream OpenShell v0.1.6 (from v0.1.4).
 - **Upstream v0.1.6.** The three `openshell-*` git dependencies, `Cargo.lock`,
   `upstream.version` and the three image digests move together;
   `scripts/check-image-digests.sh` confirms the digests are upstream's for v0.1.6.
+- **The driver allowlists the labels it sets itself.** Upstream (v0.1.5 and later)
+  rejects a sandbox template label outside `allowed_pod_labels`, and it checks the
+  request after our enrich hook has added `sidecar.istio.io/inject` and
+  `kagenti.io/type`, so every `CreateSandbox` failed. The driver now adds those two
+  keys at startup (`enrich::allow_enriched_labels`), after the operator's entries.
 
 ### Added
 

@@ -103,7 +103,10 @@ async fn main() -> Result<()> {
             }
         }
     });
-    let config = compute_config(upstream, selector);
+    let mut config = compute_config(upstream, selector);
+    // Upstream checks template labels against its allowlist after our enrich hook
+    // has added the Istio and Kagenti labels, so those two must be allowed.
+    openshell_driver_kyma::enrich::allow_enriched_labels(&mut config.allowed_pod_labels);
     // The Kyma layer's own client; upstream's driver builds its own internally.
     let hook_client = kube::Client::try_default().await.into_diagnostic()?;
     let namespaces = NamespaceLabeler::new(
