@@ -4,6 +4,57 @@ All notable changes to openshell-driver-kyma are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.12.0] — 2026-11-02
+
+Moves the driver, the chart's `upstream.version` and the gateway, supervisor and
+sandbox-runtime image digests to upstream OpenShell v0.1.6 (from v0.1.4).
+
+### Changed
+
+- **Upstream v0.1.6.** The three `openshell-*` git dependencies, `Cargo.lock`,
+  `upstream.version` and the three image digests move together;
+  `scripts/check-image-digests.sh` confirms the digests are upstream's for v0.1.6.
+- **The driver allowlists the labels it sets itself.** Upstream (v0.1.5 and later)
+  rejects a sandbox template label outside `allowed_pod_labels`, and it checks the
+  request after our enrich hook has added `sidecar.istio.io/inject` and
+  `kagenti.io/type`, so every `CreateSandbox` failed. The driver now adds those two
+  keys at startup (`enrich::allow_enriched_labels`), after the operator's entries.
+
+### Added
+
+- **`driver.otlpOcsfEndpoint` / `driver.otlpOcsfSchemaVersion`**
+  (`OPENSHELL_OTLP_OCSF_ENDPOINT`, `OPENSHELL_OTLP_OCSF_SCHEMA_VERSION`):
+  upstream's driver now passes an OCSF export to the supervisors it launches. The
+  schema version needs the endpoint (upstream's clap `requires`; the chart refuses
+  it alone).
+- **`driver.allowedPodAnnotations` / `driver.allowedPodLabels`**
+  (`OPENSHELL_K8S_ALLOWED_POD_ANNOTATIONS` / `_LABELS`): the keys a sandbox
+  template may set on its pods. Empty (default) rejects all of them, as upstream
+  does. The chart rejects entries upstream would refuse at startup (malformed
+  keys, the reserved `openshell.ai` and `agents.x-k8s.io` domains).
+- `suspend_sandbox` is forwarded to upstream like the other lifecycle RPCs.
+
+### Upstream changes that did not break us
+
+- The `ComputeDriver` trait gained `SuspendSandbox` (the compile error was the
+  missing method); the wrapper forwards it unchanged. Upstream advertises
+  suspend/resume through its own `get_capabilities`, which we also forward.
+- `KubernetesComputeConfig` gained `supervisor_topology` and `shared_supervisor`.
+  Upstream's driver binary sets both to `None` in its config literal, so the
+  mirror does too; the chart does not render upstream's shared-supervisor
+  topology (supervisor Deployment, Service, HPA, PDB, token Secret, peer-role
+  rules) because this chart runs one driver per pod, not a gateway-topology
+  supervisor pool. `supervisor_gateway_name` follows `OPENSHELL_GATEWAY_NAME`.
+- Upstream's gateway chart gained `server.extraEnv`, `server.dataStorageSize` and
+  `dataStorageClass`, pod labels/annotations and a security context for the certgen
+  hook; they concern its StatefulSet and hook, which this chart does not render
+  in that form.
+- The RBAC templates (`role.yaml`, `clusterrole.yaml`,
+  `workspace-secret-source-role.yaml`) and the `-sandbox-ssh` NetworkPolicy are
+  unchanged between v0.1.4 and v0.1.6, as is `validate_workspace_mode`
+  (only its line numbers moved, now cited in `_workspace-guards.tpl`), and the
+  rest of upstream's `main.rs` (no `scripts/upstream-main-rs.sha256` change).
+
 ## [0.11.1] — 2026-10-23
 
 Fixes the minor findings the 0.11.0 reviews and the live rollout deferred.

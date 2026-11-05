@@ -42,6 +42,22 @@ scripts/check-chart-render.sh fails CI when an upstream option is missing here.
 - name: OPENSHELL_OTLP_ENDPOINT
   value: {{ . | quote }}
 {{- end }}
+{{- with $d.otlpOcsfEndpoint }}
+- name: OPENSHELL_OTLP_OCSF_ENDPOINT
+  value: {{ . | quote }}
+{{- end }}
+{{- with $d.otlpOcsfSchemaVersion }}
+- name: OPENSHELL_OTLP_OCSF_SCHEMA_VERSION
+  value: {{ . | quote }}
+{{- end }}
+{{- with $d.allowedPodAnnotations }}
+- name: OPENSHELL_K8S_ALLOWED_POD_ANNOTATIONS
+  value: {{ join "," . | quote }}
+{{- end }}
+{{- with $d.allowedPodLabels }}
+- name: OPENSHELL_K8S_ALLOWED_POD_LABELS
+  value: {{ join "," . | quote }}
+{{- end }}
 - name: OPENSHELL_GATEWAY_NAME
   value: {{ default (include "openshell-driver-kyma.gatewayName" .) $d.gatewayName | quote }}
 {{- with $d.operatorNamespaceLabel }}
@@ -177,7 +193,7 @@ Unset (nil or "") gives an empty string, so the variable is omitted and upstream
 resolves the identity itself. A set value must be a whole number in
 [1, 4294967294], upstream's range (openshell-policy MIN_SANDBOX_UID and
 MAX_SANDBOX_UID, checked by validate_sandbox_identity_config in
-openshell-driver-kubernetes src/config.rs:577); anything else fails the render
+openshell-driver-kubernetes src/config.rs:784); anything else fails the render
 naming the key. So 0 is refused instead of silently dropped, and a fraction
 instead of truncated. Digit strings are accepted, other strings are not.
 

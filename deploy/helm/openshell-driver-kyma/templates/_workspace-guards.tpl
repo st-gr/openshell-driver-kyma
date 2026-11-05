@@ -6,26 +6,76 @@ crash-loop once the driver starts.
 
 Every rule below is one of upstream's startup refusals in
 KubernetesComputeConfig::validate_workspace_mode (openshell-driver-kubernetes
-src/config.rs, v0.1.4), so a value upstream would refuse fails `helm template`
+src/config.rs, v0.1.6), so a value upstream would refuse fails `helm template`
 instead of crash-looping the pod:
-  managed   config.rs:669   gateway id is a DNS-1123 label
-            config.rs:679   "openshell-<id>-" plus a 19-character workspace
+  managed   config.rs:876   gateway id is a DNS-1123 label
+            config.rs:886   "openshell-<id>-" plus a 19-character workspace
                             name fits 63 characters, so the id is at most 33
-            config.rs:690   managed SSH ingress needs a gateway namespace
+            config.rs:897   managed SSH ingress needs a gateway namespace
                             and a gateway pod selector (checked on the
                             effective values, openshell-driver-kyma.
                             managedSshIngress: with the in-pod gateway both
                             default to its own pod)
-  operator  config.rs:705   exactly one of the namespace label or file...
-            config.rs:711   ...not both
+  operator  config.rs:912   exactly one of the namespace label or file...
+            config.rs:918   ...not both
 Not mirrored because no chart value can reach them: an empty gateway id
-(config.rs:666, the id defaults to the release fullname) and an empty operator
-label or file (config.rs:717-725, an empty value is simply not passed).
+(config.rs:873, the id defaults to the release fullname) and an empty operator
+label or file (config.rs:924-932, an empty value is simply not passed).
+
+Also mirrored, from upstream v0.1.6:
+  OCSF export  main.rs Args: --otlp-ocsf-schema-version `requires` the OCSF
+               endpoint, so driver.otlpOcsfSchemaVersion without
+               driver.otlpOcsfEndpoint would stop the driver at startup
+  pod metadata config.rs validate_pod_metadata_allowlist (driver.
+               allowedPodAnnotations / allowedPodLabels): each entry is an exact
+               key or `<domain>/*`, with a valid prefix and name, outside the
+               reserved openshell.ai and agents.x-k8s.io domains
 
 Called via `{{ include "openshell-driver-kyma.workspaceGuards" . }}` from
 deployment.yaml. */}}
 
+{{- define "openshell-driver-kyma.podMetadataAllowlistGuard" -}}
+{{- if not (kindIs "slice" .entries) -}}
+{{- fail (printf "driver.%s must be a list." .key) -}}
+{{- end -}}
+{{- range .entries -}}
+{{- $entry := toString . -}}
+{{- $wildcard := hasSuffix "/*" $entry -}}
+{{- $key := ternary (trimSuffix "/*" $entry) $entry $wildcard -}}
+{{- $prefix := "" -}}
+{{- $name := "" -}}
+{{- if contains "/" $key -}}
+{{- if $wildcard -}}
+{{- fail (printf "driver.%s entry %q: wildcard entries must be `<domain>/*`." $.key $entry) -}}
+{{- end -}}
+{{- $parts := regexSplit "/" $key 2 -}}
+{{- $prefix = index $parts 0 -}}
+{{- $name = index $parts 1 -}}
+{{- else if $wildcard -}}
+{{- $prefix = $key -}}
+{{- else -}}
+{{- $name = $key -}}
+{{- end -}}
+{{- if and $prefix (or (gt (len $prefix) 253) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $prefix))) -}}
+{{- fail (printf "driver.%s entry %q: invalid key prefix %q." $.key $entry $prefix) -}}
+{{- end -}}
+{{- if and (not $wildcard) (not (regexMatch "^[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?$" $name)) -}}
+{{- fail (printf "driver.%s entry %q: invalid key name %q." $.key $entry $name) -}}
+{{- end -}}
+{{- range $reserved := list "openshell.ai" "agents.x-k8s.io" -}}
+{{- if or (eq $prefix $reserved) (hasSuffix (printf ".%s" $reserved) $prefix) -}}
+{{- fail (printf "driver.%s entry %q: domain is reserved for OpenShell and Agent Sandbox." $.key $entry) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "openshell-driver-kyma.workspaceGuards" -}}
+{{- if and .Values.driver.otlpOcsfSchemaVersion (not .Values.driver.otlpOcsfEndpoint) -}}
+{{- fail "driver.otlpOcsfSchemaVersion requires driver.otlpOcsfEndpoint." -}}
+{{- end -}}
+{{- include "openshell-driver-kyma.podMetadataAllowlistGuard" (dict "key" "allowedPodAnnotations" "entries" (.Values.driver.allowedPodAnnotations | default list)) -}}
+{{- include "openshell-driver-kyma.podMetadataAllowlistGuard" (dict "key" "allowedPodLabels" "entries" (.Values.driver.allowedPodLabels | default list)) -}}
 {{- $mode := .Values.driver.workspaceMode -}}
 {{- if not (has $mode (list "shared" "managed" "operator")) -}}
 {{- fail (printf "driver.workspaceMode must be one of shared|managed|operator, got %q." $mode) -}}

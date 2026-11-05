@@ -146,6 +146,17 @@ id34=$(printf '%034d' 0 | tr 0 a)
 try bad-3c-too-long "$id34" t --set driver.workspaceMode=managed --set "gateway.sandboxJwt.gatewayId=$id34"
 try bad-3c-long-release 'prod-sandboxes-openshell-driver-kyma' prod-sandboxes --set driver.workspaceMode=managed
 try bad-3c-not-a-label 'Bad_ID' t --set driver.workspaceMode=managed --set gateway.sandboxJwt.gatewayId=Bad_ID
+# Upstream v0.1.6: the OCSF schema version needs the OCSF endpoint (main.rs Args `requires`), and
+# the pod annotation/label allowlists refuse malformed entries and the reserved domains
+# (config.rs validate_pod_metadata_allowlist).
+try good-3d-ocsf '' t --set driver.otlpOcsfEndpoint=http://c.example:4317 --set driver.otlpOcsfSchemaVersion=1.3
+try bad-3d-ocsf-version-alone 'requires driver.otlpOcsfEndpoint' t --set driver.otlpOcsfSchemaVersion=1.3
+try good-3d-allowlist '' t --set 'driver.allowedPodAnnotations={example.com/team,example.org/*,plain-key}' \
+	--set 'driver.allowedPodLabels={example.com/cost-center}'
+try bad-3d-allowlist-reserved 'reserved for OpenShell' t --set 'driver.allowedPodAnnotations={openshell.ai/x}'
+try bad-3d-allowlist-reserved-sub 'reserved for OpenShell' t --set 'driver.allowedPodLabels={foo.agents.x-k8s.io/*}'
+try bad-3d-allowlist-wildcard-path 'wildcard entries must be' t --set 'driver.allowedPodLabels={example.com/a/*}'
+try bad-3d-allowlist-name 'invalid key name' t --set 'driver.allowedPodAnnotations={example.com/-bad}'
 try good-3c-33-chars '' t --set driver.workspaceMode=managed --set "gateway.sandboxJwt.gatewayId=$id33"
 # A long release name is fine outside managed mode.
 try good-3c-shared-long-release '' prod-sandboxes
@@ -939,7 +950,7 @@ def effective_rules(documents, where):
 
 SANDBOX_VERBS = ["create", "delete", "get", "list", "patch", "update", "watch"]
 # Blocks of (apiGroup, resource, verbs[, resourceNames]) rows. Upstream's come from
-# the v0.1.4 templates of deploy/helm/openshell (role.yaml for shared mode, whose
+# the v0.1.6 (unchanged since v0.1.4) templates of deploy/helm/openshell (role.yaml for shared mode, whose
 # Role holds the namespaced rights; clusterrole.yaml for the cluster-wide rights of
 # every mode and the namespaced rights of the other modes); the line numbers refer to those.
 PVC_GET = [("", "persistentvolumeclaims", ["get"])]           # role.yaml:13-18, clusterrole.yaml:18-22; with allowDriverConfig

@@ -128,7 +128,7 @@ imagePullSecrets:
 gateway:
   enabled: true
   # The gateway, supervisor and sandbox-runtime images default to digests of
-  # the upstream OpenShell release named by `upstream.version` (v0.1.4). Leave
+  # the upstream OpenShell release named by `upstream.version` (v0.1.6). Leave
   # them alone unless you move that version too: they must match each other
   # and the driver.
 

@@ -130,7 +130,7 @@ The last line proves the gateway is talking to the driver over the shared
 Unix socket. If it is missing, check the driver container's logs.
 
 Reach the gateway from your laptop, create a sandbox, get a shell in it
-(install the v0.1.4 CLI first, see [install-cli.md](install-cli.md)):
+(install the v0.1.6 CLI first, see [install-cli.md](install-cli.md)):
 
 ```bash
 kubectl -n "$NS" port-forward svc/ods-openshell-driver-kyma 8080:8080 &
