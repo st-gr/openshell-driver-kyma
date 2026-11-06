@@ -97,11 +97,11 @@ driver:
   # starting with `sha256:` and the helper emits `<repo>@sha256:<digest>`
   # automatically.
   #
-  # This digest is supervisor v0.1.6, version-matched to gateway.image
+  # This digest is supervisor v0.1.7, version-matched to gateway.image
   # below. It tracked `:latest` until chart 0.3.0 — that tag moved twice
   # in one week, so sandboxes were silently picking up new privileged
   # binaries. Re-pin both together when bumping upstream.
-  supervisorImage: ghcr.io/nvidia/openshell/supervisor@sha256:ce859a7d77ee515d3fe0b3c7dc61286516f402eb1d25c761d806d9ae5ed96c0b
+  supervisorImage: ghcr.io/nvidia/openshell/supervisor@sha256:a07864bd0c546716039c2000a919f50ce8f7f1f67ba37dda350cf64d3a7cfb06
   # The gateway endpoint sandboxes dial (OPENSHELL_GRPC_ENDPOINT). Empty
   # defaults to this release's Service when gateway.enabled is true, https://
   # when gateway.tls.enabled and http:// otherwise, as upstream's chart derives
@@ -199,7 +199,7 @@ driver:
   # Sandbox runtime (isolation backend) image, digest-pinned. Upstream's
   # compiled-in default depends on build variables a git-dependency build does
   # not set, so the chart always passes it.
-  sandboxRuntimeImage: ghcr.io/nvidia/openshell/sandbox@sha256:1038eb5c1f191fa3c34684fd7041b891c78ec570979d487f36e06e08f91bfb63
+  sandboxRuntimeImage: ghcr.io/nvidia/openshell/sandbox@sha256:89819c03f291d9b909c3fc2962360e24af4516627422d18f3e681829f003f347
   sandboxRuntimeImagePullPolicy: ""
   supervisorImagePullPolicy: ""
   # Default sandbox image when a create request names none
@@ -213,19 +213,40 @@ driver:
   runtimeClassName: ""
   sandboxSshSocketPath: ""
   bindAddress: ""
-  # OTLP/gRPC trace collector (OPENSHELL_OTLP_ENDPOINT), e.g.
-  # http://collector.observability:4317. Plain http:// (upstream v0.1.4 builds
-  # its exporter without TLS). With networkPolicy.enabled the driver pod may
-  # then reach that port (80 when none is given), on any address.
+  # OTLP trace collector (OPENSHELL_OTLP_ENDPOINT), e.g.
+  # http://collector.observability:4317, also handed to the sandbox supervisors.
+  # With networkPolicy.enabled the driver pod may then reach that port (80 for
+  # http and 443 for https when none is given), on any address.
   # Empty defaults to gateway.otlp.endpoint.
   otlpEndpoint: ""
-  # OTLP/gRPC collector for the sandbox supervisors' OCSF event export
-  # (OPENSHELL_OTLP_OCSF_ENDPOINT, upstream v0.1.5 and later). Empty leaves the
-  # export off. otlpOcsfSchemaVersion (OPENSHELL_OTLP_OCSF_SCHEMA_VERSION) is the
-  # OCSF version supervisors downgrade exported events to; it needs the endpoint
-  # (upstream's driver refuses it alone, and so does this chart).
+  # Its protocol (OPENSHELL_OTLP_PROTOCOL, upstream v0.1.7 and later): grpc or
+  # http/protobuf (conventionally port 4318). Empty is upstream's default, grpc,
+  # except that with otlpEndpoint empty it follows the gateway's protocol in
+  # gatewayConfig."openshell.gateway.otlp".
+  otlpProtocol: ""
+  # PEM files for an https:// collector (OPENSHELL_OTLP_CA_FILE, _CERT_FILE,
+  # _KEY_FILE): paths in the driver container, mounted with extraVolumes and
+  # extraVolumeMounts below. The client certificate and key go together.
+  otlpCaFile: ""
+  otlpCertFile: ""
+  otlpKeyFile: ""
+  # Collectors the driver hands to the sandbox supervisors: their OCSF events
+  # (OPENSHELL_OTLP_OCSF_ENDPOINT, upstream v0.1.5 and later) and relayed
+  # workload traces (OPENSHELL_OTLP_AGENT_ENDPOINT, v0.1.7), each with its own
+  # protocol (_PROTOCOL; empty is grpc). An empty endpoint leaves that export off.
   otlpOcsfEndpoint: ""
+  otlpOcsfProtocol: ""
+  otlpAgentEndpoint: ""
+  otlpAgentProtocol: ""
+  # Deprecated and ignored since upstream v0.1.7
+  # (OPENSHELL_OTLP_OCSF_SCHEMA_VERSION): supervisors emit native OCSF 1.8.0 and
+  # the driver logs a warning when this is set.
   otlpOcsfSchemaVersion: ""
+  # Additional volumes for the driver+gateway pod and mounts for the driver
+  # container, for example the OTLP certificate files above. Volume names must not
+  # repeat the chart's or gateway.extraVolumes'.
+  extraVolumes: []
+  extraVolumeMounts: []
   # Pod annotation and label keys a sandbox template may set
   # (OPENSHELL_K8S_ALLOWED_POD_ANNOTATIONS / _LABELS, upstream v0.1.5 and later).
   # Each entry is an exact key (`example.com/team`) or a prefix wildcard
@@ -297,7 +318,7 @@ driver:
 # The upstream NVIDIA/OpenShell release this chart's driver links. Must equal
 # the tag in the workspace Cargo.toml (scripts/check-chart-render.sh).
 upstream:
-  version: v0.1.6
+  version: v0.1.7
 
 networkPolicy:
   # NetworkPolicies the chart renders:
@@ -417,7 +438,7 @@ gateway:
       timeoutSeconds: 1
       failureThreshold: 3
   image:
-    # Pinned by digest to the gateway image upstream published for `v0.1.6`,
+    # Pinned by digest to the gateway image upstream published for `v0.1.7`,
     # the same release as `upstream.version`, the Cargo.toml tag, the
     # supervisor and sandbox runtime images above, and the `openshell` CLI the
     # provider hook downloads. Re-pin them together when `upstream.version`
@@ -425,7 +446,7 @@ gateway:
     # shape changed. Resolve a digest with `docker buildx imagetools inspect`
     # on https://github.com/NVIDIA/OpenShell/pkgs/container/openshell%2Fgateway
     repository: ghcr.io/nvidia/openshell/gateway
-    tag: "sha256:f0b36dba21d282c52e498c25289658cfd6cd4f343b0069fde5609e25b002cdea"
+    tag: "sha256:9b94165a3dbcf6d454b822e5b21f371f168c44155c8fa1d6dd55ba091a041d1f"
     pullPolicy: IfNotPresent
   # The gateway's name: its OCSF identity, its OTel resource and the in-process
   # driver build context. "" = the chart fullname. driver.gatewayName, the
@@ -434,6 +455,12 @@ gateway:
   # What the gateway does when a policy update fails validation: fail_closed
   # rejects it, retain_last_valid keeps the last valid policy.
   policyValidationFailureMode: fail_closed
+  # Hostnames of exposed sandbox services (service_hostname_format, upstream v0.1.7
+  # and later): readable `<workspace>--<sandbox>[--<service>]`, or hashed, opaque
+  # one-label names discriminated by gateway.name, for several gateways sharing a
+  # service domain and wildcard certificate. Renaming the gateway then changes
+  # every hashed hostname. "" = the gateway's default, readable.
+  serviceHostnameFormat: ""
   # The gateway's HTTP listener on the loopback interface (enable_loopback_service_http).
   enableLoopbackServiceHttp: true
   # Accept WebSocket tunnels on the gateway's HTTP listener. The ingress does not
@@ -570,7 +597,8 @@ gateway:
   ocsfLog:
     enabled: false
     path: /tmp/gateway-ocsf.jsonl
-    # Empty emits native OCSF 1.8.0; "1.1" or "1.3" downgrades.
+    # Deprecated and ignored since upstream v0.1.7: the gateway emits native
+    # OCSF 1.8.0 and logs a warning when this is set.
     schemaVersion: ""
     # Rotate the active file daily (UTC), or never.
     rotation: daily

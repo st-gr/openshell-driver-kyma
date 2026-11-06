@@ -294,7 +294,9 @@ ConfigMap), exactly one of the two. It does not bootstrap them: the
 namespace's owner does, with upstream's `openshell-workspace` chart or an
 equivalent (the sandbox ServiceAccount, upstream's NetworkPolicy, and a Role
 granting the driver Secret `create` and `delete` for the bootstrap and
-image-pull Secrets). This chart does not ship that Role, and the driver's
+image-pull Secrets, and, since upstream v0.1.7, Pod `create`, `delete`, `get`,
+`list`, `patch` and `watch` and Service and NetworkPolicy `create` and `get`).
+This chart does not ship that Role, and the driver's
 ClusterRole grants Operator mode `namespaces` `get`, `list` and `watch`, never
 `create` or `delete`, and no Secret rights: that is deliberate, because the
 platform team owns the namespace's contents.

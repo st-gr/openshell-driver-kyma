@@ -128,7 +128,7 @@ imagePullSecrets:
 gateway:
   enabled: true
   # The gateway, supervisor and sandbox-runtime images default to digests of
-  # the upstream OpenShell release named by `upstream.version` (v0.1.6). Leave
+  # the upstream OpenShell release named by `upstream.version` (v0.1.7). Leave
   # them alone unless you move that version too: they must match each other
   # and the driver.
 
@@ -696,9 +696,21 @@ sandboxes never send telemetry.
 ## Known limitations
 
 - **Operator mode** (`driver.workspaceMode=operator`): the namespace owner must
-  grant the driver `create` and `delete` on Secrets in each operator namespace.
-  Upstream ships that Role in its separate `openshell-workspace` chart; this
-  chart does not.
+  grant the driver a Role in each operator namespace: `create` and `delete` on
+  Secrets, and, since upstream v0.1.7 (whose in-place sandbox updates must rule
+  out every remaining workload pod), `create`, `delete`, `get`, `list`, `patch`
+  and `watch` on Pods plus `create` and `get` on Services and NetworkPolicies.
+  Upstream ships that Role in its separate `openshell-workspace` chart (use the
+  version matching `upstream.version`); this chart does not.
+- **No additional destination CA** (upstream's
+  `supervisor.network.additionalCaConfigMapName`, v0.1.7). Upstream's gateway
+  accepts `[openshell.supervisor.network] additional_ca_bundle` only for a
+  compute driver it links in-process and refuses it for a remote one, which this
+  chart's driver always is, so the chart refuses the value.
+- **No supervisor app listener** (upstream v0.1.7's
+  `sandbox_runtime.app_listener`). It belongs to the in-gateway driver and the
+  shared-supervisor pods, which this chart does not render; upstream's
+  standalone driver leaves it off, and so does this one.
 - **No Istio sidecars in sandbox workloads.** Upstream refuses a workload pod
   that receives a projected ServiceAccount token, which a sidecar brings, so
   sandbox workloads always carry `sidecar.istio.io/inject: "false"`

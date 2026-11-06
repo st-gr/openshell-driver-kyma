@@ -276,6 +276,16 @@ PY
 grep -q '^ *grpc_rate_limit_requests = 120$' "$WORK/gateway-rate-limit.toml" \
   || { echo "ERROR: the rate-limit render has no grpc_rate_limit_requests; nothing to test" >&2; exit 1; }
 check_config rate-limit "$WORK/gateway-rate-limit.toml"
+# Hashed service hostnames (gateway.serviceHostnameFormat, upstream v0.1.7 and later).
+render templates/gateway-config.yaml --set gateway.serviceHostnameFormat=hashed > "$WORK/rendered-hostname.yaml"
+python3 - "$WORK/rendered-hostname.yaml" "$WORK/gateway-hostname.toml" <<'PY'
+import sys, yaml
+doc = yaml.safe_load(open(sys.argv[1]))
+open(sys.argv[2], "w").write(doc["data"]["gateway.toml"])
+PY
+grep -q '^ *service_hostname_format = "hashed"$' "$WORK/gateway-hostname.toml" \
+  || { echo "ERROR: the hostname render has no service_hostname_format; nothing to test" >&2; exit 1; }
+check_config service-hostname "$WORK/gateway-hostname.toml"
 # The gateway's OCSF audit log (gateway.ocsfLog), both rotation modes.
 for variant in daily never; do
   render templates/gateway-config.yaml --set gateway.ocsfLog.enabled=true \

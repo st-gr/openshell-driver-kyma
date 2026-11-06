@@ -26,9 +26,24 @@ driver:
   runtimeClassName: example-runtime
   sandboxSshSocketPath: /run/example-ssh.sock
   bindAddress: 127.0.0.1:50062
-  otlpEndpoint: http://collector.example:4317
+  otlpEndpoint: https://collector.example:4317
+  otlpProtocol: http/protobuf
+  otlpCaFile: /etc/otlp-tls/ca.crt
+  otlpCertFile: /etc/otlp-tls/tls.crt
+  otlpKeyFile: /etc/otlp-tls/tls.key
   otlpOcsfEndpoint: http://ocsf-collector.example:4317
+  otlpOcsfProtocol: grpc
   otlpOcsfSchemaVersion: "1.3"
+  otlpAgentEndpoint: http://agent-collector.example:4318
+  otlpAgentProtocol: http/protobuf
+  extraVolumes:
+    - name: otlp-tls
+      secret:
+        secretName: example-otlp-tls
+  extraVolumeMounts:
+    - name: otlp-tls
+      mountPath: /etc/otlp-tls
+      readOnly: true
   allowedPodAnnotations: [example.com/team, example.org/*]
   allowedPodLabels: [example.com/cost-center]
   gatewayName: all-options

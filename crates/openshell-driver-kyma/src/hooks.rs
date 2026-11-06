@@ -7,10 +7,10 @@
 //! provider-credential flows, while upstream's driver creates the Managed
 //! namespace inside `CreateSandbox` itself.
 
-use openshell_core::proto::compute::v1::DriverSandbox;
+use openshell_core::proto::compute::v1::{DriverSandbox, SandboxEnvironmentUpdate};
 use tonic::Status;
 
-use crate::enrich::{enrich, EnrichConfig};
+use crate::enrich::{enrich, enrich_environment_update, EnrichConfig};
 use crate::namespaces::NamespaceLabeler;
 use crate::service::KymaHooks;
 
@@ -45,6 +45,10 @@ impl KymaHooks for KymaHookSet {
     /// label must be applied there too, before the first pod is admitted.
     fn prepares_workspace_before_create(&self) -> bool {
         self.namespaces.is_some()
+    }
+
+    fn enrich_environment_update(&self, update: &mut SandboxEnvironmentUpdate) {
+        enrich_environment_update(update, &self.enrich);
     }
 }
 

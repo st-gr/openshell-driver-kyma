@@ -42,6 +42,16 @@ scripts/check-chart-render.sh fails CI when an upstream option is missing here.
 - name: OPENSHELL_OTLP_ENDPOINT
   value: {{ . | quote }}
 {{- end }}
+{{- with include "openshell-driver-kyma.driverOtlpProtocol" . }}
+- name: OPENSHELL_OTLP_PROTOCOL
+  value: {{ . | quote }}
+{{- end }}
+{{- range $key, $name := dict "otlpCaFile" "OPENSHELL_OTLP_CA_FILE" "otlpCertFile" "OPENSHELL_OTLP_CERT_FILE" "otlpKeyFile" "OPENSHELL_OTLP_KEY_FILE" "otlpOcsfProtocol" "OPENSHELL_OTLP_OCSF_PROTOCOL" "otlpAgentEndpoint" "OPENSHELL_OTLP_AGENT_ENDPOINT" "otlpAgentProtocol" "OPENSHELL_OTLP_AGENT_PROTOCOL" }}
+{{- with get $d $key }}
+- name: {{ $name }}
+  value: {{ . | quote }}
+{{- end }}
+{{- end }}
 {{- with $d.otlpOcsfEndpoint }}
 - name: OPENSHELL_OTLP_OCSF_ENDPOINT
   value: {{ . | quote }}

@@ -16,10 +16,10 @@ use openshell_core::proto::compute::v1::{
     CreateSandboxRequest, CreateSandboxResponse, DeleteSandboxRequest, DeleteSandboxResponse,
     DeleteWorkspaceRequest, DeleteWorkspaceResponse, DriverSandbox, EnsureWorkspaceRequest,
     EnsureWorkspaceResponse, GetCapabilitiesRequest, GetCapabilitiesResponse, GetSandboxRequest,
-    GetSandboxResponse, ListSandboxesRequest, ListSandboxesResponse, StartSandboxRequest,
-    StartSandboxResponse, StopSandboxRequest, StopSandboxResponse, SuspendSandboxRequest,
-    SuspendSandboxResponse, ValidateSandboxCreateRequest, ValidateSandboxCreateResponse,
-    WatchSandboxesRequest,
+    GetSandboxResponse, ListSandboxesRequest, ListSandboxesResponse, SandboxEnvironmentUpdate,
+    StartSandboxRequest, StartSandboxResponse, StopSandboxRequest, StopSandboxResponse,
+    SuspendSandboxRequest, SuspendSandboxResponse, ValidateSandboxCreateRequest,
+    ValidateSandboxCreateResponse, WatchSandboxesRequest,
 };
 use tonic::{Request, Response, Status};
 
@@ -45,6 +45,10 @@ pub trait KymaHooks: Send + Sync + 'static {
     fn prepares_workspace_before_create(&self) -> bool {
         false
     }
+
+    /// Edits a configuration update's replacement environment before upstream
+    /// sees it. Must not fail. The default leaves it unchanged.
+    fn enrich_environment_update(&self, _update: &mut SandboxEnvironmentUpdate) {}
 }
 
 /// Hooks that do nothing: the driver behaves exactly like upstream's.

@@ -9,7 +9,7 @@
 //! `template.environment`, so a caller's spec environment also outranks
 //! enrichment.
 
-use openshell_core::proto::compute::v1::DriverSandbox;
+use openshell_core::proto::compute::v1::{DriverSandbox, SandboxEnvironmentUpdate};
 
 /// Istio must not inject a sidecar into sandbox workloads: upstream's workload
 /// fence gives them no egress, the sidecar would sit outside the boundary, and
@@ -65,6 +65,26 @@ pub fn enrich(sandbox: &mut DriverSandbox, config: &EnrichConfig) {
     }
 }
 
+/// Add Kyma environment to a configuration update's environment, never
+/// overwriting a key the caller set.
+///
+/// Upstream (v0.1.7 and later) replaces the workload's whole environment with an
+/// update's, except `OPENSHELL_*` entries, which it keeps and refuses in the
+/// request. Without this an update would drop what `enrich` added at create,
+/// telemetry opt-out included. `OPENSHELL_*` keys are skipped: upstream keeps
+/// the container's own.
+pub fn enrich_environment_update(update: &mut SandboxEnvironmentUpdate, config: &EnrichConfig) {
+    for (key, value) in &config.environment {
+        if key.starts_with("OPENSHELL_") {
+            continue;
+        }
+        update
+            .values
+            .entry(key.clone())
+            .or_insert_with(|| value.clone());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97,6 +117,30 @@ mod tests {
         allow_enriched_labels(&mut cfg.allowed_pod_labels);
         assert_eq!(cfg.allowed_pod_labels.len(), 3);
         assert!(cfg.pod_label_allowed("app"));
+    }
+
+    #[test]
+    fn environment_update_gets_kyma_environment_without_overriding_the_caller() {
+        let config = EnrichConfig {
+            environment: vec![
+                (
+                    "ANTHROPIC_BASE_URL".to_string(),
+                    "http://proxy:8080".to_string(),
+                ),
+                (CLAUDE_TELEMETRY_ENV.to_string(), "1".to_string()),
+                ("OPENSHELL_LOG_LEVEL".to_string(), "debug".to_string()),
+            ],
+        };
+        let mut update = SandboxEnvironmentUpdate::default();
+        update
+            .values
+            .insert("ANTHROPIC_BASE_URL".to_string(), "http://mine".to_string());
+        enrich_environment_update(&mut update, &config);
+        assert_eq!(update.values["ANTHROPIC_BASE_URL"], "http://mine");
+        assert_eq!(update.values[CLAUDE_TELEMETRY_ENV], "1");
+        // Upstream refuses OPENSHELL_* in an update and keeps the container's.
+        assert!(!update.values.contains_key("OPENSHELL_LOG_LEVEL"));
+        assert_eq!(update.values.len(), 2);
     }
 
     #[test]

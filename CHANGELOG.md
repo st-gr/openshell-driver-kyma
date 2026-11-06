@@ -4,6 +4,68 @@ All notable changes to openshell-driver-kyma are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.13.0] — 2026-11-06
+
+Moves the driver, the chart's `upstream.version` and the gateway, supervisor and
+sandbox-runtime image digests to upstream OpenShell v0.1.7 (from v0.1.6).
+
+### Changed
+
+- **Upstream v0.1.7.** The three `openshell-*` git dependencies, `Cargo.lock`,
+  `upstream.version` and the three image digests move together;
+  `scripts/check-image-digests.sh` confirms the digests are upstream's for v0.1.7.
+- **The driver's OTLP options follow upstream's `SupervisorOtlpArgs`**, and
+  `src/main.rs` mirrors upstream's v0.1.7 `main()` (tracing protocol and TLS
+  files, the deprecation warning, the third driver argument, the new service);
+  `scripts/upstream-main-rs.sha256` records that review.
+- **OCSF schema version deprecated.** Upstream emits native OCSF 1.8.0 only and
+  ignores `OPENSHELL_OTLP_OCSF_SCHEMA_VERSION` and the gateway's `schema_version`,
+  with a warning. `driver.otlpOcsfSchemaVersion` no longer needs
+  `driver.otlpOcsfEndpoint`, and `gateway.ocsfLog.schemaVersion` accepts any
+  value, as upstream's chart does; both are ignored.
+
+### Added
+
+- **In-place sandbox configuration updates.** The driver serves upstream's new
+  `ComputeDriverConfigurationUpdates` service (`UpdateSandboxConfiguration`).
+  An environment update replaces the workload's whole environment, so the Kyma
+  layer adds its own environment (`driver.disableClaudeTelemetry`,
+  `driver.sandboxEnv`) to it first, never overriding the caller's keys, as it
+  does on create. Without that, an update would have dropped the telemetry
+  opt-out. Updates carry no labels, so the enriched labels stay.
+- `driver.otlpProtocol`, `driver.otlpCaFile`, `driver.otlpCertFile`,
+  `driver.otlpKeyFile`, `driver.otlpOcsfProtocol`, `driver.otlpAgentEndpoint`
+  and `driver.otlpAgentProtocol` (`OPENSHELL_OTLP_*`), with render-time refusals
+  for an unknown protocol and for a client certificate without its key. With
+  `driver.otlpEndpoint` empty, the protocol follows the gateway's in
+  `gatewayConfig."openshell.gateway.otlp"`.
+- `driver.extraVolumes` and `driver.extraVolumeMounts`, for files the driver
+  container reads (such as the OTLP certificates).
+- `gateway.serviceHostnameFormat` (`service_hostname_format`): `readable`
+  (default) or `hashed`, for several gateways sharing one service domain.
+- `scripts/check-upstream-args.sh --print-env` follows the flattened
+  `SupervisorOtlpArgs` into upstream's `sandbox_env.rs`, so the chart render
+  check still requires every upstream OTLP variable; any other flattened struct
+  fails the check.
+
+### Not supported (upstream v0.1.7)
+
+- `supervisor.network.additionalCaConfigMapName` and a `gatewayConfig`
+  `openshell.supervisor.network` table are refused: upstream's gateway refuses
+  `additional_ca_bundle` for a remote compute driver, and this chart's driver is
+  one. Upstream's standalone driver passes no trust bundle either.
+- The supervisor app listener (`sandbox_runtime.app_listener`) belongs to the
+  in-gateway driver and shared-supervisor pods, which this chart does not render;
+  it stays off, as in upstream's standalone driver.
+
+### Upgrading
+
+- Operator mode: the Role the namespace owner grants the driver now also needs
+  Pod `create`, `delete`, `get`, `list`, `patch` and `watch` and Service and
+  NetworkPolicy `create` and `get` (upstream's v0.1.7 `openshell-workspace`
+  chart). Shared and Managed mode need nothing new.
+- Upgrade the CLI to v0.1.7 with the gateway.
+
 ## [0.12.0] — 2026-11-02
 
 Moves the driver, the chart's `upstream.version` and the gateway, supervisor and
