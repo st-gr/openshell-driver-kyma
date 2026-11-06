@@ -129,7 +129,7 @@ try good-all-options '' t -f "$ALL_OPTIONS"
 # in with --set-json: `--set driver.sandboxEnv[0]=A=1,2` never reaches the chart,
 # helm's own parser stops at the comma with `key "2" has no value`.
 n=0
-for entry in 'A=1,2' 'NO_EQUALS' '=value' 'OPENSHELL_FOO=bar'; do
+for entry in 'A=1,2' 'NO_EQUALS' '=value' 'OPENSHELL_FOO=bar' 'my.flag=1' 'X-Y=1' '1VAR=1' 'A=line\nbreak'; do
 	try "bad-3b-$n" "$entry" t --set-json "driver.sandboxEnv=[\"$entry\"]"
 	n=$((n + 1))
 done

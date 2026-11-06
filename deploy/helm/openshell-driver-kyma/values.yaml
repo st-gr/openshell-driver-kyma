@@ -222,7 +222,9 @@ driver:
   # Its protocol (OPENSHELL_OTLP_PROTOCOL, upstream v0.1.7 and later): grpc or
   # http/protobuf (conventionally port 4318). Empty is upstream's default, grpc,
   # except that with otlpEndpoint empty it follows the gateway's protocol in
-  # gatewayConfig."openshell.gateway.otlp".
+  # gatewayConfig."openshell.gateway.otlp". That fallback copies the endpoint and
+  # protocol only: for an https:// collector with a private CA or a client
+  # certificate, set otlpCaFile, otlpCertFile and otlpKeyFile below too.
   otlpProtocol: ""
   # PEM files for an https:// collector (OPENSHELL_OTLP_CA_FILE, _CERT_FILE,
   # _KEY_FILE): paths in the driver container, mounted with extraVolumes and

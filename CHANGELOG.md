@@ -32,7 +32,17 @@ sandbox-runtime image digests to upstream OpenShell v0.1.7 (from v0.1.6).
   layer adds its own environment (`driver.disableClaudeTelemetry`,
   `driver.sandboxEnv`) to it first, never overriding the caller's keys, as it
   does on create. Without that, an update would have dropped the telemetry
-  opt-out. Updates carry no labels, so the enriched labels stay.
+  opt-out. Updates carry no labels, so the enriched labels stay. Changing the
+  Kyma environment (`driver.sandboxEnv`, `driver.disableClaudeTelemetry`) while
+  an update is in flight makes upstream refuse its retry ("recorded update
+  environment does not match target") until the old values are back, so change
+  them with no update pending.
+- **`driver.sandboxEnv` keys must be letters, digits and `_`, not starting with a
+  digit, and values must have no line breaks** (driver startup and render time).
+  Upstream v0.1.7 refuses anything else in an update's environment, and every
+  environment update carries these entries, so one such key would make every
+  update of every sandbox fail. Kubernetes accepted such names before, so a values
+  file with `my.flag=1` now fails to render.
 - `driver.otlpProtocol`, `driver.otlpCaFile`, `driver.otlpCertFile`,
   `driver.otlpKeyFile`, `driver.otlpOcsfProtocol`, `driver.otlpAgentEndpoint`
   and `driver.otlpAgentProtocol` (`OPENSHELL_OTLP_*`), with render-time refusals

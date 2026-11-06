@@ -24,11 +24,12 @@
 # UPSTREAM_TAG overrides the tag read from the workspace Cargo.toml.
 # UPSTREAM_MAIN_RS points at a local upstream main.rs instead of fetching, and
 # UPSTREAM_MAIN_SHA256 at another recorded-hash file (both for tests).
-# --print-env also lists the options of a `#[command(flatten)]` struct in
+# --print-env resolves `env = CONSTANT` through openshell-core's config.rs and
+# sandbox_env.rs at the same tag (or UPSTREAM_CORE_CONFIG_RS and
+# UPSTREAM_SANDBOX_ENV_RS), and also lists the options of a flattened struct in
 # upstream's Args. Only `SupervisorOtlpArgs` (upstream v0.1.7 and later, in
-# openshell-core's sandbox_env.rs, fetched at the same tag or read from
-# UPSTREAM_SANDBOX_ENV_RS) is known; any other flattened struct exits 2, so its
-# options can never drop out of the list unnoticed.
+# sandbox_env.rs) is known; any other flattened struct, or a constant neither
+# file defines, exits 2, so no option can drop out of the list unnoticed.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -59,19 +60,24 @@ else
 	curl -fsSL --retry 3 "$url" -o "$WORK/upstream.rs" || { echo "could not fetch $url" >&2; exit 2; }
 fi
 : >"$WORK/sandbox_env.rs"
-if [[ $MODE == --print-env ]] && grep -q 'SupervisorOtlpArgs' "$WORK/upstream.rs"; then
-	if [[ -n ${UPSTREAM_SANDBOX_ENV_RS:-} ]]; then
-		cp "$UPSTREAM_SANDBOX_ENV_RS" "$WORK/sandbox_env.rs"
+: >"$WORK/core_config.rs"
+core_file() { # local-override destination path-in-openshell-core
+	if [[ -n $1 ]]; then
+		cp "$1" "$2"
 	else
-		url="https://raw.githubusercontent.com/NVIDIA/OpenShell/${TAG}/crates/openshell-core/src/sandbox_env.rs"
-		curl -fsSL --retry 3 "$url" -o "$WORK/sandbox_env.rs" || { echo "could not fetch $url" >&2; exit 2; }
+		url="https://raw.githubusercontent.com/NVIDIA/OpenShell/${TAG}/crates/openshell-core/src/$3"
+		curl -fsSL --retry 3 "$url" -o "$2" || { echo "could not fetch $url" >&2; exit 2; }
 	fi
+}
+if [[ $MODE == --print-env ]]; then
+	core_file "${UPSTREAM_SANDBOX_ENV_RS:-}" "$WORK/sandbox_env.rs" sandbox_env.rs
+	core_file "${UPSTREAM_CORE_CONFIG_RS:-}" "$WORK/core_config.rs" config.rs
 fi
 
-python3 - "$WORK/upstream.rs" "$OURS" "$MODE" "$TAG" "$RECORDED" "$WORK/sandbox_env.rs" <<'PY'
+python3 - "$WORK/upstream.rs" "$OURS" "$MODE" "$TAG" "$RECORDED" "$WORK/sandbox_env.rs" "$WORK/core_config.rs" <<'PY'
 import difflib, hashlib, re, subprocess, sys
 
-upstream_path, ours_path, mode, tag, recorded_path, sandbox_env_path = sys.argv[1:7]
+upstream_path, ours_path, mode, tag, recorded_path, sandbox_env_path, core_config_path = sys.argv[1:8]
 upstream = open(upstream_path).read().splitlines()
 
 def span(lines, start_re, what, where):
@@ -106,7 +112,10 @@ def env_names(text, consts):
     """The env names of `#[arg(..., env = ...)]` attributes in text: string
     literals, and identifiers resolved through consts."""
     names = []
-    for literal, ident in re.findall(r'env\s*=\s*(?:"([A-Z0-9_]+)"|([A-Z][A-Z0-9_]*)\b)', text):
+    # `env` as a whole word; a constant may be path-qualified (sandbox_env::X).
+    for literal, ident in re.findall(
+            r'\benv\s*=\s*(?:"([A-Z0-9_]+)"|((?:[a-z_][a-z0-9_]*::)*[A-Z][A-Z0-9_]*)\b)', text):
+        ident = ident.rsplit("::", 1)[-1]
         if literal:
             names.append(literal)
         elif ident in consts:
@@ -117,18 +126,22 @@ def env_names(text, consts):
     return names
 
 if mode == "--print-env":
+    const_re = r'pub const ([A-Z0-9_]+): &str = "([A-Z0-9_]+)";'
+    sandbox_env = open(sandbox_env_path).read()
+    consts = dict(re.findall(const_re, open(core_config_path).read()))
+    consts.update(re.findall(const_re, sandbox_env))
     args = body(upstream, ARGS_RE, "struct Args", f"upstream {tag}")
-    names = env_names("\n".join(args), {})
+    names = env_names("\n".join(args), consts)
     names += re.findall(r'std::env::var\(\s*"([A-Z0-9_]+)"', "\n".join(upstream))
     for i, line in enumerate(args):
-        if "#[command(flatten)]" not in line:
+        # Any #[command(...)] or #[clap(...)] attribute that flattens.
+        if not re.search(r"#\[(?:command|clap)\([^)]*\bflatten\b", line):
             continue
         field = args[i + 1] if i + 1 < len(args) else ""
         if not re.search(r":\s*SupervisorOtlpArgs,\s*$", field):
             print(f"error: unknown flattened struct in upstream Args: {field.strip()}", file=sys.stderr)
             sys.exit(2)
-        lines = open(sandbox_env_path).read().splitlines()
-        consts = dict(re.findall(r'pub const ([A-Z0-9_]+): &str = "([A-Z0-9_]+)";', "\n".join(lines)))
+        lines = sandbox_env.splitlines()
         flat = body(lines, r"^pub struct SupervisorOtlpArgs \{", "pub struct SupervisorOtlpArgs",
                     f"upstream {tag} sandbox_env.rs")
         names += env_names("\n".join(flat), consts)

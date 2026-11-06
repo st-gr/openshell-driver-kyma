@@ -92,6 +92,20 @@ impl KymaArgs {
                          key: upstream strips it from the sandbox environment (only {LOG_LEVEL} is kept)"
                     ));
                 }
+                // Upstream v0.1.7's UpdateSandboxConfiguration refuses these
+                // (image_update.rs validate_configuration), and every
+                // environment update carries the Kyma entries.
+                if key.as_bytes()[0].is_ascii_digit()
+                    || !key.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+                    || value.contains(['\0', '\n', '\r'])
+                {
+                    return Err(format!(
+                        "--kyma-sandbox-env entry `{entry}` needs a KEY of letters, digits and `_` \
+                         not starting with a digit, and a VALUE without NUL or line breaks: upstream \
+                         refuses anything else in an UpdateSandboxConfiguration environment, which \
+                         would then fail for every sandbox"
+                    ));
+                }
                 Ok((key.to_string(), value.to_string()))
             })
             .collect()
@@ -251,6 +265,26 @@ mod tests {
             args.enrich_config().environment,
             vec![("OPENSHELL_LOG_LEVEL".to_string(), "debug".to_string())]
         );
+    }
+
+    // Upstream (v0.1.7) refuses these in an UpdateSandboxConfiguration
+    // environment, and the Kyma layer adds every entry to each such update, so
+    // one would make every environment update of every sandbox fail.
+    #[test]
+    fn keys_and_values_upstream_refuses_in_an_update_are_rejected() {
+        for entry in ["my.flag=1", "X-Y=1", "1VAR=1", "A=line\nbreak", "A=cr\r"] {
+            let err = parse(&["--kyma-sandbox-env", entry])
+                .validate()
+                .unwrap_err();
+            assert!(err.contains(entry), "must name the entry: {err}");
+            assert!(
+                err.contains("UpdateSandboxConfiguration"),
+                "must say why: {err}"
+            );
+        }
+        assert!(parse(&["--kyma-sandbox-env", "_OK_9=a b=c"])
+            .validate()
+            .is_ok());
     }
 
     // Both the flag and the environment variable split on commas; the Helm
