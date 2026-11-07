@@ -129,7 +129,7 @@ try good-all-options '' t -f "$ALL_OPTIONS"
 # in with --set-json: `--set driver.sandboxEnv[0]=A=1,2` never reaches the chart,
 # helm's own parser stops at the comma with `key "2" has no value`.
 n=0
-for entry in 'A=1,2' 'NO_EQUALS' '=value' 'OPENSHELL_FOO=bar'; do
+for entry in 'A=1,2' 'NO_EQUALS' '=value' 'OPENSHELL_FOO=bar' 'my.flag=1' 'X-Y=1' '1VAR=1' 'A=line\nbreak'; do
 	try "bad-3b-$n" "$entry" t --set-json "driver.sandboxEnv=[\"$entry\"]"
 	n=$((n + 1))
 done
@@ -146,11 +146,21 @@ id34=$(printf '%034d' 0 | tr 0 a)
 try bad-3c-too-long "$id34" t --set driver.workspaceMode=managed --set "gateway.sandboxJwt.gatewayId=$id34"
 try bad-3c-long-release 'prod-sandboxes-openshell-driver-kyma' prod-sandboxes --set driver.workspaceMode=managed
 try bad-3c-not-a-label 'Bad_ID' t --set driver.workspaceMode=managed --set gateway.sandboxJwt.gatewayId=Bad_ID
-# Upstream v0.1.6: the OCSF schema version needs the OCSF endpoint (main.rs Args `requires`), and
-# the pod annotation/label allowlists refuse malformed entries and the reserved domains
+# Upstream v0.1.7: the OCSF schema version is deprecated and ignored, so it renders
+# alone; the OTLP protocols are clap enums and the client certificate and key
+# `requires` each other (openshell-core sandbox_env.rs SupervisorOtlpArgs). The pod
+# annotation/label allowlists refuse malformed entries and the reserved domains
 # (config.rs validate_pod_metadata_allowlist).
 try good-3d-ocsf '' t --set driver.otlpOcsfEndpoint=http://c.example:4317 --set driver.otlpOcsfSchemaVersion=1.3
-try bad-3d-ocsf-version-alone 'requires driver.otlpOcsfEndpoint' t --set driver.otlpOcsfSchemaVersion=1.3
+try good-3d-ocsf-version-alone '' t --set driver.otlpOcsfSchemaVersion=1.3
+try good-3d-otlp-protocols '' t --set driver.otlpEndpoint=http://c.example:4318 --set driver.otlpProtocol=http/protobuf \
+	--set driver.otlpOcsfEndpoint=http://c.example:4317 --set driver.otlpOcsfProtocol=grpc \
+	--set driver.otlpAgentEndpoint=http://c.example:4318 --set driver.otlpAgentProtocol=http/protobuf
+try bad-3d-otlp-protocol 'driver.otlpProtocol must be empty, grpc or http/protobuf, got "http"' t --set driver.otlpProtocol=http
+try bad-3d-otlp-ocsf-protocol 'driver.otlpOcsfProtocol must be empty, grpc or http/protobuf' t --set driver.otlpOcsfProtocol=HTTP
+try bad-3d-otlp-agent-protocol 'driver.otlpAgentProtocol must be empty, grpc or http/protobuf' t --set driver.otlpAgentProtocol=json
+try bad-3d-otlp-cert-alone 'driver.otlpCertFile and driver.otlpKeyFile must be set together' t --set driver.otlpCertFile=/tls/tls.crt
+try bad-3d-otlp-key-alone 'driver.otlpCertFile and driver.otlpKeyFile must be set together' t --set driver.otlpKeyFile=/tls/tls.key
 try good-3d-allowlist '' t --set 'driver.allowedPodAnnotations={example.com/team,example.org/*,plain-key}' \
 	--set 'driver.allowedPodLabels={example.com/cost-center}'
 try bad-3d-allowlist-reserved 'reserved for OpenShell' t --set 'driver.allowedPodAnnotations={openshell.ai/x}'
@@ -461,7 +471,13 @@ try good-9-ocsf-never '' t --set gateway.ocsfLog.enabled=true --set gateway.ocsf
 	--set-json 'gateway.extraVolumes=[{"name":"ocsf","persistentVolumeClaim":{"claimName":"ocsf-log"}}]' \
 	--set-json 'gateway.extraVolumeMounts=[{"name":"ocsf","mountPath":"/var/log/openshell"}]'
 try bad-9-ocsf-rotation 'gateway.ocsfLog.rotation' t --set gateway.ocsfLog.enabled=true --set gateway.ocsfLog.rotation=hourly
-try bad-9-ocsf-schema 'gateway.ocsfLog.schemaVersion' t --set gateway.ocsfLog.enabled=true --set-string gateway.ocsfLog.schemaVersion=1.2
+# Upstream v0.1.7 ignores the schema version (deprecated, a warning), and its chart
+# no longer checks it.
+try good-9-ocsf-schema-deprecated '' t --set gateway.ocsfLog.enabled=true --set-string gateway.ocsfLog.schemaVersion=1.2
+try good-9-hostname-hashed '' t --set gateway.serviceHostnameFormat=hashed
+try bad-9-hostname-format 'gateway.serviceHostnameFormat must be empty, readable or hashed, got "short"' t --set gateway.serviceHostnameFormat=short
+try bad-9-supervisor-network 'supervisor.network.additionalCaConfigMapName is not supported' t \
+	--set supervisor.network.additionalCaConfigMapName=destination-ca
 try bad-9-ocsf-path 'gateway.ocsfLog.path' t --set gateway.ocsfLog.enabled=true --set gateway.ocsfLog.path=
 try bad-9-ocsf-queue 'gateway.ocsfLog.queueCapacity' t --set gateway.ocsfLog.enabled=true --set gateway.ocsfLog.queueCapacity=0
 try bad-9-ocsf-max-files 'gateway.ocsfLog.maxFiles' t --set gateway.ocsfLog.enabled=true --set gateway.ocsfLog.maxFiles=0
@@ -950,26 +966,28 @@ def effective_rules(documents, where):
 
 SANDBOX_VERBS = ["create", "delete", "get", "list", "patch", "update", "watch"]
 # Blocks of (apiGroup, resource, verbs[, resourceNames]) rows. Upstream's come from
-# the v0.1.6 (unchanged since v0.1.4) templates of deploy/helm/openshell (role.yaml for shared mode, whose
+# the v0.1.7 templates of deploy/helm/openshell (role.yaml for shared mode, whose
 # Role holds the namespaced rights; clusterrole.yaml for the cluster-wide rights of
 # every mode and the namespaced rights of the other modes); the line numbers refer to those.
-PVC_GET = [("", "persistentvolumeclaims", ["get"])]           # role.yaml:13-18, clusterrole.yaml:18-22; with allowDriverConfig
-WORKLOAD = [("agents.x-k8s.io", "sandboxes", SANDBOX_VERBS),                        # role.yaml:19-31, clusterrole.yaml:59-70
+# The rules are unchanged since v0.1.4: v0.1.7 only adds ConfigMap get/create for
+# supervisor.network.additionalCaConfigMapName, which this chart refuses.
+PVC_GET = [("", "persistentvolumeclaims", ["get"])]           # role.yaml:18-23, clusterrole.yaml:28-32; with allowDriverConfig
+WORKLOAD = [("agents.x-k8s.io", "sandboxes", SANDBOX_VERBS),                        # role.yaml:24-36, clusterrole.yaml:69-81
             ("agents.x-k8s.io", "sandboxes/status", SANDBOX_VERBS),
-            ("", "events", ["get", "list", "watch"]),                                # role.yaml:32-44, clusterrole.yaml:72-79
-            ("", "pods", ["create", "delete", "get", "list", "patch", "watch"]),     # role.yaml:46-56, clusterrole.yaml:80-90
-            ("", "services", ["create", "get"]),                                     # role.yaml:57-59, clusterrole.yaml:93-95
-            ("networking.k8s.io", "networkpolicies", ["create", "get"])]             # role.yaml:65-67, clusterrole.yaml:96-98
-BOOTSTRAP_SECRETS = [("", "secrets", ["create", "delete"])]   # role.yaml:60-64; clusterrole.yaml:100-108, managed only
-NODE_READER = [("node.k8s.io", "runtimeclasses", ["get"]),                          # clusterrole.yaml:12-14
-               ("scheduling.k8s.io", "priorityclasses", ["get"]),                   # clusterrole.yaml:15-17
-               ("authentication.k8s.io", "tokenreviews", ["create"]),               # clusterrole.yaml:25-31
-               ("", "nodes", ["get", "list", "watch"])]                             # clusterrole.yaml:32-35
-NAMESPACE_GET = [("", "namespaces", ["get"])]                                       # clusterrole.yaml:43-48, every mode
-NAMESPACE_DISCOVERY = [("", "namespaces", ["list", "watch"])]                       # clusterrole.yaml:49-52, managed and operator
-NAMESPACE_LIFECYCLE = [("", "namespaces", ["create", "delete"])]                    # clusterrole.yaml:53-56, managed
-WORKSPACE_SERVICEACCOUNTS = [("", "serviceaccounts", ["create", "get"])]            # clusterrole.yaml:109-116, managed
-# clusterrole.yaml:118-129 applies the SSH-ingress policy in each workspace. Upstream gates it on its
+            ("", "events", ["get", "list", "watch"]),                                # role.yaml:37-44, clusterrole.yaml:82-89
+            ("", "pods", ["create", "delete", "get", "list", "patch", "watch"]),     # role.yaml:51-61, clusterrole.yaml:90-100
+            ("", "services", ["create", "get"]),                                     # role.yaml:62-64, clusterrole.yaml:119-122
+            ("networking.k8s.io", "networkpolicies", ["create", "get"])]             # role.yaml:70-72, clusterrole.yaml:123-125
+BOOTSTRAP_SECRETS = [("", "secrets", ["create", "delete"])]   # role.yaml:65-69; clusterrole.yaml:127-132, managed only
+NODE_READER = [("node.k8s.io", "runtimeclasses", ["get"]),                          # clusterrole.yaml:22-24
+               ("scheduling.k8s.io", "priorityclasses", ["get"]),                   # clusterrole.yaml:25-27
+               ("authentication.k8s.io", "tokenreviews", ["create"]),               # clusterrole.yaml:35-40
+               ("", "nodes", ["get", "list", "watch"])]                             # clusterrole.yaml:41-48
+NAMESPACE_GET = [("", "namespaces", ["get"])]                                       # clusterrole.yaml:53-58, every mode
+NAMESPACE_DISCOVERY = [("", "namespaces", ["list", "watch"])]                       # clusterrole.yaml:59-62, managed and operator
+NAMESPACE_LIFECYCLE = [("", "namespaces", ["create", "delete"])]                    # clusterrole.yaml:63-66, managed
+WORKSPACE_SERVICEACCOUNTS = [("", "serviceaccounts", ["create", "get"])]            # clusterrole.yaml:134-140, managed
+# clusterrole.yaml:141-152 applies the SSH-ingress policy in each workspace. Upstream gates it on its
 # networkPolicy.enabled, which sets managed_ssh_ingress.enabled there; here it follows the effective
 # managed SSH ingress, which derives from networkPolicy.enabled with the in-pod gateway (see check 4).
 SSH_INGRESS_POLICY = [("networking.k8s.io", "networkpolicies", ["get", "create", "patch", "update"])]

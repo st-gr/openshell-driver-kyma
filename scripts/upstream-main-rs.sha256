@@ -7,4 +7,4 @@
 # fails when upstream's differs, printing the diff and the line to put below once
 # the change is mirrored into src/main.rs and reviewed. Never update the line
 # without that review: it records that src/main.rs matches this upstream main().
-e11fc5107b6e8d9b3eabc99dfdd3bdf952ec423c2205c38e927f9dd2dc378325  v0.1.2
+37a2f5e85df5ac74bb0c63075ae7e59598ac34a3c4a252da8256308fe1312b64  v0.1.7

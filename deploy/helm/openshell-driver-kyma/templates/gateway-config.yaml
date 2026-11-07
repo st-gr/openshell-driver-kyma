@@ -13,15 +13,22 @@ OcsfLogConfig). A string is always true in a template, so "false" would enable i
 {{- if not (has $ocsf.rotation (list "daily" "never")) -}}
 {{- fail (printf "gateway.ocsfLog.rotation must be daily or never, got %q." (toString $ocsf.rotation)) -}}
 {{- end -}}
-{{- if not (has (toString $ocsf.schemaVersion) (list "" "1.1" "1.3")) -}}
-{{- fail (printf "gateway.ocsfLog.schemaVersion must be empty, 1.1 or 1.3, got %q." (toString $ocsf.schemaVersion)) -}}
-{{- end -}}
 {{- if or (lt (int $ocsf.queueCapacity) 1) (lt (int $ocsf.queueMaxBytes) 1) -}}
 {{- fail "gateway.ocsfLog.queueCapacity and gateway.ocsfLog.queueMaxBytes must be positive." -}}
 {{- end -}}
 {{- if and (eq $ocsf.rotation "daily") (lt (int $ocsf.maxFiles) 1) -}}
 {{- fail "gateway.ocsfLog.maxFiles must be positive when gateway.ocsfLog.rotation is daily." -}}
 {{- end -}}
+{{- end -}}
+{{- if not (has (toString .Values.gateway.serviceHostnameFormat) (list "" "readable" "hashed")) -}}
+{{- fail (printf "gateway.serviceHostnameFormat must be empty, readable or hashed, got %q." (toString .Values.gateway.serviceHostnameFormat)) -}}
+{{- end -}}
+{{- /* Upstream's chart mounts this ConfigMap as [openshell.supervisor.network]
+additional_ca_bundle, which its gateway refuses for a remote compute driver
+(openshell-server lib.rs: "uses an unsupported remote endpoint"), and this chart's
+driver is always one. */ -}}
+{{- with dig "network" "additionalCaConfigMapName" "" (.Values.supervisor | default dict) -}}
+{{- fail "supervisor.network.additionalCaConfigMapName is not supported: upstream's gateway accepts an additional destination CA only for a compute driver it links in-process, and this chart's driver is a remote one." -}}
 {{- end -}}
 {{- if not (has .Values.gateway.policyValidationFailureMode (list "fail_closed" "retain_last_valid")) -}}
 {{- fail (printf "gateway.policyValidationFailureMode must be fail_closed or retain_last_valid, got %q." (toString .Values.gateway.policyValidationFailureMode)) -}}

@@ -99,7 +99,8 @@ environment, so a table would do nothing), and the TLS paths the gateway takes a
 {{- $ownedTables := dict
     "openshell.drivers.kyma" "it is chart-owned (use driver.socket, driver.allowDriverConfig and driver.resourceAdmission instead)"
     "openshell.drivers.kubernetes" "this chart's driver is configured by environment (driver.* values)"
-    "openshell.gateway.tls" "it is chart-owned (use gateway.tls.* instead)" -}}
+    "openshell.gateway.tls" "it is chart-owned (use gateway.tls.* instead)"
+    "openshell.supervisor.network" "upstream's gateway refuses additional_ca_bundle for a remote compute driver, and this chart's driver is one" -}}
 {{- range $name := keys $config | sortAlpha -}}
 {{- range $owned := keys $ownedTables | sortAlpha -}}
 {{- if or (eq $name $owned) (hasPrefix (printf "%s." $owned) $name) -}}
@@ -142,6 +143,9 @@ key would silently do nothing). database_url is refused by _toml.tpl in every ta
 {{- include "openshell-driver-kyma.tomlDefault" (dict "config" $config "table" "openshell.gateway" "key" "name" "value" (include "openshell-driver-kyma.gatewayName" .)) -}}
 {{- include "openshell-driver-kyma.tomlDefault" (dict "config" $config "table" "openshell.gateway" "key" "policy_validation_failure_mode" "value" .Values.gateway.policyValidationFailureMode) -}}
 {{- include "openshell-driver-kyma.tomlDefault" (dict "config" $config "table" "openshell.gateway" "key" "enable_loopback_service_http" "value" .Values.gateway.enableLoopbackServiceHttp) -}}
+{{- with .Values.gateway.serviceHostnameFormat -}}
+{{- include "openshell-driver-kyma.tomlDefault" (dict "config" $config "table" "openshell.gateway" "key" "service_hostname_format" "value" .) -}}
+{{- end -}}
 {{- include "openshell-driver-kyma.tomlDefault" (dict "config" $config "table" "openshell.gateway" "key" "enable_websocket_tunnel" "value" .Values.gateway.enableWebsocketTunnel) -}}
 {{- $rateRequests := int (.Values.gateway.grpcRateLimit.requests | default 0) -}}
 {{- $rateWindow := int (.Values.gateway.grpcRateLimit.windowSeconds | default 0) -}}

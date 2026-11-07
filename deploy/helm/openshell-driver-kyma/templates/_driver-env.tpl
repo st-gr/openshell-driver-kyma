@@ -42,6 +42,16 @@ scripts/check-chart-render.sh fails CI when an upstream option is missing here.
 - name: OPENSHELL_OTLP_ENDPOINT
   value: {{ . | quote }}
 {{- end }}
+{{- with include "openshell-driver-kyma.driverOtlpProtocol" . }}
+- name: OPENSHELL_OTLP_PROTOCOL
+  value: {{ . | quote }}
+{{- end }}
+{{- range $key, $name := dict "otlpCaFile" "OPENSHELL_OTLP_CA_FILE" "otlpCertFile" "OPENSHELL_OTLP_CERT_FILE" "otlpKeyFile" "OPENSHELL_OTLP_KEY_FILE" "otlpOcsfProtocol" "OPENSHELL_OTLP_OCSF_PROTOCOL" "otlpAgentEndpoint" "OPENSHELL_OTLP_AGENT_ENDPOINT" "otlpAgentProtocol" "OPENSHELL_OTLP_AGENT_PROTOCOL" }}
+{{- with get $d $key }}
+- name: {{ $name }}
+  value: {{ . | quote }}
+{{- end }}
+{{- end }}
 {{- with $d.otlpOcsfEndpoint }}
 - name: OPENSHELL_OTLP_OCSF_ENDPOINT
   value: {{ . | quote }}
@@ -251,8 +261,11 @@ Pre-flight guard for driver.sandboxEnv, called from deployment.yaml beside the
 other guards. It mirrors what the driver's startup validation accepts
 (kyma_args.rs), so a bad entry fails `helm template` naming the entry instead of
 crash-looping the pod: no comma (the driver splits the list on commas), a `=`, a
-non-empty key, and no OPENSHELL_ key other than OPENSHELL_LOG_LEVEL (upstream
-strips those from the sandbox environment).
+non-empty key, no OPENSHELL_ key other than OPENSHELL_LOG_LEVEL (upstream
+strips those from the sandbox environment), and a key of letters, digits and `_`
+not starting with a digit and a value without line breaks (upstream v0.1.7
+refuses anything else in an UpdateSandboxConfiguration environment, and every
+environment update carries these entries).
 */}}
 {{- define "openshell-driver-kyma.sandboxEnvGuards" -}}
 {{- range $entry := .Values.driver.sandboxEnv -}}
@@ -269,6 +282,9 @@ strips those from the sandbox environment).
 {{- end -}}
 {{- if and (hasPrefix "OPENSHELL_" $key) (ne $key "OPENSHELL_LOG_LEVEL") -}}
 {{- fail (printf "driver.sandboxEnv entry %q uses a reserved OPENSHELL_* key: upstream strips it from the sandbox environment (only OPENSHELL_LOG_LEVEL is kept)." $e) -}}
+{{- end -}}
+{{- if or (not (regexMatch "^[A-Za-z_][A-Za-z0-9_]*$" $key)) (regexMatch "[\r\n]" $e) -}}
+{{- fail (printf "driver.sandboxEnv entry %q needs a KEY of letters, digits and _ not starting with a digit, and a VALUE without line breaks: upstream refuses anything else in an UpdateSandboxConfiguration environment, which would then fail for every sandbox." $e) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

@@ -16,6 +16,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use clap::ArgAction;
+use openshell_core::sandbox_env::SupervisorOtlpArgs;
 use openshell_driver_kubernetes::{
     KubernetesComputeConfig, KubernetesImagePullPolicy, KubernetesSandboxRuntimeConfig,
     ManagedSshIngressConfig, WorkspaceMode, DEFAULT_GATEWAY_ID,
@@ -46,20 +47,8 @@ pub struct UpstreamArgs {
     #[arg(long, env = "OPENSHELL_LOG_LEVEL", default_value = "info")]
     pub log_level: String,
 
-    #[arg(long, env = "OPENSHELL_OTLP_ENDPOINT")]
-    pub otlp_endpoint: Option<String>,
-
-    /// OTLP/gRPC collector endpoint for supervisor OCSF event export.
-    #[arg(long, env = "OPENSHELL_OTLP_OCSF_ENDPOINT")]
-    pub otlp_ocsf_endpoint: Option<String>,
-
-    /// OCSF schema version that supervisors downgrade exported events to.
-    #[arg(
-        long,
-        env = "OPENSHELL_OTLP_OCSF_SCHEMA_VERSION",
-        requires = "otlp_ocsf_endpoint"
-    )]
-    pub otlp_ocsf_schema_version: Option<String>,
+    #[command(flatten)]
+    pub otlp: SupervisorOtlpArgs,
 
     #[arg(long, env = "OPENSHELL_GATEWAY_NAME")]
     pub gateway_name: Option<String>,
@@ -232,11 +221,16 @@ pub fn parse_managed_ssh_gateway_pod_selector(
 /// Build upstream's driver configuration from its own option surface.
 ///
 /// `args` is consumed exactly as upstream's `main()` consumes it, so the
-/// literal below stays byte-comparable with upstream's.
+/// literal below stays byte-comparable with upstream's; `supervisor_otlp` is
+/// built the same way upstream's `main()` builds it just before the literal.
+// Not rustfmt'd: this literal sits one indent level shallower than upstream's,
+// so rustfmt would wrap some lines differently, and the check compares lines.
+#[rustfmt::skip]
 pub fn compute_config(
     args: UpstreamArgs,
     managed_ssh_gateway_pod_selector: BTreeMap<String, String>,
 ) -> KubernetesComputeConfig {
+    let supervisor_otlp = args.otlp.supervisor_otlp();
     KubernetesComputeConfig {
         supervisor_topology: None,
         shared_supervisor: None,
@@ -265,6 +259,8 @@ pub fn compute_config(
             .unwrap_or_else(openshell_core::config::default_supervisor_image),
         supervisor_image_pull_policy: args.supervisor_image_pull_policy,
         sandbox_runtime: KubernetesSandboxRuntimeConfig {
+            app_listener:
+                openshell_driver_kubernetes::config::KubernetesAppListenerConfig::default(),
             boundary_port: args.sandbox_runtime_boundary_port,
         },
         https_proxy: args.https_proxy,
@@ -275,14 +271,8 @@ pub fn compute_config(
         proxy_connect_by_hostname: args.proxy_connect_by_hostname.then_some(true),
         proxy_ca_bundle: args.proxy_ca_bundle,
         grpc_endpoint: args.grpc_endpoint.unwrap_or_default(),
-        supervisor_otlp_endpoint: args.otlp_endpoint.clone(),
+        supervisor_otlp,
         supervisor_gateway_name: args.gateway_name.clone(),
-        supervisor_ocsf_export: args.otlp_ocsf_endpoint.clone().map(|endpoint| {
-            openshell_core::sandbox_env::OcsfOtlpExport {
-                endpoint,
-                schema_version: args.otlp_ocsf_schema_version.clone(),
-            }
-        }),
         ssh_socket_path: args.sandbox_ssh_socket_path,
         client_tls_secret_name: args.client_tls_secret_name.unwrap_or_default(),
         host_gateway_ip: args.host_gateway_ip.unwrap_or_default(),
@@ -312,6 +302,7 @@ pub fn compute_config(
 mod tests {
     use super::*;
     use clap::Parser;
+    use openshell_core::sandbox_env::OtlpProtocol;
 
     #[derive(Parser)]
     struct Probe {
@@ -337,7 +328,7 @@ mod tests {
             "kubernetes-dev",
         ]);
         assert_eq!(
-            args.otlp_endpoint.as_deref(),
+            args.otlp.endpoint.as_deref(),
             Some("http://collector.example:4317")
         );
         assert_eq!(args.gateway_name.as_deref(), Some("kubernetes-dev"));
@@ -379,31 +370,36 @@ mod tests {
         );
         assert_eq!(config.sa_token_ttl_secs, 7200);
         // v0.1.3: the gateway's OTLP endpoint is also handed to supervisor pods.
-        assert_eq!(
-            config.supervisor_otlp_endpoint.as_deref(),
-            Some("http://collector.example:4317")
-        );
+        let traces = config.supervisor_otlp.traces.as_ref().expect("traces set");
+        assert_eq!(traces.endpoint, "http://collector.example:4317");
+        assert_eq!(traces.protocol, OtlpProtocol::Grpc);
     }
 
-    // v0.1.6: OCSF export and pod metadata allowlists reach the driver config.
+    // v0.1.7: the OCSF and agent exports take their own protocol, and pod
+    // metadata allowlists reach the driver config.
     #[test]
-    fn compute_config_carries_ocsf_export_and_pod_metadata_allowlists() {
+    fn compute_config_carries_otlp_exports_and_pod_metadata_allowlists() {
         let args = parse(&[
             "--gateway-name",
             "gw",
             "--otlp-ocsf-endpoint",
-            "http://ocsf.example:4317",
-            "--otlp-ocsf-schema-version",
-            "1.3",
+            "http://ocsf.example:4318",
+            "--otlp-ocsf-protocol",
+            "http/protobuf",
+            "--otlp-agent-endpoint",
+            "http://agent.example:4317",
             "--allowed-pod-annotations",
             "example.com/team,example.org/*",
             "--allowed-pod-labels",
             "example.com/cost-center",
         ]);
         let config = compute_config(args, BTreeMap::new());
-        let export = config.supervisor_ocsf_export.as_ref().expect("export set");
-        assert_eq!(export.endpoint, "http://ocsf.example:4317");
-        assert_eq!(export.schema_version.as_deref(), Some("1.3"));
+        let ocsf = config.supervisor_otlp.ocsf.as_ref().expect("ocsf set");
+        assert_eq!(ocsf.endpoint, "http://ocsf.example:4318");
+        assert_eq!(ocsf.protocol, OtlpProtocol::HttpProtobuf);
+        let agent = config.supervisor_otlp.agent.as_ref().expect("agent set");
+        assert_eq!(agent.endpoint, "http://agent.example:4317");
+        assert!(config.supervisor_otlp.traces.is_none());
         assert_eq!(config.supervisor_gateway_name.as_deref(), Some("gw"));
         assert!(config.pod_annotation_allowed("example.com/team"));
         assert!(config.pod_annotation_allowed("example.org/anything"));
@@ -413,14 +409,20 @@ mod tests {
         assert!(config.shared_supervisor.is_none());
     }
 
+    // v0.1.7: no export by default; the OCSF schema version is still accepted
+    // (deprecated, ignored) and the client certificate needs its key.
     #[test]
-    fn ocsf_export_is_off_by_default_and_schema_version_needs_the_endpoint() {
+    fn otlp_exports_are_off_by_default_and_the_deprecated_schema_version_still_parses() {
         let config = compute_config(parse(&[]), BTreeMap::new());
-        assert!(config.supervisor_ocsf_export.is_none());
+        assert!(config.supervisor_otlp.is_empty());
         assert!(config.allowed_pod_annotations.is_empty());
         assert!(config.allowed_pod_labels.is_empty());
+        let args = parse(&["--otlp-ocsf-schema-version", "1.3"]);
+        assert!(compute_config(args, BTreeMap::new())
+            .supervisor_otlp
+            .is_empty());
         let probe =
-            Probe::try_parse_from(["openshell-driver-kyma", "--otlp-ocsf-schema-version", "1.3"]);
+            Probe::try_parse_from(["openshell-driver-kyma", "--otlp-cert-file", "/tls/tls.crt"]);
         assert!(probe.is_err());
     }
 

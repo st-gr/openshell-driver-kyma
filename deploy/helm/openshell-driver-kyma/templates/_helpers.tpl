@@ -384,6 +384,18 @@ gateway.otlp.endpoint (the TOML renders the same). */}}
 {{- default (include "openshell-driver-kyma.gatewayOtlpEndpoint" .) .Values.driver.otlpEndpoint -}}
 {{- end -}}
 
+{{/* The driver's OTLP protocol: driver.otlpProtocol; with driver.otlpEndpoint empty
+(the gateway's endpoint), else gatewayConfig's openshell.gateway.otlp protocol, so
+the driver speaks to that collector as the gateway does. Empty: upstream's grpc. */}}
+{{- define "openshell-driver-kyma.driverOtlpProtocol" -}}
+{{- if .Values.driver.otlpProtocol -}}
+{{- .Values.driver.otlpProtocol -}}
+{{- else if not .Values.driver.otlpEndpoint -}}
+{{- $config := include "openshell-driver-kyma.userGatewayTable" (list . "openshell.gateway.otlp") | fromJson -}}
+{{- get $config "protocol" | default "" -}}
+{{- end -}}
+{{- end -}}
+
 {{/*
 The de-duplicated TCP ports the pod's OTLP trace exports and Vault driver dial, as a
 JSON array of numbers: the driver's OTLP endpoint, and, when the in-pod gateway

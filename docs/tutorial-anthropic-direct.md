@@ -261,15 +261,15 @@ See [`install-cli.md`](install-cli.md) for the full matrix. For a
 quick smoke test on Linux (or WSL2):
 
 ```bash
-VERSION=v0.1.6
+VERSION=v0.1.7
 curl -fsSL "https://github.com/NVIDIA/OpenShell/releases/download/${VERSION}/openshell-x86_64-unknown-linux-musl.tar.gz" \
   | tar -xz -C /usr/local/bin
 openshell --version
 ```
 
 **Keep the CLI and the gateway on the same version.** The chart pins
-the gateway to the upstream `v0.1.6` digest (see `values.yaml`), so install
-the matching `v0.1.6` CLI. The gRPC contract does drift between releases: a
+the gateway to the upstream `v0.1.7` digest (see `values.yaml`), so install
+the matching `v0.1.7` CLI. The gRPC contract does drift between releases: a
 newer CLI against an older gateway can fail on individual commands whose
 response shape changed. If you bump one, bump the other.
 

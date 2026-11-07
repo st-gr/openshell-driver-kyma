@@ -201,6 +201,8 @@ try bad-p2-kyma 'gatewayConfig must not set openshell.drivers.kyma' t \
 	--set-json 'gatewayConfig={"openshell.drivers.kyma":{"socket_path":"/x"}}'
 try bad-p2-kubernetes "gatewayConfig must not set openshell.drivers.kubernetes; this chart's driver is configured by environment (driver.* values)" t \
 	--set-json 'gatewayConfig={"openshell.drivers.kubernetes":{"namespace":"x"}}'
+try bad-p2-supervisor-network 'gatewayConfig must not set openshell.supervisor.network; upstream' t \
+	--set-json 'gatewayConfig={"openshell.supervisor.network":{"additional_ca_bundle":"/ca.crt"}}'
 try bad-p2-tls 'gatewayConfig must not set openshell.gateway.tls' t \
 	--set-json 'gatewayConfig={"openshell.gateway.tls":{"cert_path":"/x"}}'
 try bad-p2-bind-address 'gatewayConfig must not set openshell.gateway.bind_address' t \

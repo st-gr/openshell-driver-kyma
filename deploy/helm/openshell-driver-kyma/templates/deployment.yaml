@@ -110,6 +110,9 @@ spec:
               mountPath: /etc/openshell-upstream-proxy
               readOnly: true
             {{- end }}
+            {{- with .Values.driver.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
         {{- if .Values.gateway.enabled }}
         # Gateway sidecar. Shares the socket-dir emptyDir with the driver
         # container; reads the UDS at .Values.driver.socket. The image is
@@ -358,6 +361,9 @@ spec:
         - name: upstream-proxy-ca
           configMap:
             name: {{ . }}
+        {{- end }}
+        {{- with .Values.driver.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
         {{- end }}
         {{- if .Values.gateway.enabled }}
         - name: gateway-state

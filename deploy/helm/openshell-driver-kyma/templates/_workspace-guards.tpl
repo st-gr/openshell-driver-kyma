@@ -6,26 +6,27 @@ crash-loop once the driver starts.
 
 Every rule below is one of upstream's startup refusals in
 KubernetesComputeConfig::validate_workspace_mode (openshell-driver-kubernetes
-src/config.rs, v0.1.6), so a value upstream would refuse fails `helm template`
+src/config.rs, v0.1.7), so a value upstream would refuse fails `helm template`
 instead of crash-looping the pod:
-  managed   config.rs:876   gateway id is a DNS-1123 label
-            config.rs:886   "openshell-<id>-" plus a 19-character workspace
+  managed   config.rs:897   gateway id is a DNS-1123 label
+            config.rs:907   "openshell-<id>-" plus a 19-character workspace
                             name fits 63 characters, so the id is at most 33
-            config.rs:897   managed SSH ingress needs a gateway namespace
+            config.rs:918   managed SSH ingress needs a gateway namespace
                             and a gateway pod selector (checked on the
                             effective values, openshell-driver-kyma.
                             managedSshIngress: with the in-pod gateway both
                             default to its own pod)
-  operator  config.rs:912   exactly one of the namespace label or file...
-            config.rs:918   ...not both
+  operator  config.rs:933   exactly one of the namespace label or file...
+            config.rs:939   ...not both
 Not mirrored because no chart value can reach them: an empty gateway id
-(config.rs:873, the id defaults to the release fullname) and an empty operator
-label or file (config.rs:924-932, an empty value is simply not passed).
+(config.rs:894, the id defaults to the release fullname) and an empty operator
+label or file (config.rs:945-953, an empty value is simply not passed).
 
-Also mirrored, from upstream v0.1.6:
-  OCSF export  main.rs Args: --otlp-ocsf-schema-version `requires` the OCSF
-               endpoint, so driver.otlpOcsfSchemaVersion without
-               driver.otlpOcsfEndpoint would stop the driver at startup
+Also mirrored, from upstream v0.1.7:
+  OTLP exports openshell-core sandbox_env.rs SupervisorOtlpArgs: each protocol
+               is a clap enum (grpc, http/protobuf), and --otlp-cert-file and
+               --otlp-key-file `requires` each other. The OCSF schema version is
+               deprecated and ignored, no longer refused without the endpoint.
   pod metadata config.rs validate_pod_metadata_allowlist (driver.
                allowedPodAnnotations / allowedPodLabels): each entry is an exact
                key or `<domain>/*`, with a valid prefix and name, outside the
@@ -71,8 +72,14 @@ deployment.yaml. */}}
 {{- end -}}
 
 {{- define "openshell-driver-kyma.workspaceGuards" -}}
-{{- if and .Values.driver.otlpOcsfSchemaVersion (not .Values.driver.otlpOcsfEndpoint) -}}
-{{- fail "driver.otlpOcsfSchemaVersion requires driver.otlpOcsfEndpoint." -}}
+{{- range $key := list "otlpProtocol" "otlpOcsfProtocol" "otlpAgentProtocol" -}}
+{{- $value := get $.Values.driver $key | default "" -}}
+{{- if not (has $value (list "" "grpc" "http/protobuf")) -}}
+{{- fail (printf "driver.%s must be empty, grpc or http/protobuf, got %q." $key (toString $value)) -}}
+{{- end -}}
+{{- end -}}
+{{- if ne (empty .Values.driver.otlpCertFile) (empty .Values.driver.otlpKeyFile) -}}
+{{- fail "driver.otlpCertFile and driver.otlpKeyFile must be set together (upstream's driver requires both for a client certificate)." -}}
 {{- end -}}
 {{- include "openshell-driver-kyma.podMetadataAllowlistGuard" (dict "key" "allowedPodAnnotations" "entries" (.Values.driver.allowedPodAnnotations | default list)) -}}
 {{- include "openshell-driver-kyma.podMetadataAllowlistGuard" (dict "key" "allowedPodLabels" "entries" (.Values.driver.allowedPodLabels | default list)) -}}

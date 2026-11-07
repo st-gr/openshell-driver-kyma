@@ -5,20 +5,23 @@
 //!
 //! Serving mirrors upstream `openshell-driver-kubernetes`'s `main()` — the same
 //! tracing, the same private Unix socket or TCP bind, the same RPC layer — so
-//! the driver behaves identically. The one difference is the gRPC service:
-//! upstream's `ComputeDriverService` wrapped in `KymaComputeDriver`.
+//! the driver behaves identically. The one difference is the gRPC services:
+//! upstream's `ComputeDriverService` wrapped in `KymaComputeDriver`, and its
+//! configuration-updates service wrapped in `KymaConfigurationUpdates`.
 
 use std::sync::Arc;
 
 use clap::Parser;
 use miette::{IntoDiagnostic, Result};
+use openshell_core::proto::compute::v1::compute_driver_configuration_updates_server::ComputeDriverConfigurationUpdatesServer;
 use openshell_core::proto::compute::v1::compute_driver_server::ComputeDriverServer;
 use openshell_core::VERSION;
 use openshell_driver_kubernetes::{ComputeDriverService, KubernetesComputeDriver};
+use openshell_driver_kyma::config_updates::KymaConfigurationUpdates;
 use openshell_driver_kyma::hooks::KymaHookSet;
 use openshell_driver_kyma::kyma_args::KymaArgs;
 use openshell_driver_kyma::namespaces::NamespaceLabeler;
-use openshell_driver_kyma::service::KymaComputeDriver;
+use openshell_driver_kyma::service::{KymaComputeDriver, KymaHooks};
 use openshell_driver_kyma::upstream_args::{
     compute_config, parse_managed_ssh_gateway_pod_selector, UpstreamArgs,
 };
@@ -67,18 +70,26 @@ async fn main() -> Result<()> {
 
     // Owned copies: the tracing guard borrows these for the life of the
     // process, while `upstream` itself is consumed by compute_config below.
-    let otlp_endpoint = upstream.otlp_endpoint.clone();
+    let otlp_endpoint = upstream.otlp.endpoint.clone();
+    let otlp_ca_file = upstream.otlp.ca_file.clone();
+    let otlp_cert_file = upstream.otlp.cert_file.clone();
+    let otlp_key_file = upstream.otlp.key_file.clone();
     let gateway_name = upstream.gateway_name.clone();
     let log_level = upstream.log_level.clone();
     let _tracing = openshell_otel::install_driver_tracing(
         openshell_driver_kubernetes::otel_tracing::TRACING,
         openshell_otel::DriverTracingConfig {
             endpoint: otlp_endpoint.as_deref(),
+            protocol: upstream.otlp.protocol.into(),
+            ca_file: otlp_ca_file.as_deref(),
+            cert_file: otlp_cert_file.as_deref(),
+            key_file: otlp_key_file.as_deref(),
             gateway_name: gateway_name.as_deref(),
             service_version: VERSION,
             log_level: &log_level,
         },
     );
+    upstream.otlp.warn_deprecated();
 
     let selector =
         parse_managed_ssh_gateway_pod_selector(&upstream.managed_ssh_gateway_pod_selector)?;
@@ -114,16 +125,24 @@ async fn main() -> Result<()> {
         config.clone(),
         kyma.kyma_workspace_psa_level.clone(),
     );
-    let driver = KubernetesComputeDriver::new(config.clone(), shutdown_rx)
+    // Upstream's own binary passes no network trust bundle; only a gateway that
+    // links the driver in-process can (it refuses additional_ca_bundle for a
+    // remote driver such as this one).
+    let driver = KubernetesComputeDriver::new(config.clone(), shutdown_rx, None)
         .await
         .into_diagnostic()?;
     // A clone of upstream's driver for the step its create path runs before
     // anything else (ensure_namespace), so a create the Kyma layer prepares first
     // keeps upstream's status codes.
     let workspace_namespaces = UpstreamNamespaces::new(driver.clone(), config.gateway_id.clone());
+    let hooks: Arc<dyn KymaHooks> = Arc::new(KymaHookSet::new(kyma.enrich_config(), namespaces));
+    let driver_service = ComputeDriverService::new(driver);
+    let configuration_updates_service = ComputeDriverConfigurationUpdatesServer::new(
+        KymaConfigurationUpdates::new(driver_service.clone(), Arc::clone(&hooks)),
+    );
     let service = ComputeDriverServer::new(KymaComputeDriver::new(
-        ComputeDriverService::new(driver),
-        Arc::new(KymaHookSet::new(kyma.enrich_config(), namespaces)),
+        driver_service,
+        hooks,
         Arc::new(workspace_namespaces),
     ));
     let shutdown = async move {
@@ -141,6 +160,7 @@ async fn main() -> Result<()> {
         tonic::transport::Server::builder()
             .layer(openshell_otel::compute_driver_rpc_layer())
             .add_service(service)
+            .add_service(configuration_updates_service)
             .serve_with_incoming_shutdown(
                 openshell_core::external_driver_socket::SameUidUnixIncoming::new(listener),
                 shutdown,
@@ -153,6 +173,7 @@ async fn main() -> Result<()> {
         tonic::transport::Server::builder()
             .layer(openshell_otel::compute_driver_rpc_layer())
             .add_service(service)
+            .add_service(configuration_updates_service)
             .serve_with_shutdown(bind_address, shutdown)
             .await
             .into_diagnostic()
