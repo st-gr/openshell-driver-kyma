@@ -107,6 +107,11 @@ sensitive-*
 *.gif
 *.bmp
 *.webp
+# The one deliberate exception: the IAS console screenshots of
+# docs/sap-ias-setup.md, taken with stand-in values (tenant name, ids, user and
+# other apps replaced in the page before capture, each image reviewed). Any new
+# image here needs the same treatment and review.
+!docs/images/sap-ias/*.jpg
 # Specific filename safety net for the SCC screenshot.
 sensitive-PII-created-sap-cloud-connector-gitignore.png
 

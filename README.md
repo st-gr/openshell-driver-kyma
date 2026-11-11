@@ -45,6 +45,8 @@ and download flow, plus the SAP AI Core variant, is in
 
 For production deploys (OIDC user auth, remote access through the Kyma ingress gateway, image
 digests pinned), see [`docs/production-deployment.md`](docs/production-deployment.md).
+To log users in with SAP Cloud Identity Services (IAS), see
+[`docs/sap-ias-setup.md`](docs/sap-ias-setup.md).
 
 For private VPN routing through SAP Cloud Connector, see
 [`docs/cloud-connector-setup.md`](docs/cloud-connector-setup.md).

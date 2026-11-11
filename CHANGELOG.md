@@ -4,6 +4,18 @@ All notable changes to openshell-driver-kyma are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Documentation
+
+- **SAP Cloud Identity Services (IAS) as the gateway's identity provider**, verified
+  against an IAS tenant: [`docs/sap-ias-setup.md`](docs/sap-ias-setup.md) walks
+  through the application, the wildcard-port redirect URI, JWT access tokens, the
+  `groups` attribute and the two role groups, with screenshots. It replaces the
+  unverified IAS recipe in `production-deployment.md`, which now also notes that
+  IAS has no device grant. No chart change: `rolesClaim: groups` with
+  `adminRole`/`userRole` was already supported.
+
 ## [0.13.0] — 2026-11-06
 
 Moves the driver, the chart's `upstream.version` and the gateway, supervisor and
