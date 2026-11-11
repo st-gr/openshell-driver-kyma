@@ -31,8 +31,10 @@ issuer and audience. The ingress gateway checks no token. You need:
 - **A public client for the CLI** → `gateway.oidc.clientId`: Authorization
   Code with PKCE and the redirect URI `http://127.0.0.1:*/callback` (the CLI
   listens on an ephemeral loopback port during login). If your provider
-  rejects a wildcard port, log in with the device grant instead
-  (`OPENSHELL_NO_BROWSER=1 openshell gateway add …`).
+  rejects a wildcard port, register a fixed one and set
+  `OPENSHELL_CALLBACK_PORT` to it where users log in, or log in with the device
+  grant instead (`OPENSHELL_NO_BROWSER=1 openshell gateway add …`) if your
+  provider offers one.
 - **An audience** → `gateway.oidc.audience`: the value the access token's
   `aud` claim must contain. Some providers put the client id there; others
   (Keycloak) need an audience mapper on the client.
@@ -75,9 +77,11 @@ issuer and audience. The ingress gateway checks no token. You need:
 
 ### SAP Cloud Identity Services (IAS)
 
-IAS is an ordinary OIDC provider to this chart: an OpenID Connect application
-in your tenant, its client id as `clientId` and `audience`, and the tenant as
-issuer.
+IAS works as the gateway's OIDC provider; the step-by-step setup, verified
+against an IAS tenant, is in [sap-ias-setup.md](sap-ias-setup.md). In short: an
+OpenID Connect application that is a public client with PKCE, the redirect URI
+`http://127.0.0.1:*/callback`, access tokens as JSON Web Tokens and a `groups`
+attribute; then
 
 ```yaml
 gateway:
@@ -85,22 +89,16 @@ gateway:
     issuer: "https://<tenant>.accounts.ondemand.com"
     audience: "<client id of the application>"
     clientId: "<client id of the application>"
-    rolesClaim: groups            # with adminRole and userRole; or authOnly: true
-    adminRole: "<group of platform admins>"
-    userRole: "<group of users>"
+    rolesClaim: groups
+    adminRole: openshell-admin    # IAS group names
+    userRole: openshell-user
 ```
 
-**This recipe has not been verified against an IAS tenant.** Check three things
-on yours before you rely on it:
-
-1. The application issues access tokens as JWTs, and their `aud` claim contains
-   the client id. The gateway cannot validate an opaque access token.
-2. The application is a public client with PKCE and accepts the redirect URI
-   `http://127.0.0.1:<any port>/callback`. If it does not, log in with the
-   device grant (`OPENSHELL_NO_BROWSER=1 openshell gateway add …`).
-3. Group membership reaches the access token in the claim you name in
-   `rolesClaim`. If it does not, use `authOnly: true` and decide in IAS who may
-   log in to the application.
+IAS has no device grant, so the headless login (`OPENSHELL_NO_BROWSER=1`) does
+not apply to it. A client-credentials token belongs to no user and carries no
+groups, so the provider hook's `clientCredentialsSecret` should not be expected
+to get the admin role it needs (not tested): register the provider from an
+admin's CLI session instead (step 3b).
 
 ## 2. Decide on chart values
 
