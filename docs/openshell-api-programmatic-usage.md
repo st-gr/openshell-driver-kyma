@@ -1,680 +1,576 @@
 # Programmatic OpenShell API usage
 
-This guide is for engineers who need to drive OpenShell sandboxes from
-their own services or scripts — without going through the `openshell`
-CLI. It covers the gateway's gRPC API, how to reach it from outside the
-cluster, the lifecycle of a Claude Code (or any other agent) sandbox,
-and three practical patterns for uploading and downloading files.
+> **Written for upstream OpenShell v0.1.7 / chart 0.13.0.** The Python sample
+> below is verified: its requests are built from stubs generated from the
+> v0.1.7 protos, and it ran live on 2026-11-14 against a scratch release of
+> the 0.13.0 chart (client-certificate auth over a port-forward).
 
-> **Scope.** Everything below targets the OpenShell gateway's public
-> surface (`openshell.v1.OpenShell`), which the upstream NVIDIA project
-> publishes under Apache-2.0. The gateway's *internal* contract with
-> compute drivers (`compute_driver.proto`) is upstream's too:
-> `openshell-driver-kyma` serves it by running upstream's Kubernetes
-> driver.
+This guide is for engineers who drive OpenShell sandboxes from their own
+services or scripts instead of the `openshell` CLI. It covers how to reach
+and authenticate to the gateway, how to generate a client from upstream's
+protos, and a worked Python flow: list sandboxes, create one, wait until it is
+ready, run a command in it, and delete it.
 
-> **The Python and TypeScript samples predate upstream v0.1.2's request
-> shapes.** For example, workspace-scoped RPCs now require `workspace_scope`,
-> and `CreateProviderRequest` nests a `provider` message. Treat the samples
-> as the outline of the flow, and take the current field names from
-> [`grpc-without-cli.md`](grpc-without-cli.md) (worked `grpcurl` calls for
-> v0.1.2) and upstream's `openshell.proto` at the tag your gateway runs.
+For one-off calls from a shell (`grpcurl`, server reflection) see
+[`grpc-without-cli.md`](grpc-without-cli.md).
 
 ## Table of contents
 
 1. [API surface](#api-surface)
-2. [Reaching the gateway](#reaching-the-gateway)
-3. [Generating a client](#generating-a-client)
+2. [Workspaces](#workspaces)
+3. [Reaching the gateway](#reaching-the-gateway)
 4. [Authentication](#authentication)
-5. [Sandbox lifecycle](#sandbox-lifecycle)
-6. [Running commands inside the sandbox](#running-commands-inside-the-sandbox)
-7. [File upload patterns](#file-upload-patterns)
-8. [File download patterns](#file-download-patterns)
-9. [Streaming Claude Code interactively](#streaming-claude-code-interactively)
-10. [Tear-down and resource cleanup](#tear-down-and-resource-cleanup)
-11. [Complete worked example: Python](#complete-worked-example-python)
-12. [Complete worked example: TypeScript](#complete-worked-example-typescript)
-13. [Operational notes](#operational-notes)
-14. [References](#references)
+5. [Generating a client](#generating-a-client)
+6. [Worked example: Python](#worked-example-python)
+7. [Beyond the sample](#beyond-the-sample)
+8. [Worked example: TypeScript](#worked-example-typescript)
+9. [Operational notes](#operational-notes)
+10. [References](#references)
 
 ## API surface
 
-The gateway speaks **pure gRPC** (HTTP/2). One service, one package:
+The gateway serves native gRPC over HTTP/2 only. There is no REST surface, no
+gRPC-Web and no Connect protocol: a browser client needs its own gRPC-Web
+proxy, which this chart does not provide.
 
 - Package: `openshell.v1`
-- Service: `OpenShell` (defined in
-  [`proto/openshell.proto`](https://raw.githubusercontent.com/NVIDIA/OpenShell/main/proto/openshell.proto))
+- Service: `OpenShell` (86 RPCs in v0.1.7), plus `SandboxUpdates`, both in
+  [`proto/openshell.proto`](https://github.com/NVIDIA/OpenShell/blob/v0.1.7/proto/openshell.proto)
+- Server reflection is on, so `grpcurl` can list and describe methods without
+  the proto files (see [`grpc-without-cli.md`](grpc-without-cli.md)).
 
-There are no `google.api.http` annotations, so **there is no
-auto-generated REST surface**. Browser-side and Connect-protocol clients
-are supported by the underlying tonic stack; native gRPC works
-everywhere else.
-
-The RPCs you actually need for "spin up Claude Code, talk to it, copy
-files in and out, tear down" are a small subset:
+The RPCs a programmatic caller usually needs:
 
 | Concern | RPC | Streaming |
 |---|---|---|
-| Provider config (one-time per credential) | `CreateProvider`, `GetProvider`, `ListProviders`, `UpdateProvider`, `DeleteProvider` | unary |
-| Attach provider to a sandbox | `AttachSandboxProvider` | unary |
-| Sandbox lifecycle | `CreateSandbox`, `GetSandbox`, `ListSandboxes`, `DeleteSandbox`, `WatchSandbox` | `WatchSandbox` is server-stream |
-| Run a command (one-shot) | `ExecSandbox` | server-stream (stdout/stderr until exit) |
-| Run a command (PTY / pipes / interactive) | `ExecSandboxInteractive` | bidi-stream |
-| Open an SSH session | `CreateSshSession`, `RevokeSshSession` | unary |
-| Forward a TCP port to/from the sandbox | `ForwardTcp` | bidi-stream |
-| Expose a sandbox-local HTTP service | `ExposeService`, `GetService`, `ListServices`, `DeleteService` | unary |
-| Health probe | `Health` | unary |
+| Health probe (no credentials needed) | `Health` | unary |
+| Who am I (as the gateway sees the caller) | `GetCurrentUser` | unary |
+| Sandbox lifecycle | `CreateSandbox`, `GetSandbox`, `ListSandboxes`, `DeleteSandbox` | unary |
+| Follow a sandbox's status | `WatchSandbox` | server stream |
+| Run a command | `ExecSandbox` | server stream (stdout, stderr, exit) |
+| Run a command with streamed stdin or a TTY | `ExecSandboxInteractive` | bidirectional |
+| Credentials for sandboxes | `CreateProvider`, `ListProviderProfiles`, `AttachSandboxProvider` | unary |
+| Reach a TCP port inside a sandbox | `ForwardTcp` | bidirectional |
+| Expose an HTTP service of a sandbox | `ExposeService`, `GetService`, `ListServices`, `DeleteService` | unary |
+| Workspaces and members | `CreateWorkspace`, `ListWorkspaces`, `AddWorkspaceMember`, ... | unary |
 
-The full RPC list (and the associated message schemas) lives in
-upstream `openshell.proto`. It includes ~60 RPCs covering policy,
-draft-policy review, supervisor relay, logs, and tokens — most of which
-you won't touch from a programmatic caller.
+The rest (policy, draft-policy review, supervisor relay, logs, tokens, peer
+calls) is mostly for the CLI, sandboxes and other gateways.
+
+## Workspaces
+
+Every sandbox and provider belongs to a workspace, and every call about them
+carries a `workspace_scope` (`openshell.datamodel.v1.WorkspaceSelector`). Name
+one workspace; the gateway's default workspace is `default`:
+
+```python
+dm.WorkspaceSelector(workspace="default")
+```
+
+Without it the gateway answers `workspace_scope is required`. Only a few calls,
+such as `ListSandboxes`, also accept `all_workspaces`, and only for a platform
+admin.
+
+A caller with the platform admin role may use every workspace. A caller with
+only the user role must be a member of the workspace, or the gateway answers
+`not a member of workspace 'default'`. An admin adds members with
+`openshell workspace member add --workspace default --subject <subject> --role user`
+(see [`sap-ias-setup.md`](sap-ias-setup.md#8-log-in-and-grant-workspaces)).
 
 ## Reaching the gateway
 
-### Where the gateway lives in the openshell-driver-kyma chart
+The gateway runs next to the driver in the chart's pod. It is reachable over
+the network only with `gateway.enabled=true` and `gatewayService.enabled=true`.
+Both default to `false`; [`values.example.yaml`](../deploy/helm/openshell-driver-kyma/values.example.yaml)
+sets them. The Service is named after the release:
+`<release>-openshell-driver-kyma`, gRPC on port `8080` (`gateway.grpcPort`).
 
-When this chart is installed with `gateway.enabled=true` (the
-recommended default for any caller of this API), the gateway runs as
-a sidecar in the same pod as the driver. They share a Unix domain
-socket via emptyDir; nothing reaches the gateway via Service except
-clients you deliberately route through the chart's optional
-`gatewayService.enabled=true` ClusterIP Service.
-
-| Reaching the gateway from … | URL |
+| From | Endpoint |
 |---|---|
 | Inside the cluster, same namespace | `<release>-openshell-driver-kyma:8080` |
-| Inside the cluster, other namespace | `<release>-openshell-driver-kyma.<release-ns>.svc.cluster.local:8080` |
-| Public (only with `gatewayIngress.enabled` + OIDC) | `https://openshell.<cluster-domain>` (`gatewayIngress.host`) |
-| Laptop port-forward | `kubectl -n <release-ns> port-forward svc/<release>-openshell-driver-kyma 8080:8080`, then `http://localhost:8080` |
+| Inside the cluster, other namespace | `<release>-openshell-driver-kyma.<namespace>.svc.cluster.local:8080` |
+| Laptop port-forward | `kubectl -n <namespace> port-forward svc/<release>-openshell-driver-kyma 8080:8080`, then `localhost:8080` |
+| Public, with `gatewayIngress.enabled` | `openshell.<cluster-domain>:443` (`gatewayIngress.host`) |
 
-Pick the URL appropriate to your deployment topology — the rest of
-this guide treats the gateway as a generic gRPC endpoint.
+TLS depends on the chart values:
 
-Pick one of the two patterns based on whether you want public ingress
-or VPN-only routing:
+- `gateway.tls.enabled=false` (default): the gateway serves plaintext. Use an
+  insecure channel, and only inside the cluster or through a port-forward.
+- `gateway.tls.enabled=true`: the gateway serves TLS with a certificate from
+  the chart CA. Clients verify it with that CA (`ca.crt` in the
+  `<release>-openshell-driver-kyma-client-tls` Secret). The PKI hook's certificate
+  names the Service, its in-cluster DNS names, `localhost` and `127.0.0.1`, so a
+  port-forward verifies too.
+- `gatewayIngress`: the Kyma ingress gateway terminates the client's TLS with
+  the cluster's public certificate (the system trust store verifies it) and
+  re-encrypts to the gateway. It needs `gateway.tls.enabled` and an OIDC issuer,
+  and the gateway still checks the token of every call. See
+  [`production-deployment.md`](production-deployment.md).
 
-### A. Public hostname via the Kyma ingress gateway
-
-When the `openshell-driver-kyma` Helm chart is installed with
-`gatewayIngress.enabled=true`, a `gatewayIngress.domain` and
-`gateway.oidc.{issuer,audience,clientId}`, the gateway is reachable at
-`https://openshell.<cluster-domain>`. The gateway validates the token of every
-call; the ingress gateway checks none, and with `gatewayIngress.allowedCidrs`
-admits only those source addresses. Native gRPC clients dial the `:443` HTTPS
-endpoint with `authorization: Bearer <token>`. A sandbox service URL the API
-returns carries the port the gateway binds in its pod (`:8080`); through the
-ingress gateway, drop the port.
-
-### B. Private routing via SAP Cloud Connector
-
-Documented in [`docs/cloud-connector-setup.md`](cloud-connector-setup.md).
-Service Channel for Kubernetes + `kubectl port-forward
-svc/openshell-gateway 8080:8080 -n openshell-system`. Your client dials
-`http://localhost:8080` (gRPC over plaintext HTTP/2 since it's loopback).
-
-## Generating a client
-
-You only need the proto file from upstream. Pin it to a known commit so
-your generated stubs don't drift unexpectedly:
-
-```bash
-mkdir -p proto/openshell-v1
-curl -fsSL \
-  https://raw.githubusercontent.com/NVIDIA/OpenShell/<sha>/proto/openshell.proto \
-  -o proto/openshell-v1/openshell.proto
-curl -fsSL \
-  https://raw.githubusercontent.com/NVIDIA/OpenShell/<sha>/proto/datamodel.proto \
-  -o proto/openshell-v1/datamodel.proto
-curl -fsSL \
-  https://raw.githubusercontent.com/NVIDIA/OpenShell/<sha>/proto/sandbox.proto \
-  -o proto/openshell-v1/sandbox.proto
-```
-
-Then run your language's protoc plugin:
-
-| Language | Tool |
-|---|---|
-| Python | `python -m grpc_tools.protoc -I proto --python_out=gen --grpc_python_out=gen proto/openshell-v1/*.proto` |
-| TypeScript | `buf generate --template buf.gen.yaml proto/openshell-v1` (with `@bufbuild/protoc-gen-es` + `@connectrpc/protoc-gen-connect-es`) |
-| Go | `protoc -I proto --go_out=gen --go-grpc_out=gen proto/openshell-v1/*.proto` |
-| Rust | add `tonic-prost-build = "0.14"` to `build.rs` and call `compile_protos` (as upstream's `openshell-core` crate does; this repo uses its generated types) |
+For private routing through SAP Cloud Connector see
+[`cloud-connector-setup.md`](cloud-connector-setup.md); the client then dials a
+local port as with a port-forward.
 
 ## Authentication
 
-The gateway authenticates clients with a bearer token issued by your
-identity provider (the OpenShell Helm chart configures this — typically
-SAP IAS / OIDC for BTP-Kyma deployments). Pass it as a gRPC metadata
-header:
+The chart values decide what the gateway expects from a caller:
 
-```python
-metadata = (("authorization", f"Bearer {token}"),)
-stub.CreateSandbox(req, metadata=metadata)
-```
+| Chart values | The caller sends |
+|---|---|
+| No `gateway.oidc.issuer`, no `gateway.tls.clientCa.enabled` (default) | nothing |
+| `gateway.tls.clientCa.enabled`, no issuer | a client certificate signed by the CA |
+| `gateway.oidc.issuer` set | `authorization: Bearer <access token>` metadata on every call |
 
-For mTLS deployments (gateway behind a Service mesh that requires
-client certs), supply the cert and key when you build the gRPC channel
-— `grpc.ssl_channel_credentials(root_certs, private_key, cert_chain)`
-in Python, or `Channel::from_static(...).tls_config(...)` in Tonic.
+**OIDC bearer token.** The token must be issued for the gateway's audience
+(`gateway.oidc.audience`) and carry a role. By default upstream reads the
+roles from `realm_access.roles` and expects `openshell-admin` or
+`openshell-user`; `gateway.oidc.rolesClaim`, `adminRole` and `userRole` change
+that, and `gateway.oidc.authOnly: true` makes every authenticated identity a
+platform admin. A user-role caller also needs workspace membership
+([Workspaces](#workspaces)). Only when `gateway.oidc.scopesClaim` is set does
+the gateway also check scopes: the sandbox calls need `sandbox:read` or
+`sandbox:write` (or `openshell:all`). How to get such a token depends on your
+identity provider: a person logs in through it, and a service usually uses the
+client-credentials grant of a confidential client, as the chart's inference
+provider hook does. For SAP Cloud Identity Services see
+[`sap-ias-setup.md`](sap-ias-setup.md); for other providers see
+[`production-deployment.md`](production-deployment.md).
 
-When running entirely inside the cluster, ServiceAccount token
-projection (`automountServiceAccountToken: true` plus a TokenRequest
-volume) is enough — the gateway accepts the SA token.
+**Client certificate (mTLS).** With `gateway.tls.clientCa.enabled` and no
+issuer, the gateway accepts a client certificate signed by the chart CA:
+`tls.crt` and `tls.key` from the `<release>-openshell-driver-kyma-client-tls`
+Secret. Without OIDC, every authenticated caller is a platform admin. Sandboxes
+hold the same certificate, so anyone who can read it inside a sandbox can act
+as a user. This does not work through `gatewayIngress`, because the ingress
+gateway presents no client certificate. See
+[`production-deployment.md`](production-deployment.md).
 
-## Sandbox lifecycle
+Kubernetes ServiceAccount tokens are not a user credential: upstream accepts
+them only for calls between gateway replicas.
 
-> Sample predates the v0.1.2 request shapes (`workspace_scope`, the nested
-> `provider`); see [`grpc-without-cli.md`](grpc-without-cli.md).
+## Generating a client
 
-### 1. Create the provider once
-
-Each external credential (an Anthropic API key, an OpenAI key, etc.)
-maps to one `Provider` record. Every sandbox the provider is attached to
-gets a placeholder for the credential in its environment; the sandbox's
-supervisor substitutes the real value in requests to the provider profile's
-endpoint.
-
-```python
-stub.CreateProvider(pb.CreateProviderRequest(
-    name="anthropic-prod",
-    type="anthropic",
-    credentials={"ANTHROPIC_API_KEY": os.environ["ANTHROPIC_API_KEY"]},
-))
-```
-
-The provider type names (`anthropic`, `openai`, `google`, `xai`,
-`bedrock`, `ollama`, etc.) come from the upstream provider catalog —
-`ListProviderProfiles` returns the catalog at runtime if you need the
-canonical list.
-
-### 2. Create the sandbox
-
-```python
-sandbox = stub.CreateSandbox(pb.CreateSandboxRequest(
-    image="ghcr.io/st-gr/sandbox-claude:latest",  # any image without an embedded sandbox policy
-    command=["sleep", "infinity"],
-    provider="anthropic-prod",       # attaches the provider above
-    labels={"owner": "my-service"},
-)).sandbox
-```
-
-The `image` is the agent container the supervisor wraps. For Claude
-Code specifically, NVIDIA publishes
-`quay.io/azaalouk/demo-sandbox-claude:latest` (Apache-2.0); your
-deployment's chart values can default it.
-
-### 3. Wait for `Ready`
-
-```python
-for ev in stub.WatchSandbox(pb.WatchSandboxRequest(name=sandbox.name)):
-    if ev.state == pb.SANDBOX_STATE_READY:
-        break
-    if ev.state in (pb.SANDBOX_STATE_FAILED, pb.SANDBOX_STATE_DELETED):
-        raise RuntimeError(f"sandbox failed: {ev.message}")
-```
-
-Typical Ready time is 5-30 s on a warm Kyma cluster (image already
-cached on the node). Cold start can take a minute when the image
-needs to pull.
-
-## Running commands inside the sandbox
-
-Two RPCs, two use cases.
-
-### `ExecSandbox` — one-shot, server-streamed
-
-You send a request with the command and arguments; the gateway
-streams stdout/stderr back until the process exits.
-
-```python
-req = pb.ExecSandboxRequest(
-    name=sandbox.name,
-    command=["claude", "--version"],
-)
-for ev in stub.ExecSandbox(req):
-    if ev.HasField("stdout"):
-        sys.stdout.buffer.write(ev.stdout)
-    if ev.HasField("stderr"):
-        sys.stderr.buffer.write(ev.stderr)
-    if ev.HasField("exit"):
-        return ev.exit.code
-```
-
-Use this for short, scripted invocations: `claude --version`,
-`pip install ...`, `git clone ...`.
-
-### `ExecSandboxInteractive` — PTY, bidi-streamed
-
-You send `ExecSandboxInput` frames (start, stdin, resize, signal,
-close); the gateway returns `ExecSandboxEvent` frames
-(stdout/stderr/exit). This is the right tool for an interactive
-Claude Code session, a debug shell, or anything that needs a real
-TTY.
-
-See the [interactive Claude example](#streaming-claude-code-interactively)
-below.
-
-## File upload patterns
-
-There is **no dedicated file-transfer RPC** in the OpenShell gateway.
-Three established patterns layer on top of the existing byte streams.
-Pick by file size and by whether the sandbox already has the right
-tools.
-
-### Pattern 1 — `tar` over `ExecSandbox` stdin (most portable)
-
-Streams a tar archive into the sandbox via the bidi exec stream and
-extracts it server-side. Works for any agent image that ships `tar`
-(virtually all of them). Best for batches up to a few hundred MB; the
-data goes through gRPC framing so very large transfers add latency.
-
-```python
-import tarfile, io
-
-def tar_bytes(local_paths: list[str]) -> bytes:
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w") as tar:
-        for p in local_paths:
-            tar.add(p, arcname=os.path.basename(p))
-    return buf.getvalue()
-
-def upload(stub, sandbox_name: str, local_paths: list[str], remote_dir: str):
-    payload = tar_bytes(local_paths)
-
-    def gen():
-        # 1. Start the command: tar -x in the target directory.
-        yield pb.ExecSandboxInput(start=pb.ExecStart(
-            name=sandbox_name,
-            command=["tar", "-xC", remote_dir],
-            tty=False,
-        ))
-        # 2. Stream the archive bytes as stdin frames.
-        for chunk in chunks(payload, 256 * 1024):
-            yield pb.ExecSandboxInput(stdin=pb.ExecStdin(data=chunk))
-        # 3. Close stdin so tar finishes.
-        yield pb.ExecSandboxInput(close_stdin=pb.ExecCloseStdin())
-
-    for ev in stub.ExecSandboxInteractive(gen()):
-        if ev.HasField("exit") and ev.exit.code != 0:
-            raise RuntimeError(f"tar failed: {ev.exit.code}")
-
-def chunks(b: bytes, n: int):
-    for i in range(0, len(b), n):
-        yield b[i:i+n]
-```
-
-### Pattern 2 — SSH/SCP via `CreateSshSession` (best for arbitrary tooling)
-
-The gateway issues a one-shot SSH session bound to the sandbox.
-Returns a host, port, username, and private key. From there you use
-**any** SSH-aware tool (`scp`, `rsync`, `sftp`, `ssh`, `mosh`).
-
-```python
-session = stub.CreateSshSession(pb.CreateSshSessionRequest(
-    sandbox=sandbox.name,
-    ttl_seconds=900,
-)).session
-
-# session.host, session.port, session.username, session.private_key
-# Write key to a tmpfile and call scp:
-with tempfile.NamedTemporaryFile("w", delete=False) as f:
-    f.write(session.private_key)
-    keyfile = f.name
-os.chmod(keyfile, 0o600)
-
-subprocess.check_call([
-    "scp", "-i", keyfile, "-P", str(session.port),
-    "-o", "StrictHostKeyChecking=no",
-    "local-file.tar.gz",
-    f"{session.username}@{session.host}:/workspace/",
-])
-```
-
-This is the most flexible pattern: you get the full SSH wire
-protocol, including parallel transfers, partial resume, and `rsync`'s
-delta sync. It also gives you an interactive `ssh` if the
-`ExecSandboxInteractive` PTY isn't enough.
-
-When done, `RevokeSshSession` invalidates the credentials early.
-Otherwise they expire on `ttl_seconds`.
-
-### Pattern 3 — TCP-forwarded HTTP/S3 server (best for very large files)
-
-Run a tiny HTTP server inside the sandbox, then ask the gateway to
-forward a local TCP port to it. Stream files at line rate without
-gRPC framing overhead.
+`openshell.proto` imports three more files from the same directory and three
+Google well-known types (which `grpcio-tools` and `protoc` ship). Fetch the
+four files at the tag your gateway runs:
 
 ```bash
-# Inside the sandbox (one-time, started by your orchestration script):
-python3 -m http.server 8080 --directory /workspace
+mkdir -p proto gen
+for f in openshell datamodel sandbox options; do
+  curl -fsSL "https://raw.githubusercontent.com/NVIDIA/OpenShell/v0.1.7/proto/$f.proto" \
+    -o "proto/$f.proto"
+done
 ```
 
-```python
-# Local side: open a ForwardTcp bidi stream that maps localhost:9000 -> sandbox:8080
-def forward(stub, sandbox_name):
-    listener = socket.socket()
-    listener.bind(("127.0.0.1", 9000)); listener.listen(1)
-    sock, _ = listener.accept()
+Python (the protos import each other by bare file name, so generate into one
+flat directory and put it on `sys.path`):
 
-    def gen():
-        yield pb.TcpForwardFrame(start=pb.TcpForwardStart(
-            sandbox=sandbox_name, port=8080))
-        while True:
-            data = sock.recv(64*1024)
-            if not data: break
-            yield pb.TcpForwardFrame(data=data)
-
-    stream = stub.ForwardTcp(gen())
-    for frame in stream:
-        sock.sendall(frame.data)
+```bash
+python3 -m venv .venv
+.venv/bin/pip install grpcio grpcio-tools protobuf
+.venv/bin/python -m grpc_tools.protoc -I proto --python_out=gen --grpc_python_out=gen \
+  proto/openshell.proto proto/datamodel.proto proto/sandbox.proto proto/options.proto
 ```
 
-Now `curl http://localhost:9000/file.bin` (or any HTTP client) talks
-to the in-sandbox HTTP server through the gateway tunnel. For S3-style
-uploads, run `minio` or `garage` in the sandbox; for FTP-like access,
-forward port 21.
+This yields `openshell_pb2.py` (package `openshell.v1`), `datamodel_pb2.py`
+(`openshell.datamodel.v1`: `WorkspaceSelector`, `ObjectMeta`, `Provider`),
+`sandbox_pb2.py`, `options_pb2.py` and the `*_pb2_grpc.py` client stubs. The
+generated stubs require a `grpcio` at least as new as the `grpcio-tools` that
+made them.
 
-This pattern bypasses gRPC frame size limits entirely. Trade-off: you
-have to provision a server inside the sandbox, which means the agent
-image must include one or you must `pip install`/`apk add` it via
-`ExecSandbox` first.
+Other languages use their own protoc plugin on the same four files. Upstream's
+Rust crate `openshell-core` compiles them with `tonic-prost-build`.
 
-## File download patterns
+## Worked example: Python
 
-Symmetric to upload. Pick the same pattern by file size and tooling.
+The script below lists the sandboxes in a workspace, creates a small sandbox
+that runs `sleep infinity`, follows `WatchSandbox` until the sandbox is
+`SANDBOX_PHASE_READY`, runs `echo hello` with `ExecSandbox`, and deletes the
+sandbox. It reads its settings from the environment:
 
-### Pattern 1 — `tar` out of `ExecSandbox` stdout
+| Variable | Meaning |
+|---|---|
+| `OPENSHELL_ENDPOINT` | `host:port`, default `localhost:8080` |
+| `OPENSHELL_PLAINTEXT=1` | insecure channel (gateway without TLS) |
+| `OPENSHELL_TOKEN` | OIDC access token, sent as `authorization: Bearer` |
+| `OPENSHELL_CA_CERT` | CA file to verify the gateway (unset: system trust store) |
+| `OPENSHELL_CLIENT_CERT`, `OPENSHELL_CLIENT_KEY` | client certificate and key (mTLS) |
+| `OPENSHELL_WORKSPACE` | workspace, default `default` |
+| `OPENSHELL_IMAGE` | sandbox image; unset uses the gateway's default (`driver.sandboxImage`) |
 
-```python
-def download(stub, sandbox_name, remote_path, dest_dir):
-    req = pb.ExecSandboxRequest(
-        name=sandbox_name,
-        command=["tar", "-cf", "-", "-C",
-                 os.path.dirname(remote_path) or "/",
-                 os.path.basename(remote_path)],
-    )
-    buf = io.BytesIO()
-    for ev in stub.ExecSandbox(req):
-        if ev.HasField("stdout"):
-            buf.write(ev.stdout)
-        if ev.HasField("exit") and ev.exit.code != 0:
-            raise RuntimeError("tar -c failed")
-    buf.seek(0)
-    with tarfile.open(fileobj=buf) as tar:
-        tar.extractall(dest_dir)
-```
-
-### Pattern 2 — `scp` from the SSH session
-
-```python
-session = stub.CreateSshSession(pb.CreateSshSessionRequest(
-    sandbox=sandbox.name, ttl_seconds=900)).session
-# write key to tempfile, then:
-subprocess.check_call([
-    "scp", "-i", keyfile, "-P", str(session.port),
-    "-o", "StrictHostKeyChecking=no",
-    f"{session.username}@{session.host}:/workspace/results/",
-    "./local-results/",
-])
-```
-
-### Pattern 3 — HTTP GET via TCP forward
-
-Same forwarding setup as upload pattern 3; the local side runs `curl
-http://localhost:9000/result.tar.gz -o result.tar.gz` instead.
-
-## Streaming Claude Code interactively
-
-The end-to-end shape for a programmatic Claude Code session:
-
-```python
-def interactive_claude(stub, sandbox_name):
-    # Bidi: we send keystrokes / commands; gateway sends stdout.
-    in_q: queue.Queue = queue.Queue()
-    in_q.put(pb.ExecSandboxInput(start=pb.ExecStart(
-        name=sandbox_name,
-        command=["claude"],
-        tty=True,
-        env={"ANTHROPIC_LOG_LEVEL": "info"},
-    )))
-
-    def out_iter():
-        while True:
-            yield in_q.get()
-
-    stream = stub.ExecSandboxInteractive(out_iter())
-
-    # Background thread: read keyboard, push to in_q.
-    def stdin_pump():
-        for line in sys.stdin:
-            in_q.put(pb.ExecSandboxInput(stdin=pb.ExecStdin(
-                data=line.encode())))
-    threading.Thread(target=stdin_pump, daemon=True).start()
-
-    # Main: print events as they arrive.
-    for ev in stream:
-        if ev.HasField("stdout"):
-            sys.stdout.buffer.write(ev.stdout); sys.stdout.flush()
-        if ev.HasField("stderr"):
-            sys.stderr.buffer.write(ev.stderr); sys.stderr.flush()
-        if ev.HasField("exit"):
-            return ev.exit.code
-```
-
-For batch (non-interactive) Claude work — "ask one question, get one
-answer" — use `ExecSandbox` instead and let stdin be empty. Claude
-Code's `--print` flag bypasses the TTY entirely.
-
-## Tear-down and resource cleanup
-
-Always `DeleteSandbox` when done. The driver's compute-driver layer
-will clean up the underlying CR (and the agent-sandbox controller will
-GC the pod), but stale sandbox records consume gateway memory.
-
-```python
-stub.DeleteSandbox(pb.DeleteSandboxRequest(name=sandbox.name))
-```
-
-Idempotent — second delete returns `Deleted=false`, no error.
-
-For long-running services, register an `atexit` handler or a finalizer
-that walks `ListSandboxes(label_selector="owner=my-service")` and
-deletes any leftover entries — defensive against process crashes.
-
-## Complete worked example: Python
-
-> Sample predates the v0.1.2 request shapes (`workspace_scope`, the nested
-> `provider`); see [`grpc-without-cli.md`](grpc-without-cli.md).
-
-A self-contained script that creates a Claude Code sandbox, uploads a
-prompt file, runs a one-shot prompt against it, downloads the result,
-and tears down. Save as `examples/claude_oneshot.py`:
+Save it as `sample.py` next to the `gen/` directory:
 
 ```python
 #!/usr/bin/env python3
-"""End-to-end Claude Code one-shot through the OpenShell gRPC API."""
-import grpc, io, os, sys, tarfile
-from openshell.v1 import openshell_pb2 as pb, openshell_pb2_grpc as svc
+"""List sandboxes, create one, wait for Ready, exec `echo hello`, delete it.
 
-GATEWAY = os.environ.get("OPENSHELL_GATEWAY", "localhost:8080")
-TOKEN   = os.environ.get("OPENSHELL_TOKEN")
+Stubs generated from upstream OpenShell v0.1.7 protos into ./gen.
+"""
+import os
+import sys
+import uuid
 
-def channel():
-    if GATEWAY.startswith("localhost") or GATEWAY.startswith("127."):
-        return grpc.insecure_channel(GATEWAY)
-    creds = grpc.ssl_channel_credentials()
-    if TOKEN:
-        call_creds = grpc.access_token_call_credentials(TOKEN)
-        creds = grpc.composite_channel_credentials(creds, call_creds)
-    return grpc.secure_channel(GATEWAY, creds)
+import grpc
 
-def chunks(b, n=256*1024):
-    for i in range(0, len(b), n):
-        yield b[i:i+n]
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "gen"))
+import datamodel_pb2 as dm  # noqa: E402
+import openshell_pb2 as pb  # noqa: E402
+import openshell_pb2_grpc as rpc  # noqa: E402
 
-def main(prompt_path: str):
-    with channel() as ch:
-        stub = svc.OpenShellStub(ch)
+ENDPOINT = os.environ.get("OPENSHELL_ENDPOINT", "localhost:8080")
+WORKSPACE = os.environ.get("OPENSHELL_WORKSPACE", "default")
+IMAGE = os.environ.get("OPENSHELL_IMAGE", "")  # "" = the gateway's default image
 
-        # Provider (idempotent — ignore AlreadyExists)
-        try:
-            stub.CreateProvider(pb.CreateProviderRequest(
-                name="anthropic", type="anthropic",
-                credentials={"ANTHROPIC_API_KEY": os.environ["ANTHROPIC_API_KEY"]},
-            ))
-        except grpc.RpcError as e:
-            if e.code() != grpc.StatusCode.ALREADY_EXISTS: raise
 
-        sb = stub.CreateSandbox(pb.CreateSandboxRequest(
-            image="quay.io/azaalouk/demo-sandbox-claude:latest",
-            command=["sleep", "infinity"],
-            provider="anthropic",
-            labels={"owner": "claude_oneshot.py"},
-        )).sandbox
-        print(f"sandbox: {sb.name}", file=sys.stderr)
+def read(path):
+    with open(path, "rb") as f:
+        return f.read()
 
-        # Wait Ready
-        for ev in stub.WatchSandbox(pb.WatchSandboxRequest(name=sb.name)):
-            if ev.state == pb.SANDBOX_STATE_READY: break
 
-        # Upload the prompt as /workspace/prompt.txt via tar
-        buf = io.BytesIO()
-        with tarfile.open(fileobj=buf, mode="w") as tar:
-            tar.add(prompt_path, arcname="prompt.txt")
-        payload = buf.getvalue()
+def connect():
+    """Return (channel, metadata) from the OPENSHELL_* environment variables."""
+    token = os.environ.get("OPENSHELL_TOKEN", "")
+    metadata = (("authorization", f"Bearer {token}"),) if token else ()
+    if os.environ.get("OPENSHELL_PLAINTEXT") == "1":
+        return grpc.insecure_channel(ENDPOINT), metadata
+    ca = os.environ.get("OPENSHELL_CA_CERT")
+    cert = os.environ.get("OPENSHELL_CLIENT_CERT")
+    key = os.environ.get("OPENSHELL_CLIENT_KEY")
+    creds = grpc.ssl_channel_credentials(
+        root_certificates=read(ca) if ca else None,  # None = system trust store
+        private_key=read(key) if key else None,
+        certificate_chain=read(cert) if cert else None,
+    )
+    return grpc.secure_channel(ENDPOINT, creds), metadata
 
-        def upload_gen():
-            yield pb.ExecSandboxInput(start=pb.ExecStart(
-                name=sb.name, command=["tar", "-xC", "/workspace"], tty=False))
-            for c in chunks(payload):
-                yield pb.ExecSandboxInput(stdin=pb.ExecStdin(data=c))
-            yield pb.ExecSandboxInput(close_stdin=pb.ExecCloseStdin())
-        for ev in stub.ExecSandboxInteractive(upload_gen()):
-            if ev.HasField("exit") and ev.exit.code != 0:
-                raise RuntimeError(f"upload failed: {ev.exit.code}")
 
-        # Run claude --print < /workspace/prompt.txt > /workspace/answer.txt
-        for ev in stub.ExecSandbox(pb.ExecSandboxRequest(
-            name=sb.name,
-            command=["sh", "-c",
-                     "claude --print < /workspace/prompt.txt > /workspace/answer.txt"],
-        )):
-            if ev.HasField("stderr"): sys.stderr.buffer.write(ev.stderr)
-            if ev.HasField("exit") and ev.exit.code != 0:
-                raise RuntimeError(f"claude failed: {ev.exit.code}")
+def ws():
+    return dm.WorkspaceSelector(workspace=WORKSPACE)
 
-        # Download /workspace/answer.txt via tar
-        out = io.BytesIO()
-        for ev in stub.ExecSandbox(pb.ExecSandboxRequest(
-            name=sb.name,
-            command=["tar", "-cf", "-", "-C", "/workspace", "answer.txt"],
-        )):
-            if ev.HasField("stdout"): out.write(ev.stdout)
-            if ev.HasField("exit") and ev.exit.code != 0:
-                raise RuntimeError("download failed")
-        out.seek(0)
-        with tarfile.open(fileobj=out) as tar:
-            tar.extract("answer.txt", path=".")
 
-        # Cleanup
-        stub.DeleteSandbox(pb.DeleteSandboxRequest(name=sb.name))
-        print("answer written to ./answer.txt", file=sys.stderr)
+def list_sandboxes(stub, md):
+    names, token = [], ""
+    while True:
+        resp = stub.ListSandboxes(
+            pb.ListSandboxesRequest(workspace_scope=ws(), page_size=100, page_token=token),
+            metadata=md, timeout=30,
+        )
+        names += [s.metadata.name for s in resp.sandboxes]
+        token = resp.next_page_token
+        if not token:
+            return names
+
+
+def create_sandbox(stub, md, name):
+    spec = pb.SandboxSpec(command=["sleep", "infinity"])
+    if IMAGE:
+        spec.template.image = IMAGE
+    resp = stub.CreateSandbox(
+        pb.CreateSandboxRequest(
+            workspace_scope=ws(), name=name, spec=spec,
+            labels={"created-by": "api-sample"},
+        ),
+        metadata=md, timeout=60,
+    )
+    return resp.sandbox
+
+
+def wait_ready(stub, md, name, timeout=300):
+    req = pb.WatchSandboxRequest(
+        workspace_scope=ws(), sandbox=name, follow_status=True, stop_on_terminal=True,
+    )
+    for ev in stub.WatchSandbox(req, metadata=md, timeout=timeout):
+        if not ev.HasField("sandbox"):
+            continue
+        phase = ev.sandbox.status.phase
+        print(f"  phase: {pb.SandboxPhase.Name(phase)}")
+        if phase == pb.SANDBOX_PHASE_READY:
+            return
+        if phase in (pb.SANDBOX_PHASE_ERROR, pb.SANDBOX_PHASE_STOPPED,
+                     pb.SANDBOX_PHASE_COMPLETED):
+            raise RuntimeError(f"sandbox {name} ended in {pb.SandboxPhase.Name(phase)}")
+    raise RuntimeError(f"watch ended before sandbox {name} was ready")
+
+
+def exec_command(stub, md, name, command):
+    req = pb.ExecSandboxRequest(workspace_scope=ws(), sandbox=name, command=command)
+    out, code = b"", None
+    for ev in stub.ExecSandbox(req, metadata=md, timeout=60):
+        if ev.HasField("stdout"):
+            out += ev.stdout.data
+        elif ev.HasField("stderr"):
+            sys.stderr.buffer.write(ev.stderr.data)
+        elif ev.HasField("exit"):
+            code = ev.exit.exit_code
+    return code, out
+
+
+def delete_sandbox(stub, md, name):
+    resp = stub.DeleteSandbox(
+        pb.DeleteSandboxRequest(workspace_scope=ws(), name=name, allow_missing=True),
+        metadata=md, timeout=60,
+    )
+    return pb.DeletionOutcome.Name(resp.outcome)
+
+
+def run(stub, md):
+    print("health:", stub.Health(pb.HealthRequest(), timeout=10).version)
+    print(f"sandboxes in {WORKSPACE!r}:", list_sandboxes(stub, md))
+    name = f"api-sample-{uuid.uuid4().hex[:6]}"
+    sandbox = create_sandbox(stub, md, name)
+    print("created:", sandbox.metadata.name)
+    try:
+        wait_ready(stub, md, name)
+        code, out = exec_command(stub, md, name, ["echo", "hello"])
+        print(f"exec exit={code} stdout={out.decode().strip()!r}")
+    finally:
+        print("delete:", delete_sandbox(stub, md, name))
+
+
+def main():
+    channel, md = connect()
+    with channel:
+        run(rpc.OpenShellStub(channel), md)
+
 
 if __name__ == "__main__":
-    main(sys.argv[1])
+    main()
 ```
 
-Invoke with:
+Run it:
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...
-export OPENSHELL_GATEWAY=localhost:8080  # via kubectl port-forward
-python examples/claude_oneshot.py prompt.txt
+# Through gatewayIngress, with an OIDC token
+OPENSHELL_ENDPOINT=openshell.<cluster-domain>:443 OPENSHELL_TOKEN=<access token> \
+  .venv/bin/python sample.py
+
+# Through a port-forward to a gateway without TLS
+OPENSHELL_ENDPOINT=localhost:8080 OPENSHELL_PLAINTEXT=1 .venv/bin/python sample.py
+
+# Through a port-forward to a gateway with TLS and a client CA
+OPENSHELL_ENDPOINT=localhost:8080 OPENSHELL_CA_CERT=ca.crt \
+  OPENSHELL_CLIENT_CERT=tls.crt OPENSHELL_CLIENT_KEY=tls.key .venv/bin/python sample.py
 ```
 
-## Complete worked example: TypeScript
+Points worth knowing about the request shapes:
 
-> Sample predates the v0.1.2 request shapes (`workspace_scope`, the nested
-> `provider`); see [`grpc-without-cli.md`](grpc-without-cli.md).
+- **`CreateSandbox`** takes the sandbox definition in `spec` (`SandboxSpec`):
+  `command`, `environment`, `providers`, and `template.image` for the image.
+  The response is a `SandboxResponse` whose `sandbox` has `metadata`
+  (`ObjectMeta`: `name`, `id`, `workspace`, `labels`), `spec` and `status`. An
+  existing name fails with `ALREADY_EXISTS`; an empty name lets the gateway pick
+  one.
+- **`WatchSandbox`** names the sandbox in `sandbox`. With `follow_status` it
+  streams `SandboxStreamEvent`s whose `sandbox` field holds a status snapshot
+  (other events carry logs, platform events or warnings). The lifecycle is
+  `sandbox.status.phase` (`SandboxPhase`: `PROVISIONING`, `READY`, `ERROR`,
+  `DELETING`, `STOPPED`, `COMPLETED`, ...). `stop_on_terminal` ends the stream
+  at `READY` or a terminal phase.
+- **`ExecSandbox`** names the sandbox in `sandbox` and streams
+  `ExecSandboxEvent`s: `stdout.data` and `stderr.data` (bytes), then
+  `exit.exit_code`. By default the command runs through a login shell
+  (`no_login_shell` turns that off). Other fields: `workdir`, `environment`,
+  `execution_timeout`, `stdin`, `tty`.
+- **`DeleteSandbox`** returns an `outcome` (`DeletionOutcome`). With
+  `allow_missing=True` a missing sandbox is `ALREADY_ABSENT` rather than an
+  error. `ACCEPTED` means the gateway record still exists while the deletion
+  finishes.
 
-Equivalent flow using `@connectrpc/connect` for browser/Node:
+## Beyond the sample
+
+These snippets use the sample's `pb`, `dm`, `ws()`, stub and metadata, and the
+file snippets also `import io, tarfile`. They are checked against the v0.1.7
+stubs like the sample.
+
+### Credentials: providers
+
+A provider holds a credential for sandboxes. Its `type` is the ID of a provider
+profile already on the gateway (`ListProviderProfiles`); the chart's inference
+provider hook imports one named `kyma-<type>`, for example `kyma-anthropic`.
+The credential keys are the profile's environment variable names.
+
+```python
+def provider_snippet(stub, md, name):
+    stub.CreateProvider(pb.CreateProviderRequest(
+        workspace_scope=ws(),
+        provider=dm.Provider(
+            metadata=dm.ObjectMeta(name="my-anthropic"),
+            type="kyma-anthropic",  # a profile ID from ListProviderProfiles
+            credentials={"ANTHROPIC_API_KEY": os.environ["ANTHROPIC_API_KEY"]},
+        ),
+    ), metadata=md, timeout=30)
+    # At creation: pb.SandboxSpec(..., providers=["my-anthropic"]). Later:
+    stub.AttachSandboxProvider(pb.AttachSandboxProviderRequest(
+        workspace_scope=ws(), sandbox=name, provider="my-anthropic",
+    ), metadata=md, timeout=30)
+```
+
+### Files in and out
+
+There is no file-transfer RPC. Pipe a tar archive through a command instead,
+or use `openshell sandbox upload` / `download` from the CLI.
+
+Small files fit in one `ExecSandbox` request (`stdin` bytes). The gateway
+refuses any inbound message over 1 MiB, the request included:
+
+```python
+def upload_small(stub, md, name, local_path, remote_dir):
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        tar.add(local_path, arcname=os.path.basename(local_path))
+    req = pb.ExecSandboxRequest(
+        workspace_scope=ws(), sandbox=name,
+        command=["tar", "-xf", "-", "-C", remote_dir],
+        stdin=buf.getvalue(),  # the whole request must stay under 1 MiB
+    )
+    for ev in stub.ExecSandbox(req, metadata=md, timeout=120):
+        if ev.HasField("exit") and ev.exit.exit_code != 0:
+            raise RuntimeError(f"tar -x exited {ev.exit.exit_code}")
+```
+
+Downloads arrive as a stream of `stdout` chunks, so they have no such limit:
+
+```python
+def download(stub, md, name, remote_dir, remote_name, local_dir):
+    req = pb.ExecSandboxRequest(
+        workspace_scope=ws(), sandbox=name,
+        command=["tar", "-cf", "-", "-C", remote_dir, remote_name],
+    )
+    buf = io.BytesIO()
+    for ev in stub.ExecSandbox(req, metadata=md, timeout=120):
+        if ev.HasField("stdout"):
+            buf.write(ev.stdout.data)
+        elif ev.HasField("exit") and ev.exit.exit_code != 0:
+            raise RuntimeError(f"tar -c exited {ev.exit.exit_code}")
+    buf.seek(0)
+    with tarfile.open(fileobj=buf) as tar:
+        tar.extractall(local_dir, filter="data")
+```
+
+Larger uploads go through `ExecSandboxInteractive`. The first
+`ExecSandboxInput` carries the `start` request; later ones carry raw `stdin`
+bytes (keep each well under 1 MiB) or a `resize` for a TTY. Ending the
+request stream closes the command's stdin:
+
+```python
+def upload_stream(stub, md, name, payload, remote_path):
+    def frames():
+        yield pb.ExecSandboxInput(start=pb.ExecSandboxRequest(
+            workspace_scope=ws(), sandbox=name,
+            command=["sh", "-c", 'cat > "$1"', "sh", remote_path],
+        ))
+        for i in range(0, len(payload), 256 * 1024):
+            yield pb.ExecSandboxInput(stdin=payload[i:i + 256 * 1024])
+        # Returning ends the request stream, which closes the command's stdin.
+
+    for ev in stub.ExecSandboxInteractive(frames(), metadata=md):
+        if ev.HasField("exit") and ev.exit.exit_code != 0:
+            raise RuntimeError(f"upload exited {ev.exit.exit_code}")
+```
+
+### TCP forwarding
+
+`ForwardTcp` is a bidirectional stream of `TcpForwardFrame`s. The first frame
+is `init` with the sandbox, its workspace and the target; after that both
+sides send `data` bytes. In v0.1.7 the TCP target must be a loopback address
+inside the sandbox (`127.0.0.1`, `::1` or `localhost`):
+
+```python
+def forward_first_frame(name):
+    return pb.TcpForwardFrame(init=pb.TcpForwardInit(
+        sandbox=name, workspace="default",
+        tcp=pb.TcpRelayTarget(host="127.0.0.1", port=8000),
+    ))
+```
+
+For reaching a sandbox's HTTP service from outside, `openshell service expose`
+is the supported route; see
+[`production-deployment.md`](production-deployment.md#reaching-a-service-inside-a-sandbox).
+
+## Worked example: TypeScript
+
+A shorter Node version of the same flow with plain
+[`@grpc/grpc-js`](https://www.npmjs.com/package/@grpc/grpc-js), loading the
+same four proto files at runtime with `@grpc/proto-loader`. `keepCase: true`
+keeps the proto field names (`workspace_scope`, `follow_status`, ...), so they
+match the Python sample. This sample has not been run; the field names are
+those of the v0.1.7 protos.
 
 ```typescript
-import { createPromiseClient } from "@connectrpc/connect";
-import { createGrpcWebTransport } from "@connectrpc/connect-web";
-import { OpenShell } from "./gen/openshell/v1/openshell_connect.js";
-import { CreateSandboxRequest, ExecSandboxRequest, ExecSandboxInput, ExecStart, ExecStdin, ExecCloseStdin } from "./gen/openshell/v1/openshell_pb.js";
+import * as grpc from "@grpc/grpc-js";
+import * as protoLoader from "@grpc/proto-loader";
 
-const transport = createGrpcWebTransport({
-  baseUrl: process.env.OPENSHELL_GATEWAY ?? "http://localhost:8080",
-  interceptors: [(next) => async (req) => {
-    if (process.env.OPENSHELL_TOKEN)
-      req.header.set("authorization", `Bearer ${process.env.OPENSHELL_TOKEN}`);
-    return next(req);
-  }],
+const def = protoLoader.loadSync("proto/openshell.proto", {
+  includeDirs: ["proto"], keepCase: true, enums: String, longs: String,
+  defaults: true, oneofs: true,
 });
-const client = createPromiseClient(OpenShell, transport);
+const pkg = grpc.loadPackageDefinition(def) as any;
+const creds = process.env.OPENSHELL_PLAINTEXT === "1"
+  ? grpc.credentials.createInsecure()
+  : grpc.credentials.createSsl(); // createSsl(ca, key, cert) for mTLS
+const client = new pkg.openshell.v1.OpenShell(
+  process.env.OPENSHELL_ENDPOINT ?? "localhost:8080", creds);
+const md = new grpc.Metadata();
+if (process.env.OPENSHELL_TOKEN) md.set("authorization", `Bearer ${process.env.OPENSHELL_TOKEN}`);
+const ws = { workspace: process.env.OPENSHELL_WORKSPACE ?? "default" };
 
-const { sandbox } = await client.createSandbox(new CreateSandboxRequest({
-  image: "quay.io/azaalouk/demo-sandbox-claude:latest",
-  command: ["sleep", "infinity"],
-  provider: "anthropic",
-}));
+const unary = (method: string, req: object): Promise<any> =>
+  new Promise((resolve, reject) =>
+    client[method](req, md, (err: grpc.ServiceError | null, res: any) =>
+      err ? reject(err) : resolve(res)));
 
-// Wait Ready
-for await (const ev of client.watchSandbox({ name: sandbox!.name })) {
-  if (ev.state === SandboxState.READY) break;
+async function main() {
+  const name = `api-sample-${Date.now().toString(36)}`;
+  await unary("CreateSandbox", { workspace_scope: ws, name, spec: { command: ["sleep", "infinity"] } });
+  try {
+    const watch = client.WatchSandbox(
+      { workspace_scope: ws, sandbox: name, follow_status: true, stop_on_terminal: true }, md);
+    for await (const ev of watch) {
+      if (ev.payload !== "sandbox") continue;
+      const phase = ev.sandbox.status?.phase;
+      if (phase === "SANDBOX_PHASE_READY") break;
+      if (phase === "SANDBOX_PHASE_ERROR") throw new Error(`sandbox ${name} failed`);
+    }
+    const exec = client.ExecSandbox({ workspace_scope: ws, sandbox: name, command: ["echo", "hello"] }, md);
+    for await (const ev of exec) {
+      if (ev.payload === "stdout") process.stdout.write(ev.stdout.data);
+      if (ev.payload === "exit") console.log("exit", ev.exit.exit_code);
+    }
+  } finally {
+    await unary("DeleteSandbox", { workspace_scope: ws, name, allow_missing: true });
+  }
 }
 
-// Upload via tar pipe
-const tarBytes = await tarPack(["./prompt.txt"]);
-const upStream = client.execSandboxInteractive((async function* () {
-  yield new ExecSandboxInput({ start: new ExecStart({
-    name: sandbox!.name, command: ["tar", "-xC", "/workspace"], tty: false }) });
-  for (const chunk of chunkify(tarBytes, 256 * 1024))
-    yield new ExecSandboxInput({ stdin: new ExecStdin({ data: chunk }) });
-  yield new ExecSandboxInput({ closeStdin: new ExecCloseStdin() });
-})());
-for await (const ev of upStream) {
-  if (ev.exit && ev.exit.code !== 0) throw new Error(`tar failed: ${ev.exit.code}`);
-}
-
-// Run + download elided — same shape as Python.
-
-await client.deleteSandbox({ name: sandbox!.name });
+main();
 ```
 
 ## Operational notes
 
-- **Sandbox cold-start cost** is dominated by container image pull.
-  Pre-pulling the agent image to every node (or staging a smaller
-  derivative) cuts time-to-Ready from ~60 s to ~5 s.
-- **Concurrency**: each sandbox has its own pod. The Helm chart's
-  `Deployment` for the driver is single-replica. Many sandboxes per
-  driver are fine; they all serialize through the gateway's gRPC
-  server, but the actual sandbox lifecycle is parallelized inside
-  Kyma.
-- **Quotas**: respect the namespace ResourceQuota when sizing
-  sandboxes. Sandbox pods are fenced by upstream's own NetworkPolicies
-  (workload pods have no egress, and reach the network only through their
-  supervisor pod); the chart's `networkPolicy.enabled` covers the
-  driver+gateway pod.
-- **gRPC max message size**: the gateway sets a default 64 MB cap. For
-  files larger than that, use SSH/SCP or TCP-forwarded HTTP — not the
-  exec stdin pipe.
-- **Idempotency**: `CreateProvider` and `CreateSandbox` are not
-  retried automatically. Catch `ALREADY_EXISTS` and treat it as
-  success. `DeleteSandbox` is idempotent on the wire (returns
-  `deleted: false` if already gone).
-- **Streaming back-pressure**: when piping large stdin, watch for
-  flow-control. Tonic and grpc-python both honor HTTP/2 windows;
-  Connect-Web caps at 16 MB per stream by default — chunk smaller.
+- **Message size.** The gateway accepts inbound gRPC messages up to 1 MiB
+  (upstream's `MAX_GRPC_DECODE_SIZE`, in place of tonic's 4 MiB default). This
+  covers a whole `ExecSandboxRequest` including `stdin` and each
+  `ExecSandboxInput` frame. It applies to what the gateway receives, not to
+  what it streams back.
+- **Retries.** `CreateSandbox`, `DeleteSandbox`, `CreateProvider`,
+  `AttachSandboxProvider` and `ExecSandbox` take an optional `request_id` (a
+  nonzero UUID). A retry with the same `request_id` does not create or run
+  anything twice; see the field comments in `openshell.proto`.
+- **Cleanup.** Label your sandboxes at creation and clean up leftovers with
+  `ListSandboxes(label_selector="created-by=api-sample")`, following
+  `next_page_token` until it is empty, then `DeleteSandbox` with
+  `allow_missing=True`.
+- **Rate limit.** With `gateway.grpcRateLimit` set, the gateway limits gRPC
+  requests per window; reflection calls have their own counter with the same
+  limit.
+- **Gateway TLS changes.** Sandboxes created before `gateway.tls.enabled` was
+  turned on keep the plaintext endpoint and must be recreated
+  ([`production-deployment.md`](production-deployment.md#upgrading-to-gateway-tls)).
 
 ## References
 
-- Upstream proto: [`NVIDIA/OpenShell/proto/openshell.proto`](https://raw.githubusercontent.com/NVIDIA/OpenShell/main/proto/openshell.proto)
-- Upstream README: <https://github.com/NVIDIA/OpenShell>
-- Connect protocol (grpc-web alternative): <https://connectrpc.com>
-- gRPC max-message-size and back-pressure tuning: <https://grpc.io/docs/guides/performance/>
-- This repo's Cloud Connector setup:
-  [`docs/cloud-connector-setup.md`](cloud-connector-setup.md)
+- Upstream protos at v0.1.7: <https://github.com/NVIDIA/OpenShell/tree/v0.1.7/proto>
+- Upstream project: <https://github.com/NVIDIA/OpenShell>
+- [`grpc-without-cli.md`](grpc-without-cli.md): `grpcurl` and reflection
+- [`production-deployment.md`](production-deployment.md): OIDC, TLS, mTLS and `gatewayIngress`
+- [`sap-ias-setup.md`](sap-ias-setup.md): SAP Cloud Identity Services as the identity provider
+- [`cloud-connector-setup.md`](cloud-connector-setup.md): private routing through SAP Cloud Connector

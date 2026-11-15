@@ -15,6 +15,19 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
   unverified IAS recipe in `production-deployment.md`, which now also notes that
   IAS has no device grant. No chart change: `rolesClaim: groups` with
   `adminRole`/`userRole` was already supported.
+- **Docs brought up to 0.13.0 / upstream v0.1.7.**
+  [`docs/openshell-api-programmatic-usage.md`](docs/openshell-api-programmatic-usage.md)
+  is rewritten: its Python sample is built against stubs generated from the v0.1.7
+  protos and ran live against a scratch release. The gRPC-Web/Connect path is gone,
+  since the gateway does not serve it, and the 1 MiB message limit is stated. The
+  other docs fix the following:
+  - stale versions, and the gateway Service name (`<release>-openshell-driver-kyma`);
+  - mentions of the removed APIRule and Istio-injection settings;
+  - the "OTLP must be plain http" note (https works since 0.13.0);
+  - the missing `workspace_scope` in the grpcurl examples;
+  - the CONTRIBUTING and runbook details.
+
+  `production-deployment.md` and the README now cover the 0.11–0.13 options.
 
 ## [0.13.0] — 2026-11-06
 

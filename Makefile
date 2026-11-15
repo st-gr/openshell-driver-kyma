@@ -37,7 +37,7 @@ help:
 	@echo ""
 	@echo "  fmt                  cargo fmt --all"
 	@echo "  fmt-check            cargo fmt --all --check"
-	@echo "  clippy               cargo clippy with pedantic warnings as errors"
+	@echo "  clippy               cargo clippy with warnings as errors"
 	@echo "  build                cargo build --release --workspace"
 	@echo "  test                 fmt-check + clippy + cargo test --workspace"
 	@echo "  coverage             cargo llvm-cov over the workspace"

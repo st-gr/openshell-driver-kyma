@@ -5,13 +5,10 @@
 **Please do not report security vulnerabilities through public GitHub
 issues.**
 
-Use one of the following private channels instead:
-
-- GitHub private vulnerability disclosure for this repository (preferred:
-  [Report a vulnerability](https://github.com/st-gr/openshell-driver-kyma/security/advisories/new)).
-- Email the maintainers via the contact listed in
-  [Chart.yaml](deploy/helm/openshell-driver-kyma/Chart.yaml) maintainers
-  block.
+Use GitHub private vulnerability disclosure for this repository instead:
+[Report a vulnerability](https://github.com/st-gr/openshell-driver-kyma/security/advisories/new).
+If you cannot use it, open a public issue that asks for a private contact and
+contains no details of the vulnerability.
 
 We will acknowledge receipt within five business days and provide a fix
 or workaround timeline within fifteen business days.

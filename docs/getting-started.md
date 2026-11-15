@@ -10,7 +10,7 @@ create, file upload, Claude inference that creates a new file, file
 download, teardown — see
 [`walkthrough-claude-files.md`](walkthrough-claude-files.md).
 
-If you want the underlying mechanics (driver + gateway sidecar
+If you want the underlying mechanics (driver + in-pod gateway
 architecture, NetworkPolicy posture, etc.) read
 [`production-deployment.md`](production-deployment.md) after you finish
 here.
@@ -63,6 +63,9 @@ kubectl -n "$NS" create secret generic my-anthropic-creds \
 cp deploy/helm/openshell-driver-kyma/values.example.yaml my-values.yaml
 ${EDITOR:-vi} my-values.yaml      # plug in your upstream URL, secret name, OIDC issuer
 ```
+
+`values.example.yaml` turns on `gateway`, `gatewayService` and
+`gateway.sandboxJwt`; the chart defaults for all three are off.
 
 If you add an OIDC issuer (`gateway.oidc.issuer`) to the example file, also
 turn `inferenceProvider.enabled` off: the chart refuses to render the two
@@ -163,7 +166,7 @@ Two things that look like "the sandbox is unreachable" but are not:
   Ctrl-D or Ctrl-P Ctrl-Q instead.
 - Do not create sandboxes from
   `ghcr.io/nvidia/openshell-community/sandboxes/base:latest`: that image
-  embeds a sandbox policy the v0.1.2 supervisor rejects ("Image policy is
+  embeds a sandbox policy a v0.1.2 supervisor rejects ("Image policy is
   invalid"), so the sandbox never reaches Ready. Use the default image, or an
   image without an embedded policy such as `ghcr.io/st-gr/sandbox-claude`.
 
@@ -340,7 +343,7 @@ For one-off and scripted installs you can skip the values file and pass
 flags directly. The values-file path above is recommended for anything
 you'll keep around.
 
-### Minimal install (gateway sidecar + sandbox-JWT only)
+### Minimal install (in-pod gateway + sandbox-JWT only)
 
 ```bash
 helm install ods deploy/helm/openshell-driver-kyma \

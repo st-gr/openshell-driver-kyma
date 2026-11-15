@@ -4,7 +4,7 @@ This is the canonical hands-on guide. It takes a clean Kyma cluster
 through:
 
 1. Cluster prerequisites + namespace bootstrap.
-2. Installing the chart (`0.10.0`) from OCI.
+2. Installing the chart (`0.13.0`) from OCI.
 3. Installing the `openshell` CLI on your host.
 4. Creating a Claude-equipped sandbox.
 5. Uploading a file to the sandbox.
@@ -122,7 +122,7 @@ curl -fsSL https://raw.githubusercontent.com/st-gr/openshell-driver-kyma/main/de
 
 ```bash
 helm install ods oci://ghcr.io/st-gr/charts/openshell-driver-kyma \
-  --version 0.10.0 \
+  --version 0.13.0 \
   --namespace "$NS" \
   -f my-values.yaml \
   --wait --timeout=300s
@@ -141,6 +141,10 @@ openshell gateway add --local http://localhost:8080
 
 `gateway add --local` registers this gateway as the active one so
 subsequent `openshell` commands don't need `--gateway-endpoint`.
+
+With `gateway.oidc` enabled, the gateway refuses every call without a token.
+Register it with `--oidc-issuer` and `--oidc-client-id` instead; see
+[`production-deployment.md`](production-deployment.md).
 
 ## 6. Create the Claude-equipped sandbox
 
@@ -191,7 +195,7 @@ cat > /tmp/draft.md <<'EOF'
 
 Three things shipped this week:
 - Helm chart published as OCI artifact.
-- Driver release on upstream OpenShell v0.1.6.
+- Driver release on upstream OpenShell v0.1.7.
 - E2E live-cluster smoke succeeded.
 
 Two things outstanding:
@@ -213,7 +217,7 @@ apk add --no-cache rsync openssh-client          # Alpine
 
 ## 8. Run inference: ask Claude to read + write a new file
 
-> **Verified on v0.9.0.** The commands call `/usr/bin/claude` directly so they
+> **Originally verified on v0.9.0.** The commands call `/usr/bin/claude` directly so they
 > also work with `sandbox-claude` images built before v0.9.0, whose `claude`
 > wrapper unset `ANTHROPIC_API_KEY`; with an image built from v0.9.0 or later,
 > plain `claude` works too.
@@ -245,8 +249,8 @@ The flags that matter:
   to the profile's host and port. Confirm with
   `openshell sandbox exec --name claude-files -- env | grep ANTHROPIC`.
 - `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` — silences statsig +
-  sentry + other auxiliary endpoints. `driver.disableClaudeTelemetry: true`
-  adds it to every sandbox.
+  sentry + other auxiliary endpoints. The chart sets it in every sandbox when
+  `driver.disableClaudeTelemetry: true` (on in `values.example.yaml`).
 - `--allowed-tools Write,Read` — claude-code's `-p` print mode disables
   tools by default. You have to opt in to Write to let it create files.
 - `--add-dir /sandbox` — claude-code only writes inside directories
@@ -276,10 +280,13 @@ openshell sandbox delete claude-files
 helm uninstall ods -n "$NS"
 ```
 
-The chart leaves three Secrets in the namespace by design (the JWT
-signing-key Secret + two TLS Secrets), so they survive `helm upgrade`
+The chart leaves four Secrets in the namespace by design (the JWT
+signing-key Secret, the two TLS Secrets and the credential-storage
+key-encryption-key Secret), so they survive `helm upgrade`
 and the sandbox-Ready promise holds across releases. They go away with
-`kubectl delete namespace "$NS"`. The operator-managed
+`kubectl delete namespace "$NS"`; deleting the key-encryption-key Secret
+while keeping the gateway database makes the stored provider credentials
+undecryptable. The operator-managed
 `my-anthropic-creds` Secret also stays (the chart never owned it).
 
 For a complete scrub:
@@ -305,7 +312,7 @@ your in-cluster LLM upstream
 (real Anthropic / Bedrock / etc.)
 ```
 
-The gateway sidecar (driver+gateway pod) holds the provider record and hands
+The in-pod gateway (driver+gateway pod) holds the provider record and hands
 it to the supervisor, but never forwards request bytes.
 
 What the agent sees in its env: `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL` and a
@@ -445,7 +452,7 @@ kubectl -n "$NS" run cli --restart=Never --image=alpine:3.20 --command -- sleep 
 # Inside the pod (one-time setup):
 kubectl -n "$NS" exec cli -- sh -c '
   apk add --no-cache curl rsync openssh-client &&
-  curl -fsSL https://github.com/NVIDIA/OpenShell/releases/download/v0.1.4/openshell-x86_64-unknown-linux-musl.tar.gz \
+  curl -fsSL https://github.com/NVIDIA/OpenShell/releases/download/v0.1.7/openshell-x86_64-unknown-linux-musl.tar.gz \
     | tar -xz -C /usr/local/bin &&
   /usr/local/bin/openshell gateway add --local http://ods-openshell-driver-kyma:8080
 '
