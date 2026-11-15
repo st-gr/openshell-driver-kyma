@@ -20,6 +20,33 @@ OcsfLogConfig). A string is always true in a template, so "false" would enable i
 {{- fail "gateway.ocsfLog.maxFiles must be positive when gateway.ocsfLog.rotation is daily." -}}
 {{- end -}}
 {{- end -}}
+{{- /* gateway.metrics.tls: upstream v0.1.8's metrics.tls refusals (its _toml.tpl).
+An empty certSecretName reuses the server TLS Secret, which always exists here:
+the gateway requires gateway.sandboxJwt, whose PKI hook (or cert-manager) creates it. */ -}}
+{{- $metricsTls := dig "metrics" "tls" dict .Values.gateway -}}
+{{- range $key := list "enabled" "requireClientCert" -}}
+{{- if not (kindIs "bool" (get $metricsTls $key)) -}}
+{{- fail (printf "gateway.metrics.tls.%s must be a boolean (true or false), got the %s %q." $key (kindOf (get $metricsTls $key)) (toString (get $metricsTls $key))) -}}
+{{- end -}}
+{{- end -}}
+{{- if $metricsTls.enabled -}}
+{{- if not (int .Values.gateway.metricsPort) -}}
+{{- fail "gateway.metrics.tls.enabled requires gateway.metricsPort to be non-zero." -}}
+{{- end -}}
+{{- if and $metricsTls.requireClientCert (not $metricsTls.clientCaSecretName) -}}
+{{- fail "gateway.metrics.tls.requireClientCert requires gateway.metrics.tls.clientCaSecretName." -}}
+{{- end -}}
+{{- with $metricsTls.clientCaSecretName -}}
+{{- if eq . (include "openshell-driver-kyma.gatewayClientCaSecretName" $) -}}
+{{- fail "gateway.metrics.tls.clientCaSecretName must not reuse the gateway client CA Secret." -}}
+{{- end -}}
+{{- /* As upstream: the client TLS Secret carries the gateway CA and is readable in
+sandboxes, so trusting it would let sandbox workloads scrape metrics. */ -}}
+{{- if or (eq . (include "openshell-driver-kyma.clientTlsSecretName" $)) (eq . (include "openshell-driver-kyma.driverClientTlsSecretName" $)) -}}
+{{- fail "gateway.metrics.tls.clientCaSecretName must not reuse the gateway client TLS Secret (the one sandboxes mount)." -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- if not (has (toString .Values.gateway.serviceHostnameFormat) (list "" "readable" "hashed")) -}}
 {{- fail (printf "gateway.serviceHostnameFormat must be empty, readable or hashed, got %q." (toString .Values.gateway.serviceHostnameFormat)) -}}
 {{- end -}}

@@ -969,7 +969,7 @@ SANDBOX_VERBS = ["create", "delete", "get", "list", "patch", "update", "watch"]
 # the v0.1.7 templates of deploy/helm/openshell (role.yaml for shared mode, whose
 # Role holds the namespaced rights; clusterrole.yaml for the cluster-wide rights of
 # every mode and the namespaced rights of the other modes); the line numbers refer to those.
-# The rules are unchanged since v0.1.4: v0.1.7 only adds ConfigMap get/create for
+# The rules are unchanged since v0.1.4: v0.1.8 (unchanged from v0.1.7) only adds ConfigMap get/create for
 # supervisor.network.additionalCaConfigMapName, which this chart refuses.
 PVC_GET = [("", "persistentvolumeclaims", ["get"])]           # role.yaml:18-23, clusterrole.yaml:28-32; with allowDriverConfig
 WORKLOAD = [("agents.x-k8s.io", "sandboxes", SANDBOX_VERBS),                        # role.yaml:24-36, clusterrole.yaml:69-81

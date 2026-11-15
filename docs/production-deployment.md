@@ -130,7 +130,7 @@ imagePullSecrets:
 gateway:
   enabled: true
   # The gateway, supervisor and sandbox-runtime images default to digests of
-  # the upstream OpenShell release named by `upstream.version` (v0.1.7). Leave
+  # the upstream OpenShell release named by `upstream.version` (v0.1.8). Leave
   # them alone unless you move that version too: they must match each other
   # and the driver.
 
@@ -547,8 +547,12 @@ openshell status
   `driver.resourceAdmission.*` (approval of caller-attached resources, on by
   default), `driver.allowedPodAnnotations` and `driver.allowedPodLabels` (both
   `[]`), `gateway.enableWebsocketTunnel` (`false`),
-  `gateway.policyValidationFailureMode` (`fail_closed`) and
-  `gateway.serviceHostnameFormat` (`""`, readable names).
+  `gateway.policyValidationFailureMode` (`fail_closed`),
+  `gateway.serviceHostnameFormat` (`""`, readable names),
+  `gateway.metrics.tls.*` (TLS or mTLS for the metrics port, default off; a
+  scraper then needs https), `priorityClassName` and `topologySpreadConstraints`
+  for the gateway pod (both empty), and `driver.supervisorRuntimeClassName`
+  (empty).
 
 ## Reaching a service inside a sandbox
 
@@ -742,7 +746,9 @@ sandboxes never send telemetry.
 - **No supervisor app listener** (upstream v0.1.7's
   `sandbox_runtime.app_listener`). It belongs to the in-gateway driver and the
   shared-supervisor pods, which this chart does not render; upstream's
-  standalone driver leaves it off, and so does this one.
+  standalone driver leaves it off, and so does this one. Since v0.1.8 the driver
+  serves upstream's `ResolveSupervisorAppEndpoint`, which therefore answers "no
+  endpoint", as upstream's standalone driver does.
 - **No Istio sidecars in sandbox workloads.** Upstream refuses a workload pod
   that receives a projected ServiceAccount token, which a sidecar brings, so
   sandbox workloads always carry `sidecar.istio.io/inject: "false"`

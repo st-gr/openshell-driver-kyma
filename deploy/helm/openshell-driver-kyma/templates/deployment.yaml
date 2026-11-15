@@ -328,6 +328,16 @@ spec:
             {{- end }}
             {{- end }}
             {{- end }}
+            {{- if .Values.gateway.metrics.tls.enabled }}
+            - name: metrics-tls-cert
+              mountPath: /etc/openshell-metrics/server
+              readOnly: true
+            {{- if .Values.gateway.metrics.tls.clientCaSecretName }}
+            - name: metrics-tls-client-ca
+              mountPath: /etc/openshell-metrics/client-ca
+              readOnly: true
+            {{- end }}
+            {{- end }}
             {{- if and .Values.gateway.oidc.issuer .Values.gateway.oidc.caConfigMapName }}
             - name: oidc-ca
               mountPath: /etc/openshell-tls/oidc-ca
@@ -400,6 +410,20 @@ spec:
         {{- end }}
         {{- end }}
         {{- end }}
+        {{- if .Values.gateway.metrics.tls.enabled }}
+        - name: metrics-tls-cert
+          secret:
+            secretName: {{ include "openshell-driver-kyma.metricsTlsSecretName" . | quote }}
+            defaultMode: {{ include "openshell-driver-kyma.secretDefaultMode" . }}
+        {{- if .Values.gateway.metrics.tls.clientCaSecretName }}
+        - name: metrics-tls-client-ca
+          secret:
+            secretName: {{ .Values.gateway.metrics.tls.clientCaSecretName | quote }}
+            items:
+              - key: ca.crt
+                path: ca.crt
+        {{- end }}
+        {{- end }}
         {{- if and .Values.gateway.oidc.issuer .Values.gateway.oidc.caConfigMapName }}
         - name: oidc-ca
           configMap:
@@ -423,6 +447,9 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
         {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
@@ -433,5 +460,9 @@ spec:
       {{- end }}
       {{- with .Values.affinity }}
       affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}
       {{- end }}

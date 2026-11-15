@@ -649,3 +649,23 @@ gateway.tls.clientCa.secretName's ca.crt (mounted at /etc/openshell-tls/client-c
 /etc/openshell-tls/server/ca.crt
 {{- end -}}
 {{- end }}
+
+{{/*
+The Secret the gateway verifies client certificates against while it does
+(gateway.tls.enabled and clientCa.enabled): clientCa.secretName, or the server TLS
+Secret's ca.crt. Empty when the gateway verifies none. Upstream's _toml.tpl
+compares metrics.tls.clientCaSecretName against the same Secret.
+*/}}
+{{- define "openshell-driver-kyma.gatewayClientCaSecretName" -}}
+{{- if and .Values.gateway.tls.enabled .Values.gateway.tls.clientCa.enabled -}}
+{{- default (include "openshell-driver-kyma.serverTlsSecretName" .) .Values.gateway.tls.clientCa.secretName -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+The metrics listener's TLS Secret (gateway.metrics.tls.certSecretName, or the
+server TLS Secret as upstream's server.tls.certSecretName default).
+*/}}
+{{- define "openshell-driver-kyma.metricsTlsSecretName" -}}
+{{- default (include "openshell-driver-kyma.serverTlsSecretName" .) .Values.gateway.metrics.tls.certSecretName -}}
+{{- end }}

@@ -6,7 +6,7 @@ crash-loop once the driver starts.
 
 Every rule below is one of upstream's startup refusals in
 KubernetesComputeConfig::validate_workspace_mode (openshell-driver-kubernetes
-src/config.rs, v0.1.7), so a value upstream would refuse fails `helm template`
+src/config.rs, v0.1.8), so a value upstream would refuse fails `helm template`
 instead of crash-looping the pod:
   managed   config.rs:897   gateway id is a DNS-1123 label
             config.rs:907   "openshell-<id>-" plus a 19-character workspace
@@ -22,7 +22,7 @@ Not mirrored because no chart value can reach them: an empty gateway id
 (config.rs:894, the id defaults to the release fullname) and an empty operator
 label or file (config.rs:945-953, an empty value is simply not passed).
 
-Also mirrored, from upstream v0.1.7:
+Also mirrored, from upstream v0.1.8:
   OTLP exports openshell-core sandbox_env.rs SupervisorOtlpArgs: each protocol
                is a clap enum (grpc, http/protobuf), and --otlp-cert-file and
                --otlp-key-file `requires` each other. The OCSF schema version is
