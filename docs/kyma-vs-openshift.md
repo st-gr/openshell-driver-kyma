@@ -35,7 +35,7 @@ first sandbox is created.
 |---|---|---|
 | Default mesh | Optional (Service Mesh Operator) | Istio module enabled by default |
 | Sidecar injection on labeled namespaces | Off unless explicitly opted in | On unless explicitly opted out |
-| Driver pod | Annotation: not needed | Annotation: `sidecar.istio.io/inject: "false"` (UDS doesn't benefit from mTLS) |
+| Driver pod | Label: not needed | Label: `sidecar.istio.io/inject: "false"` (UDS doesn't benefit from mTLS) |
 | Sandbox pod | Mesh not assumed | Never injected: workload pods carry `sidecar.istio.io/inject: "false"`, because upstream refuses a workload pod with a sidecar's ServiceAccount token (see [`istio-considerations.md`](istio-considerations.md)) |
 
 See [`istio-considerations.md`](istio-considerations.md) for the
@@ -45,7 +45,7 @@ reasoning behind defaulting injection off for sandboxes.
 
 | | OpenShift | Kyma |
 |---|---|---|
-| Native CR | `Route` (`route.openshift.io/v1`) | `APIRule` (`gateway.kyma-project.io/v2`) |
+| Native CR | `Route` (`route.openshift.io/v1`) | `VirtualService` (Istio; the chart's `gatewayIngress`) |
 | Gateway | Phase 2 in upstream OpenShift driver (not yet) | `gatewayIngress` publishes the gateway, which authenticates with OIDC (VirtualService, TLS from the ingress gateway to the gateway pod, source-address policies) |
 | Sandbox pods | — | Never, by upstream design (below) |
 | Cluster domain | Often `*.<cluster-name>.<base>` | `*.<cluster-id>.kyma.ondemand.com`, set as `gatewayIngress.domain` |
@@ -97,7 +97,7 @@ tokens directly.
 | Codegen | `protoc` + `protoc-gen-go-grpc` | none: the protocol types come from upstream's `openshell-core` crate |
 | K8s client | `k8s.io/client-go` | `kube-rs` 0.99, the version upstream's driver uses |
 | Container | distroless static (Go is fully static) | distroless cc (Rust uses glibc; rustls feature avoids OpenSSL) |
-| CI | Go test + golangci-lint | cargo fmt + clippy::pedantic + cargo test |
+| CI | Go test + golangci-lint | cargo fmt + clippy -D warnings + cargo test |
 
 ## Feature parity
 
@@ -106,11 +106,13 @@ enrollment labels, GPU validation, `platform_config` passthrough) are all
 upstream's Kubernetes driver's own behaviour here, apart from the Kagenti
 label, which the Kyma layer adds. The OpenShift driver's "Phase 2" roadmap
 (SCC detection, SELinux, Routes, OAuth proxy, Prometheus, Helm chart) is
-mapped to: Istio injection toggle (done), gateway `APIRule` rendering (done), Helm
-chart (done); the driver's Prometheus metrics endpoint is gone (upstream
+mapped to: sandbox Istio injection is always off (the toggle was removed in
+0.10.2), `gatewayIngress` for the gateway (a VirtualService, which replaces the
+0.9 `gatewayApirule`), Helm chart (done); the driver's Prometheus metrics endpoint is gone (upstream
 traces over OTLP: `driver.otlpEndpoint`), and SCC detection has no Kyma
 equivalent. OAuth proxy sidecar injection is not in scope for the Kyma
-driver — Kyma exposes JWT auth directly via the `APIRule` `jwt` handler.
+driver — the gateway authenticates callers itself with OIDC
+(`gateway.oidc.*`); `gatewayIngress` only routes and fences by source address.
 
 ## Sandbox-to-gateway authentication
 
@@ -160,7 +162,7 @@ an in-cluster proxy patch each sandbox's CR.
 Kyma driver: follows upstream OpenShell's provider-profile model (see NVIDIA's
 [Inference](https://docs.nvidia.com/openshell/how-it-works/inference) and
 [Provider profiles](https://docs.nvidia.com/openshell/how-it-works/providers/profiles)
-pages). Upstream v0.1.2 has no `inference.local` endpoint, no router bundle
+pages). Upstream (v0.1.2 and later, current v0.1.7) has no `inference.local` endpoint, no router bundle
 and no command that sets a cluster-wide inference route:
 
 - The chart renders a provider profile (the host and port of

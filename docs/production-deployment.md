@@ -42,6 +42,10 @@ issuer and audience. The ingress gateway checks no token. You need:
   from the cluster (the gateway fetches its JWKS) and from your users' laptops
   (the CLI redirects to it on first auth).
 
+  For an issuer with a private CA, `gateway.oidc.caConfigMapName` names a
+  ConfigMap in the release namespace whose `ca.crt` signs the issuer. It
+  replaces the gateway's trust store for all outbound TLS.
+
   If the issuer is published through **this cluster's own ingress gateway**,
   the gateway pod reaches it on the ingress pod's container port (8443 for
   Istio) wherever the CNI applies NetworkPolicy after DNAT (Calico does), and
@@ -160,6 +164,9 @@ gateway:
   dbPersistence:
     enabled: true
     dbUrl: ""               # empty = chart renders a PVC; set to postgres URL for external DB
+    # External Postgres: prefer externalDbSecret (a Secret with key `uri`) over
+    # dbUrl, whose password lands in the pod args. Exclusive with dbUrl. The
+    # gateway pod's egress to Postgres needs networkPolicy.extraEgress.
     storageSize: 1Gi
     storageClassName: ""
 
@@ -226,8 +233,8 @@ URL is not part of the binding: `inferenceProvider.baseUrl` when the chart's
 hook registers the provider, `ANTHROPIC_BASE_URL` on the OIDC path above).
 `binaries` in the profile gates which processes may reach the endpoint
 (`inferenceProvider.binaries` with the hook; the profile you import in step 3b
-on the OIDC path); upstream v0.1.4 still resolves a static key like this one
-by endpoint, not by calling binary, so treat the endpoint as the scope.
+on the OIDC path); upstream (as of v0.1.4; re-check when you bump) resolves a static key like
+this one by endpoint, not by calling binary, so treat the endpoint as the scope.
 
 The provider and its profile live in the gateway's DB. That is what
 `gateway.dbPersistence.enabled` provides: without it, every gateway pod
@@ -265,13 +272,16 @@ helm install ods deploy/helm/openshell-driver-kyma \
   --wait --timeout=180s
 ```
 
-The pre-install hook will:
+The pre-install hook refuses if the agent-sandbox CRD isn't installed.
+`helm install` itself refuses to render if `gatewayIngress.enabled` is set:
 
-- Refuse if the agent-sandbox CRD isn't installed.
-- Refuse to render if `gatewayIngress.enabled` is set without
-  `gateway.oidc.issuer`, `audience` and `clientId` (the chart never publishes
-  an unauthenticated gateway), without `gateway.tls.enabled`, without
-  `gatewayIngress.domain`, or with `serviceHosts.enabled` and no `allowedCidrs`.
+- without `gateway.oidc.issuer`, `audience` and `clientId` (the chart never
+  publishes an unauthenticated gateway),
+- without `gateway.tls.enabled`, or with `gateway.tls.clientCa.enabled` (the
+  ingress gateway presents no client certificate; callers use OIDC),
+- without `gatewayIngress.domain`, or with a `gatewayIngress.host` that is not
+  one label under it or contains `--`,
+- or with `serviceHosts.enabled` and no `allowedCidrs`.
 
 Installing with `gatewayIngress.enabled` creates AuthorizationPolicies in
 `istio-system`, and nothing else there, so the installing identity needs rights
@@ -444,7 +454,7 @@ Sandboxes are then created with `--provider ods-anthropic`.
 ## 4. Verify
 
 ```bash
-# Pods Ready (driver + gateway sidecar)
+# Pods Ready (driver + in-pod gateway)
 kubectl -n openshell-system get pods
 
 # The gateway accepted the driver
@@ -453,7 +463,8 @@ kubectl -n openshell-system logs deploy/ods-openshell-driver-kyma -c gateway \
 
 # Routes, the TLS rule to the gateway pod, and the ingress policies and CA
 kubectl -n openshell-system get virtualservice,destinationrule
-kubectl -n istio-system get authorizationpolicy,secret | grep openshell
+kubectl -n istio-system get authorizationpolicy | grep openshell
+kubectl -n openshell-system get configmap ods-openshell-driver-kyma-gateway-ca
 
 # The gateway refuses a call without a token (grpc-status: 16), the CLI gets through
 curl -s -o /dev/null -D - -X POST -H 'content-type: application/grpc' \
@@ -512,9 +523,32 @@ openshell status
   `upstream.version`, and install an `openshell` CLI of the same release.
 - **Tracing.** The driver's health port serves only `/healthz` and
   `/readyz`. Upstream's driver exports traces over OTLP: set
-  `driver.otlpEndpoint` (plain `http://`; see Known limitations). With
+  `driver.otlpEndpoint` (`http://` or `https://`; `driver.otlpProtocol` is
+  `grpc` or `http/protobuf`). An `https://` collector with a private CA needs
+  `driver.otlpCaFile`; for mTLS add `driver.otlpCertFile` and
+  `driver.otlpKeyFile` (set together). Mount the PEM files with
+  `driver.extraVolumes` and `driver.extraVolumeMounts`. With
   `networkPolicy.enabled` the chart lets the driver pod reach that endpoint's
-  port (80 when the URL names none), on any address.
+  port (80 for http, 443 for https when the URL names none), on any address.
+  The gateway's own export is `gateway.otlp.endpoint` (the driver's
+  `otlpEndpoint` defaults to it); `driver.otlpOcsfEndpoint` and
+  `driver.otlpAgentEndpoint` (each with a `...Protocol`) route OCSF and agent
+  telemetry separately.
+- **Rate limit.** With `gatewayIngress`, set `gateway.grpcRateLimit.requests`
+  and `windowSeconds` (default 0, off; both positive turn it on). It applies to
+  gRPC API traffic only.
+- **Workspace modes.** `driver.workspaceMode` is `shared` (default), `managed`
+  or `operator`. Switching is breaking: delete every sandbox first. In managed
+  mode `driver.workspacePsaLevel` (default `restricted`) sets the Pod Security
+  level of the namespaces the driver creates, and `driver.managedSshIngress`
+  restricts SSH ingress to the gateway pod.
+- **Other optional settings**, each documented in `values.yaml`:
+  `driver.upstreamProxy.*` (egress proxy, default off),
+  `driver.resourceAdmission.*` (approval of caller-attached resources, on by
+  default), `driver.allowedPodAnnotations` and `driver.allowedPodLabels` (both
+  `[]`), `gateway.enableWebsocketTunnel` (`false`),
+  `gateway.policyValidationFailureMode` (`fail_closed`) and
+  `gateway.serviceHostnameFormat` (`""`, readable names).
 
 ## Reaching a service inside a sandbox
 
@@ -673,7 +707,7 @@ unchanged.
 ```yaml
 gatewayConfig:
   openshell.gateway:
-    policy_validation_failure_mode: retain_last_valid
+    policy_validation_failure_mode: retain_last_valid   # also set by gateway.policyValidationFailureMode
 ```
 
 It merges with the chart's own tables: a chart value fills only the keys you
@@ -730,9 +764,6 @@ sandboxes never send telemetry.
   (`.Release.Namespace`). A sandbox reaches it only if it runs there: shared
   mode with `namespace` equal to the release namespace. Sandboxes in managed or
   operator mode, or in a different `namespace`, cannot.
-- **`driver.otlpEndpoint` must be plain `http://`.** Upstream v0.1.2 builds its
-  OTLP exporter without TLS, so an `https://` endpoint logs an error and exports
-  nothing.
 - **`gateway.dbPersistence.enabled=false`**: a gateway restart loses the
   provider and profile. With the chart's hook (`inferenceProvider.enabled`,
   no OIDC issuer) the next `helm upgrade` re-runs the hook and re-creates
@@ -740,7 +771,8 @@ sandboxes never send telemetry.
   `gateway.oidc.clientCredentialsSecret` names a client secret; without one,
   register them again from an authenticated CLI session (step 3b).
 - **`driver.sandboxEnv` values cannot contain a comma** (the driver splits the
-  list on commas), nor can `inferenceProvider.baseUrl` or `modelId`. Set such a
-  variable per sandbox instead.
+  list on commas) or a line break, and keys must match
+  `[A-Za-z_][A-Za-z0-9_]*` (the render fails otherwise). `inferenceProvider.baseUrl` and `modelId` cannot
+  contain a comma either. Set such a variable per sandbox instead.
 - **Provider `binaries`** do not yet restrict who may use the key; it is bound
   to the endpoint's host and port (see above).

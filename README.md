@@ -26,8 +26,17 @@ openshell-gateway ── Unix domain socket ── openshell-driver-kyma (Rust, 
                                                          namespace PSA labels, /healthz /readyz)
 ```
 
-**Version 0.10.0.** Upgrading from 0.8.0 needs every sandbox deleted first and
-some values removed; see the [CHANGELOG](CHANGELOG.md).
+**Version 0.13.0** (upstream OpenShell v0.1.7). Upgrade notes for every
+release are in the [CHANGELOG](CHANGELOG.md).
+
+The chart also provides: in-place sandbox configuration updates (the driver
+re-adds its own environment to them), OTLP export options (`driver.otlp*`),
+pod label and annotation allowlists (`driver.allowedPodLabels`,
+`driver.allowedPodAnnotations`), `gatewayConfig` passthrough, credential
+drivers, certificates from cert-manager or Gardener, a gateway gRPC rate limit
+and remote access through `gatewayIngress`. See
+[`docs/production-deployment.md`](docs/production-deployment.md) and the
+[CHANGELOG](CHANGELOG.md).
 
 ## Quick start
 
@@ -63,14 +72,14 @@ The driver container takes no command-line arguments: the Helm chart turns
 `values.yaml` keys into environment variables (`driver.*` and `namespace`).
 The driver accepts every option of upstream's `openshell-driver-kubernetes`
 under upstream's own names (long flag and `OPENSHELL_*` variable, as in
-`openshell-driver-kyma --help`), and adds five Kyma options that always
+`openshell-driver-kyma --help`), and adds four Kyma options that always
 start with `--kyma-` / `OPENSHELL_KYMA_`:
 
 | Flag | Values key | Default | Purpose |
 |------|------------|---------|---------|
 | `--kyma-disable-claude-telemetry` | `driver.disableClaudeTelemetry` | `false` | Adds `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` to every sandbox. |
-| `--kyma-sandbox-env` | `driver.sandboxEnv` | none | `KEY=VALUE` added to every sandbox. Comma-separated, so a value cannot contain a comma; `OPENSHELL_*` keys other than `OPENSHELL_LOG_LEVEL` are rejected. |
-| `--kyma-workspace-psa-level` | `driver.workspacePsaLevel` | `""` | Pod Security level for namespaces the driver creates in managed mode (`privileged`, `baseline`, `restricted`; empty leaves them unlabelled). |
+| `--kyma-sandbox-env` | `driver.sandboxEnv` | none | `KEY=VALUE` added to every sandbox. Comma-separated, so a value cannot contain a comma; `OPENSHELL_*` keys other than `OPENSHELL_LOG_LEVEL` are rejected. Keys must be letters, digits and `_` and not start with a digit; values must not contain line breaks. |
+| `--kyma-workspace-psa-level` | `driver.workspacePsaLevel` | `""` (flag); chart default `restricted` | Pod Security level for namespaces the driver creates in managed mode (`privileged`, `baseline`, `restricted`; empty leaves them unlabelled). |
 | `--kyma-health-port` | `driver.healthPort` | `9090` | Port for `/healthz` and `/readyz`. |
 
 The upstream options most deployments touch:

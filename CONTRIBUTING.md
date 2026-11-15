@@ -7,9 +7,7 @@ must be DCO-signed, and PRs go green before they merge.
 ## Developer Certificate of Origin (DCO)
 
 Every commit must carry a `Signed-off-by:` line matching the commit
-author. Add one with `git commit -s`. The
-[`dco.yml`](.github/workflows/dco.yml) workflow blocks merges if any
-commit on the branch is missing the trailer.
+author. Add one with `git commit -s`.
 
 If you forgot to sign:
 
@@ -50,7 +48,7 @@ The `target/` directory is mounted as a named Docker volume
   `feat(provisioner): ...`). The body should explain *why*, not just *what*.
 - PR checklist:
   1. `make test` passes locally (or in CI).
-  2. `cargo clippy ... -W clippy::pedantic` is clean.
+  2. `make clippy` (`cargo clippy ... -D warnings`) is clean.
   3. Any plan deviation is documented in the commit body.
 
 ## Reporting security issues

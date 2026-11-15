@@ -91,7 +91,7 @@ The PR body's "Local gate" row tells you the gate failed (it only ever renders
 `passed` or `FAILED — see the 'Run the full gate' step`; it cannot tell you
 *why*). The gate is `cargo fmt --check`, clippy with `-D warnings`,
 `cargo test --workspace`, `scripts/check-image-digests.sh` and
-`scripts/check-chart-render.sh`, in that order; the first red one stops it. To find out whether Claude hit `--max-turns` mid-task or finished but
+`scripts/check-chart-render.sh` and `scripts/check-chart-parity.sh`, in that order; the first red one stops it. To find out whether Claude hit `--max-turns` mid-task or finished but
 left the gate red, read the "Let Claude perform the sync" step's log in the
 run — a turn-cap cutoff ends abruptly mid-transcript, a completed-but-failing
 attempt runs to the end of the prompt and then the separate "Run the full
@@ -379,7 +379,7 @@ them afterwards. Do not flip the mode on a cluster with live sandboxes.
 4. Leave **"Send write tokens to workflows from pull requests" off.** Enabling
    it would give fork PRs a writable `GITHUB_TOKEN`.
 5. **Turn on branch protection for `main`, requiring changes to go through a
-   pull request.** As of this writing (recheck with the commands in step 4b
+   pull request.** As of this writing (recheck with the commands in step 5b
    below if you're reading this later) it is not on — the only things
    currently blocked are force-pushes and deletions; there is no required
    review and no ruleset. See the "do not commit/push" bullet under Security
@@ -387,7 +387,7 @@ them afterwards. Do not flip the mode on a cluster with live sandboxes.
    job only pushes to its own branch" is a property of the workflow's own
    steps, not something GitHub enforces.
 
-   **4a. Enable it:**
+   **5a. Enable it:**
    ```bash
    gh api --method PUT repos/st-gr/openshell-driver-kyma/branches/main/protection \
      --input - <<'JSON'
@@ -414,7 +414,7 @@ them afterwards. Do not flip the mode on a cluster with live sandboxes.
    emergency. Setting it `true` would apply the pull-request requirement to
    the maintainer as well, with no override.
 
-   **4b. Verify it took effect:**
+   **5b. Verify it took effect:**
    ```bash
    gh api repos/st-gr/openshell-driver-kyma/branches/main/protection --jq '{
      required_signatures, enforce_admins, required_linear_history,
@@ -453,7 +453,7 @@ them afterwards. Do not flip the mode on a cluster with live sandboxes.
   a control that's enforced.** Nothing currently stops the `Bash` tool from
   running `git checkout main && git push origin main` with the same
   `GITHUB_TOKEN`. **As of this writing** — recheck with the commands in
-  One-time setup step 4b, since this is a fact about live repo
+  One-time setup step 5b, since this is a fact about live repo
   configuration and not this document: `main` has no required pull-request
   reviews and no ruleset (`gh api repos/st-gr/openshell-driver-kyma/branches/main/protection`
   blocks only force-pushes and deletions; `gh api .../rulesets` returns
@@ -464,14 +464,14 @@ them afterwards. Do not flip the mode on a cluster with live sandboxes.
   actively merge every sync PR (repo-level `allow_auto_merge` is `false`,
   and nothing in this repo auto-merges) — note that this only proves a
   human has to *trigger* the merge, not that a review happened, since
-  branch protection does not yet require one; and `--max-turns 40` bounds
+  branch protection does not yet require one; and `--max-turns 120` bounds
   how much the step can do in one run. Neither of those depends on the
-  branch-only behaviour holding. Once One-time setup step 4 is done,
+  branch-only behaviour holding. Once One-time setup step 5 is done,
   merging will also require going through a pull request by construction,
   which makes the first of these two controls meaningfully stronger.
 
   **Remedy:** turn on branch protection for `main`, requiring pull requests
-  (see One-time setup, step 4). That is what would turn "the sync job only
+  (see One-time setup, step 5). That is what would turn "the sync job only
   pushes to its own branch" from a convention in the code into an actual
   guarantee GitHub enforces regardless of what the `Bash` tool does. This is
   a known, bounded limitation with a clear fix, not something to be alarmed

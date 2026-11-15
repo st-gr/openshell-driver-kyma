@@ -38,6 +38,6 @@ unless you want sidecars on supervisor pods.
 ## Driver pod itself
 
 The driver pod always carries `sidecar.istio.io/inject: "false"`. Its only
-inbound surface is the local Unix domain socket the gateway sidecar talks to
+inbound surface is the local Unix domain socket the in-pod gateway talks to
 within the same pod, plus the HTTP probes on `/healthz` and `/readyz`. None
 benefit from a sidecar.

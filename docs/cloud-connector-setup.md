@@ -63,7 +63,7 @@ subaccounts:
 
 Adding a new cluster is a Basis-side, no-restart operation: connect the
 subaccount once, add a Service Channel with the next free `N`, hand the
-user a kubeconfig pointing at `https://<scc-host>:3003<N+3>`.
+user a kubeconfig pointing at `https://<scc-host>:<30033+N>`.
 
 `Location ID` is **not** needed for the multi-cluster-via-one-SCC case.
 It is only required when *multiple SCCs* serve the *same* subaccount
@@ -131,7 +131,7 @@ The "Add Service Channel" dialog asks for four required fields:
   one developer running `kubectl` interactively; raise to `2`-`4`
   if multiple users share the channel or you need parallel
   port-forwards (the openshell-driver-kyma chart's port-forward
-  to the gateway sidecar adds one more connection).
+  to the in-pod gateway adds one more connection).
 - **Enabled** — leave checked.
 
 Repeat once per cluster. Channels for different subaccounts on the same
@@ -178,7 +178,7 @@ SCC are entirely independent — they only need unique local ports.
 
    ```bash
    kubectl --kubeconfig kubeconfig.yaml \
-     -n openshell-system port-forward svc/openshell-gateway 8080:8080
+     -n openshell-system port-forward svc/<release>-openshell-driver-kyma 8080:8080
    ```
 
 6. Point the OpenShell CLI at `http://localhost:8080`:
@@ -187,6 +187,11 @@ SCC are entirely independent — they only need unique local ports.
    openshell gateway add --local http://localhost:8080
    openshell sandbox create -- claude
    ```
+
+   This is for a gateway without TLS. With `gateway.tls.enabled`, which
+   `gatewayIngress` requires and production installs use, follow
+   "Port-forward to a gateway that serves TLS" in
+   [`production-deployment.md`](production-deployment.md#5-operational-notes).
 
 ## Prerequisite: the OpenShell gateway
 
@@ -219,8 +224,10 @@ recommended pattern with this chart is:
 
 The port-forward goes through the same SCC tunnel `kubectl` uses —
 no second tunnel, no second VPN. The CLI talks to localhost; SCC
-forwards through to the gateway sidecar's Service VIP.
+forwards through to the in-pod gateway's Service VIP.
 
 For an Always-On / no-VPN production path, see
-[`production-deployment.md`](production-deployment.md) (uses an
-OIDC-protected Kyma APIRule instead of port-forward).
+[`production-deployment.md`](production-deployment.md) (publishes the
+gateway through the cluster's Istio ingress gateway with OIDC, `gatewayIngress`,
+instead of a port-forward; see
+[how users reach the gateway](production-deployment.md#decision-how-do-users-reach-the-gateway)).

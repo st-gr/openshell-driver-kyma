@@ -20,12 +20,12 @@ flowchart TB
         V["inferenceProvider:<br/>baseUrl, modelId, credential Secret"]
     end
 
-    subgraph S3["3 — helm install chart 0.10.0"]
-        POD["driver + gateway pod 2/2<br/>gateway v0.1.4, Unix socket"]
+    subgraph S3["3 — helm install chart 0.13.0"]
+        POD["driver + gateway pod 2/2<br/>gateway v0.1.7, Unix socket"]
         HOOK["hook Job: provider profile import +<br/>provider create (auto-deletes)"]
     end
 
-    S45["4-5 — install openshell CLI v0.1.4,<br/>port-forward :8080,<br/>gateway add --local"]
+    S45["4-5 — install openshell CLI v0.1.7,<br/>port-forward :8080,<br/>gateway add --local"]
 
     subgraph S6["6 — run Claude in a sandbox"]
         CREATE["sandbox create --provider ods-anthropic"]
@@ -162,7 +162,7 @@ driver:
   disableClaudeTelemetry: true
 
 gateway:
-  # Enable the in-pod gateway sidecar. The kyma driver won't work
+  # Enable the in-pod gateway. The kyma driver won't work
   # without it (they talk over an in-pod Unix domain socket).
   enabled: true
   # Persist the gateway DB (provider profile and provider) across pod
@@ -204,8 +204,8 @@ Notes on why this is short:
 - **The provider profile comes from these values.** The chart renders a
   provider profile whose endpoint is the host and port of `baseUrl`
   (`api.anthropic.com:443` here) and whose `binaries` default to `node` and
-  `claude` under `/usr/bin` and `/usr/local/bin`: claude-code runs under
-  `node`. The API key is bound to that host and port.
+  `claude` under `/usr/bin` and `/usr/local/bin`, and `claude.exe` in the
+  claude-code npm package: claude-code runs under `node`. The API key is bound to that host and port.
 - **No `gatewayIngress` / OIDC block.** Those are for exposing the
   gateway outside the cluster with browser-based auth. This tutorial
   uses `kubectl port-forward` to reach the gateway; auth stays
@@ -217,7 +217,7 @@ Notes on why this is short:
 
 ```bash
 helm install ods oci://ghcr.io/st-gr/charts/openshell-driver-kyma \
-  --version 0.10.0 \
+  --version 0.13.0 \
   --namespace "$NS" \
   -f my-values.yaml \
   --wait --timeout=300s
@@ -433,13 +433,13 @@ cluster-wide — remove it separately with a matching
   internet** (no port-forward). Set `gatewayIngress.enabled=true`,
   `gateway.tls.enabled=true` and `gateway.oidc`. See
   [`production-deployment.md`](production-deployment.md).
-- **You want to route inference through SAP Cloud Connector.** See
+- **You want to reach a private cluster through SAP Cloud Connector.** See
   [`cloud-connector-setup.md`](cloud-connector-setup.md).
 
 ## Versions
 
-This tutorial targets chart `openshell-driver-kyma` `0.10.0`, which deploys
-upstream NVIDIA OpenShell `v0.1.6`: the gateway, supervisor and sandbox
+This tutorial targets chart `openshell-driver-kyma` `0.13.0`, which deploys
+upstream NVIDIA OpenShell `v0.1.7`: the gateway, supervisor and sandbox
 runtime images are pinned by digest to that release, and the CLI you install
 in step 4 must be the same release. The agent-sandbox controller is v0.5.2.
 The chart's CI installs the chart against a real gateway image and follows a

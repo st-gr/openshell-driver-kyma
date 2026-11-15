@@ -1,11 +1,13 @@
 # Calling the gateway directly — without the `openshell` CLI
 
-The gateway sidecar deployed by this chart speaks **gRPC over HTTP/2**.
+The in-pod gateway deployed by this chart (`gateway.enabled=true` and
+`gatewayService.enabled=true`) speaks **gRPC over HTTP/2**.
 The `openshell` CLI is just a typed gRPC client on top of those same
 endpoints. If you want to script against the gateway from a language
 or environment where the CLI isn't a fit (CI runner without the
-binary, embedded controller, browser, raw curl) you can hit the
-endpoints directly.
+binary, embedded controller) you can hit the endpoints directly with any
+gRPC client. Browser clients need their own gRPC-Web proxy, which this chart
+does not provide.
 
 This page shows the protocol, what the server does and doesn't
 support, and worked examples invoking real RPCs.
@@ -18,12 +20,12 @@ image the chart runs by default) serves:
 | Surface | Status |
 |---|---|
 | **gRPC** (`application/grpc` over HTTP/2) | ✅ primary protocol; what the CLI uses |
-| **gRPC-Web** (`application/grpc-web`) | ✅ accepted; lets you use any HTTP client |
+| **gRPC-Web** (`application/grpc-web`) | ❌ not served; browsers need a gRPC-Web proxy of their own |
 | **Server reflection** | ✅ v1, upstream v0.1.4 and later; advertises only `openshell.v1.OpenShell`, needs no bearer token |
 | **HTTP/JSON transcoding** (grpc-gateway) | ❌ not enabled |
 | **Connect-RPC** (`Connect-Protocol-Version` header) | ❌ not enabled |
-| **TLS** | gated by `gateway.tls.enabled`. With it off (default), use `--plaintext` / `http://`. With it on, also consider `gateway.tls.clientCa.enabled` for mTLS. |
-| **Auth** | none with `gateway.oidc.issuer=""` (default). With OIDC set, every call needs a `Bearer` token in the `authorization` metadata. |
+| **TLS** | gated by `gateway.tls.enabled`. With it off (default), use `-plaintext`. With it on, also consider `gateway.tls.clientCa.enabled` for mTLS. Through `gatewayIngress` the gateway terminates TLS with a public certificate and needs only the token (no client certificate). |
+| **Auth** | none with no `gateway.oidc.issuer` and no `gateway.tls.clientCa` (default). With only `clientCa`, a client certificate. With an issuer, every call needs a `Bearer` token in the `authorization` metadata. |
 
 The gRPC server lives on `gateway.grpcPort` (default `8080`). Health
 probes (`/healthz`, `/readyz`) are plain HTTP/1.1 on
@@ -40,9 +42,11 @@ and client-certificate requirements still apply. It advertises only the public
 separate counter with the same limit; over the limit the stream closes with
 `RESOURCE_EXHAUSTED`.
 
+`$GATEWAY` is set under [Reach the gateway](#reach-the-gateway) below.
+
 ```bash
-grpcurl -plaintext ods-openshell-driver-kyma:8080 list
-grpcurl -plaintext ods-openshell-driver-kyma:8080 describe openshell.v1.OpenShell
+grpcurl -plaintext $GATEWAY list
+grpcurl -plaintext $GATEWAY describe openshell.v1.OpenShell
 ```
 
 For tools without reflection, or to pin the schema, use the `.proto` files.
@@ -65,14 +69,14 @@ from: the chart's `upstream.version` (`v0.1.7`).
 In-cluster (from a sibling pod):
 
 ```bash
-GATEWAY=http://ods-openshell-driver-kyma.openshell-system.svc.cluster.local:8080
+GATEWAY=ods-openshell-driver-kyma.openshell-system.svc.cluster.local:8080
 ```
 
-From your host:
+From your host (the Service is named after the release, `<release>-openshell-driver-kyma`):
 
 ```bash
 kubectl -n openshell-system port-forward svc/ods-openshell-driver-kyma 8080:8080 &
-GATEWAY=http://localhost:8080
+GATEWAY=localhost:8080
 ```
 
 ## Path 1: `grpcurl` — the curl-shaped option
@@ -88,7 +92,7 @@ for any Linux musl shell.
 grpcurl -plaintext \
   -import-path /tmp/proto \
   -proto openshell.proto \
-  ods-openshell-driver-kyma:8080 list
+  $GATEWAY list
 ```
 
 Expected:
@@ -102,7 +106,7 @@ openshell.v1.OpenShell
 ```bash
 grpcurl -plaintext \
   -import-path /tmp/proto -proto openshell.proto \
-  ods-openshell-driver-kyma:8080 list openshell.v1.OpenShell
+  $GATEWAY list openshell.v1.OpenShell
 ```
 
 Expected (truncated):
@@ -123,7 +127,7 @@ openshell.v1.OpenShell.ListSandboxes
 ```bash
 grpcurl -plaintext \
   -import-path /tmp/proto -proto openshell.proto \
-  ods-openshell-driver-kyma:8080 \
+  $GATEWAY \
   describe openshell.v1.OpenShell.CreateSandbox
 ```
 
@@ -139,7 +143,7 @@ workspace.
 grpcurl -plaintext \
   -import-path /tmp/proto -proto openshell.proto \
   -d '{"workspace_scope": {"workspace": "default"}}' \
-  ods-openshell-driver-kyma:8080 \
+  $GATEWAY \
   openshell.v1.OpenShell/ListSandboxes
 ```
 
@@ -150,7 +154,7 @@ the chart's post-install Job created, named `<release>-<type>`):
 grpcurl -plaintext \
   -import-path /tmp/proto -proto openshell.proto \
   -d '{"workspace_scope": {"workspace": "default"}}' \
-  ods-openshell-driver-kyma:8080 \
+  $GATEWAY \
   openshell.v1.OpenShell/ListProviders
 ```
 
@@ -169,7 +173,7 @@ grpcurl -plaintext \
       "credentials": { "ANTHROPIC_API_KEY": "sk-ant-..." }
     }
   }' \
-  ods-openshell-driver-kyma:8080 \
+  $GATEWAY \
   openshell.v1.OpenShell/CreateProvider
 ```
 
@@ -180,60 +184,33 @@ TOKEN=$(your-method-of-getting-a-token)
 grpcurl -plaintext \
   -H "authorization: Bearer ${TOKEN}" \
   -import-path /tmp/proto -proto openshell.proto \
-  -d '{}' \
-  ods-openshell-driver-kyma:8080 \
+  -d '{"workspace_scope": {"workspace": "default"}}' \
+  $GATEWAY \
   openshell.v1.OpenShell/ListSandboxes
 ```
+
+A valid token is not enough: it needs the roles configured in
+`gateway.oidc.rolesClaim`, `adminRole` and `userRole` (unless `authOnly: true`),
+and its subject must be a member of the workspace
+(`openshell workspace member add --workspace default --subject <sub> --role user`).
+See [`sap-ias-setup.md`](sap-ias-setup.md) for a verified IAS setup.
 
 When `gateway.tls.enabled` is on, drop `-plaintext`. When mTLS is on,
 also pass `-cert <client.crt> -key <client.key>` (and `-cacert
 <ca.crt>` if you didn't trust the chart's self-signed CA OS-wide).
 
-## Path 2: gRPC-Web with raw `curl`
-
-If you can't install `grpcurl` but you can `curl`, the server speaks
-gRPC-Web on the same port. The trick is the body framing: a 5-byte
-header (`<flag-byte> <big-endian uint32 length>`) followed by a
-serialized protobuf message.
-
-The flag byte is `0x00` for a normal data frame. For an RPC with no
-request fields (e.g., `ListSandboxes`), the protobuf payload is zero
-bytes, so the body is just `00 00 00 00 00`. `ListSandboxes` needs a
-`workspace_scope`, so an empty body is answered with a gRPC error
-(`workspace_scope is required`) in the trailer; the `protoc --encode` example
-below builds a valid request.
+Remotely, through `gatewayIngress`, the gateway presents a public certificate
+and needs only the token. Drop `-plaintext`, `-cert` and `-key` (mTLS does not
+work through `gatewayIngress`):
 
 ```bash
-printf '\x00\x00\x00\x00\x00' | \
-  curl -sSi -X POST \
-    -H "Content-Type: application/grpc-web" \
-    --data-binary @- \
-    http://ods-openshell-driver-kyma:8080/openshell.v1.OpenShell/ListSandboxes
+grpcurl -H "authorization: Bearer ${TOKEN}" \
+  -import-path /tmp/proto -proto openshell.proto \
+  -d '{"workspace_scope": {"workspace": "default"}}' \
+  openshell.<domain>:443 openshell.v1.OpenShell/ListSandboxes
 ```
 
-You'll get an `HTTP/1.1 200 OK` with `content-type: application/grpc`
-or `application/grpc-web` and a body that's again gRPC-Web-framed:
-data frames carrying serialized protobuf, then a trailer frame.
-Decoding requires reading the same proto file you'd hand to grpcurl.
-
-For non-empty requests you have to build the protobuf body yourself —
-`protoc --encode=…` (text-format input) is the conventional way:
-
-```bash
-echo 'workspace_scope { workspace: "default" } page_size: 50' | \
-  protoc --encode=openshell.v1.ListSandboxesRequest \
-    -I /tmp/proto openshell.proto > /tmp/req.bin
-LEN=$(printf '%08x' "$(wc -c < /tmp/req.bin)")
-{ printf '\x00'; printf "%b" "\x${LEN:0:2}\x${LEN:2:2}\x${LEN:4:2}\x${LEN:6:2}"; cat /tmp/req.bin; } | \
-  curl -sSi -X POST \
-    -H "Content-Type: application/grpc-web" \
-    --data-binary @- \
-    http://ods-openshell-driver-kyma:8080/openshell.v1.OpenShell/ListSandboxes
-```
-
-This is fiddly. Use grpcurl unless you really can't.
-
-## Path 3: the inference DATA path is separate
+## Path 2: the inference DATA path is separate
 
 The walkthrough's `claude` round-trip does not go through the gateway's gRPC
 API at all:
@@ -273,8 +250,7 @@ the inference request bytes.
 - No HTTP/JSON transcoding. `POST /openshell.v1.OpenShell/ListSandboxes`
   with `Content-Type: application/json` returns 404. The chart does
   not enable grpc-gateway.
-- No Connect-RPC. The `Connect-Protocol-Version: 1` header doesn't
+- No Connect-RPC or gRPC-Web. The `Connect-Protocol-Version: 1` header doesn't
   unlock anything.
-- No server reflection. Hence the "bring your own `.proto`" step.
 - No anonymous metrics scraping if you don't expose `gatewayService`
   — the chart's NetworkPolicy admits in-cluster pods only.
