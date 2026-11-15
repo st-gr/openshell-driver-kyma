@@ -179,6 +179,10 @@ scripts/check-chart-render.sh fails CI when an upstream option is missing here.
 - name: OPENSHELL_K8S_DEFAULT_RUNTIME_CLASS_NAME
   value: {{ . | quote }}
 {{- end }}
+{{- with $d.supervisorRuntimeClassName }}
+- name: OPENSHELL_K8S_SUPERVISOR_RUNTIME_CLASS_NAME
+  value: {{ . | quote }}
+{{- end }}
 {{- if $d.disableClaudeTelemetry }}
 - name: OPENSHELL_KYMA_DISABLE_CLAUDE_TELEMETRY
   value: "true"

@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use miette::{IntoDiagnostic, Result};
+use openshell_core::proto::compute::v1::compute_driver_app_endpoints_server::ComputeDriverAppEndpointsServer;
 use openshell_core::proto::compute::v1::compute_driver_configuration_updates_server::ComputeDriverConfigurationUpdatesServer;
 use openshell_core::proto::compute::v1::compute_driver_server::ComputeDriverServer;
 use openshell_core::VERSION;
@@ -140,6 +141,9 @@ async fn main() -> Result<()> {
     let configuration_updates_service = ComputeDriverConfigurationUpdatesServer::new(
         KymaConfigurationUpdates::new(driver_service.clone(), Arc::clone(&hooks)),
     );
+    // Upstream's app-endpoints service is served unwrapped (no Kyma hooks apply).
+    // TODO(upstream v0.1.8): confirm the Kyma layer needs no hook for app endpoints.
+    let app_endpoints_service = ComputeDriverAppEndpointsServer::new(driver_service.clone());
     let service = ComputeDriverServer::new(KymaComputeDriver::new(
         driver_service,
         hooks,
@@ -161,6 +165,7 @@ async fn main() -> Result<()> {
             .layer(openshell_otel::compute_driver_rpc_layer())
             .add_service(service)
             .add_service(configuration_updates_service)
+            .add_service(app_endpoints_service)
             .serve_with_incoming_shutdown(
                 openshell_core::external_driver_socket::SameUidUnixIncoming::new(listener),
                 shutdown,
@@ -174,6 +179,7 @@ async fn main() -> Result<()> {
             .layer(openshell_otel::compute_driver_rpc_layer())
             .add_service(service)
             .add_service(configuration_updates_service)
+            .add_service(app_endpoints_service)
             .serve_with_shutdown(bind_address, shutdown)
             .await
             .into_diagnostic()

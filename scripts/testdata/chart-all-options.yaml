@@ -24,6 +24,7 @@ driver:
   sandboxRuntimeBoundaryPort: 5501
   saTokenTtlSecs: 7200
   runtimeClassName: example-runtime
+  supervisorRuntimeClassName: example-supervisor-runtime
   sandboxSshSocketPath: /run/example-ssh.sock
   bindAddress: 127.0.0.1:50062
   otlpEndpoint: https://collector.example:4317

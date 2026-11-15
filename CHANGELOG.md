@@ -6,6 +6,26 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.14.0] — 2026-11-15
+
+### Changed
+
+- **Upstream OpenShell v0.1.7 → v0.1.8** (crates, chart `upstream.version`, and the
+  gateway, supervisor and sandbox-runtime digests).
+  - Upstream added `supervisor_runtime_class_name` (env
+    `OPENSHELL_K8S_SUPERVISOR_RUNTIME_CLASS_NAME`, admin-only, for dedicated
+    supervisor pods) to its driver config. Mirrored into `upstream_args.rs`; the
+    driver reads it from the environment, default empty, so nothing breaks. The
+    chart exposes it as `driver.supervisorRuntimeClassName` (default empty).
+  - Upstream's `main()` now also serves `ComputeDriverAppEndpoints`
+    (`ResolveSupervisorAppEndpoint`). Mirrored in `main.rs` as an unwrapped
+    pass-through; a TODO notes that no Kyma hook has been designed for it.
+  - Upstream chart: optional metrics TLS/mTLS (`metrics.tls.*`) is **not**
+    mirrored (plaintext metrics stay the default); `priorityClassName` and
+    `topologySpreadConstraints` for the gateway pod are mirrored. RBAC,
+    NetworkPolicy and workspace-mode guards are unchanged.
+  - No compile errors, no breaking change for this driver.
+
 ### Documentation
 
 - **SAP Cloud Identity Services (IAS) as the gateway's identity provider**, verified

@@ -287,6 +287,10 @@ pub fn compute_config(
             .unwrap_or_default(),
         default_runtime_class_name: std::env::var("OPENSHELL_K8S_DEFAULT_RUNTIME_CLASS_NAME")
             .unwrap_or_default(),
+        supervisor_runtime_class_name: std::env::var(
+            "OPENSHELL_K8S_SUPERVISOR_RUNTIME_CLASS_NAME",
+        )
+        .unwrap_or_default(),
         allowed_pod_annotations: args.allowed_pod_annotations,
         allowed_pod_labels: args.allowed_pod_labels,
         sa_token_ttl_secs: args.sa_token_ttl_secs,
@@ -342,6 +346,16 @@ mod tests {
         assert_eq!(args.sandbox_runtime_boundary_port, 5500);
         assert_eq!(args.sa_token_ttl_secs, 3600);
         assert!(args.bind_socket.is_none());
+    }
+
+    #[test]
+    fn supervisor_runtime_class_is_env_only_and_empty_by_default() {
+        // Upstream v0.1.8 reads it from the environment only (no CLI option);
+        // unset means "omit the field".
+        let config = compute_config(parse(&[]), BTreeMap::new());
+        if std::env::var("OPENSHELL_K8S_SUPERVISOR_RUNTIME_CLASS_NAME").is_err() {
+            assert!(config.supervisor_runtime_class_name.is_empty());
+        }
     }
 
     #[test]

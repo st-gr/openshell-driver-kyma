@@ -97,11 +97,11 @@ driver:
   # starting with `sha256:` and the helper emits `<repo>@sha256:<digest>`
   # automatically.
   #
-  # This digest is supervisor v0.1.7, version-matched to gateway.image
+  # This digest is supervisor v0.1.8, version-matched to gateway.image
   # below. It tracked `:latest` until chart 0.3.0 — that tag moved twice
   # in one week, so sandboxes were silently picking up new privileged
   # binaries. Re-pin both together when bumping upstream.
-  supervisorImage: ghcr.io/nvidia/openshell/supervisor@sha256:a07864bd0c546716039c2000a919f50ce8f7f1f67ba37dda350cf64d3a7cfb06
+  supervisorImage: ghcr.io/nvidia/openshell/supervisor@sha256:deadeacfdba6d12ca27e538d0002696369d4de5a4fcad075ab503495503af9d1
   # The gateway endpoint sandboxes dial (OPENSHELL_GRPC_ENDPOINT). Empty
   # defaults to this release's Service when gateway.enabled is true, https://
   # when gateway.tls.enabled and http:// otherwise, as upstream's chart derives
@@ -199,7 +199,7 @@ driver:
   # Sandbox runtime (isolation backend) image, digest-pinned. Upstream's
   # compiled-in default depends on build variables a git-dependency build does
   # not set, so the chart always passes it.
-  sandboxRuntimeImage: ghcr.io/nvidia/openshell/sandbox@sha256:89819c03f291d9b909c3fc2962360e24af4516627422d18f3e681829f003f347
+  sandboxRuntimeImage: ghcr.io/nvidia/openshell/sandbox@sha256:f0fe7dbf18d833acb5da99c405231124718f23b524aa8e3c0108e6f37530033b
   sandboxRuntimeImagePullPolicy: ""
   supervisorImagePullPolicy: ""
   # Default sandbox image when a create request names none
@@ -211,6 +211,10 @@ driver:
   sandboxRuntimeBoundaryPort: 5500
   saTokenTtlSecs: 3600
   runtimeClassName: ""
+  # runtimeClassName of the dedicated supervisor pods (upstream v0.1.8,
+  # OPENSHELL_K8S_SUPERVISOR_RUNTIME_CLASS_NAME). Admin-only; never inherits
+  # runtimeClassName. Empty = omit the field.
+  supervisorRuntimeClassName: ""
   sandboxSshSocketPath: ""
   bindAddress: ""
   # OTLP trace collector (OPENSHELL_OTLP_ENDPOINT), e.g.
@@ -320,7 +324,7 @@ driver:
 # The upstream NVIDIA/OpenShell release this chart's driver links. Must equal
 # the tag in the workspace Cargo.toml (scripts/check-chart-render.sh).
 upstream:
-  version: v0.1.7
+  version: v0.1.8
 
 networkPolicy:
   # NetworkPolicies the chart renders:
@@ -405,6 +409,12 @@ crdPreInstallCheck:
 nodeSelector: {}
 tolerations: []
 affinity: {}
+# PriorityClass for the gateway pod (mirrors upstream v0.1.8 priorityClassName).
+# Empty = omit the field.
+priorityClassName: ""
+# Topology spread constraints for the gateway pod (mirrors upstream v0.1.8).
+# Empty = omit the field.
+topologySpreadConstraints: []
 
 # Pod-level annotations (leave Istio alone for the driver pod).
 podAnnotations: {}
@@ -440,7 +450,7 @@ gateway:
       timeoutSeconds: 1
       failureThreshold: 3
   image:
-    # Pinned by digest to the gateway image upstream published for `v0.1.7`,
+    # Pinned by digest to the gateway image upstream published for `v0.1.8`,
     # the same release as `upstream.version`, the Cargo.toml tag, the
     # supervisor and sandbox runtime images above, and the `openshell` CLI the
     # provider hook downloads. Re-pin them together when `upstream.version`
@@ -448,7 +458,7 @@ gateway:
     # shape changed. Resolve a digest with `docker buildx imagetools inspect`
     # on https://github.com/NVIDIA/OpenShell/pkgs/container/openshell%2Fgateway
     repository: ghcr.io/nvidia/openshell/gateway
-    tag: "sha256:9b94165a3dbcf6d454b822e5b21f371f168c44155c8fa1d6dd55ba091a041d1f"
+    tag: "sha256:d66352a54c680b652e5ddd7d19b9c1189568d18016f360b9b8c64014f13d89c4"
     pullPolicy: IfNotPresent
   # The gateway's name: its OCSF identity, its OTel resource and the in-process
   # driver build context. "" = the chart fullname. driver.gatewayName, the
