@@ -250,6 +250,26 @@ from the JWT Secret) so the gateway can mint per-sandbox JWTs in IssueSandboxTok
 {{- include "openshell-driver-kyma.tomlDefault" (dict "config" $config "table" "openshell.gateway.ocsf_log" "key" "schema_version" "value" .) -}}
 {{- end -}}
 {{- end -}}
+{{- /* gateway.metrics.tls: as upstream v0.1.8's _toml.tpl, the paths are where the
+deployment mounts the Secrets, set whenever metrics TLS is on (over any
+gatewayConfig value), and the table is dropped while it is off. gateway-config.yaml
+checks the values first. */ -}}
+{{- $metricsTls := dig "metrics" "tls" dict .Values.gateway -}}
+{{- if $metricsTls.enabled -}}
+{{- include "openshell-driver-kyma.tomlTableGuard" (dict "config" $config "table" "openshell.gateway.metrics_tls") -}}
+{{- $metricsTlsConfig := get $config "openshell.gateway.metrics_tls" | default dict -}}
+{{- $_ := set $metricsTlsConfig "cert_path" "/etc/openshell-metrics/server/tls.crt" -}}
+{{- $_ := set $metricsTlsConfig "key_path" "/etc/openshell-metrics/server/tls.key" -}}
+{{- if $metricsTls.clientCaSecretName -}}
+{{- $_ := set $metricsTlsConfig "client_ca_path" "/etc/openshell-metrics/client-ca/ca.crt" -}}
+{{- else -}}
+{{- $_ := unset $metricsTlsConfig "client_ca_path" -}}
+{{- end -}}
+{{- $_ := set $metricsTlsConfig "require_client_auth" $metricsTls.requireClientCert -}}
+{{- $_ := set $config "openshell.gateway.metrics_tls" $metricsTlsConfig -}}
+{{- else -}}
+{{- $_ := unset $config "openshell.gateway.metrics_tls" -}}
+{{- end -}}
 {{- /* Schema-v2 access path for an external compute driver reached over
 --compute-driver-socket. The gateway also derives its resource-admission
 policy from this table and requires the driver to acknowledge the same

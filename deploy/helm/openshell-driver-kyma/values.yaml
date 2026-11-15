@@ -495,6 +495,20 @@ gateway:
     serviceName: ""   # "" = the gateway's own default
   grpcPort: 8080
   metricsPort: 9091
+  # TLS, optionally mutual, for the metrics listener (upstream v0.1.8's
+  # metrics.tls), rendered into the gateway TOML as [openshell.gateway.metrics_tls].
+  # Plaintext stays the default. The chart creates no metrics PKI: certSecretName
+  # is a kubernetes.io/tls Secret you manage in the release namespace; empty reuses
+  # the gateway's server TLS Secret (created by the chart's PKI hook or cert-manager).
+  # clientCaSecretName (key ca.crt) verifies scrapers' client certificates; it must
+  # not be the gateway's client CA or client TLS Secret, which sandboxes can read.
+  # A scraper must then use https on gateway.metricsPort.
+  metrics:
+    tls:
+      enabled: false
+      certSecretName: ""
+      clientCaSecretName: ""
+      requireClientCert: false   # needs clientCaSecretName
   healthPort: 9092
   extraArgs: []      # extra flags passed to `openshell-gateway run`
   auth:

@@ -18,13 +18,44 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
     driver reads it from the environment, default empty, so nothing breaks. The
     chart exposes it as `driver.supervisorRuntimeClassName` (default empty).
   - Upstream's `main()` now also serves `ComputeDriverAppEndpoints`
-    (`ResolveSupervisorAppEndpoint`). Mirrored in `main.rs` as an unwrapped
-    pass-through; a TODO notes that no Kyma hook has been designed for it.
-  - Upstream chart: optional metrics TLS/mTLS (`metrics.tls.*`) is **not**
-    mirrored (plaintext metrics stay the default); `priorityClassName` and
-    `topologySpreadConstraints` for the gateway pod are mirrored. RBAC,
-    NetworkPolicy and workspace-mode guards are unchanged.
+    (`ResolveSupervisorAppEndpoint`). The driver serves it the same way, unwrapped:
+    the RPC only reads a sandbox's pod, so no Kyma hook applies. Like upstream's
+    binary, the app listener stays off, so it answers "no endpoint".
   - No compile errors, no breaking change for this driver.
+
+### Added
+
+- **Upstream chart parity for v0.1.8:**
+  - **`gateway.metrics.tls`** (upstream's `metrics.tls`): TLS or mTLS for the
+    gateway's metrics listener, rendered as `[openshell.gateway.metrics_tls]`.
+    `certSecretName` defaults to the gateway's server TLS Secret, and
+    `clientCaSecretName` with `requireClientCert` verifies scrapers. Upstream's
+    refusals are mirrored: a zero `metricsPort`, `requireClientCert` without a CA,
+    and a CA Secret that is the gateway's client CA or the client TLS Secret
+    sandboxes mount. Plaintext stays the default.
+  - **`priorityClassName` and `topologySpreadConstraints`** for the gateway pod.
+  - Covered by `scripts/check-chart-parity.sh`.
+
+### Upgrading
+
+No values change is needed. Upstream v0.1.8 changes behaviour that sandbox
+policies and provider profiles you wrote yourself may rely on (see its release
+notes):
+
+- A static provider credential is now placed only in the `Authorization` header
+  unless its profile declares otherwise. The chart's own inference profile
+  already declares `auth_style: header` with `header_name: x-api-key`, as
+  upstream's `anthropic` profile does. Custom profiles that inject a key into
+  another header, a query parameter or a path need the same declaration.
+- REST endpoints refuse HTTP upgrade requests. WebSocket traffic needs
+  `protocol: websocket` endpoint rules.
+- A filesystem policy path through a symlink in a writable workspace now fails
+  sandbox launch. Use the symlink's target.
+- OCSF sandbox attribution moved to `device.container.*` (supervisor) and
+  `resources`/`unmapped` (gateway). SIEM parsers reading top-level `container.*`
+  need updating.
+- IPv4-mapped IPv6 destinations are matched as IPv4. Write `203.0.113.7`, not
+  `::ffff:203.0.113.7`.
 
 ### Documentation
 

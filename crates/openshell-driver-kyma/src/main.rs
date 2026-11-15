@@ -141,8 +141,11 @@ async fn main() -> Result<()> {
     let configuration_updates_service = ComputeDriverConfigurationUpdatesServer::new(
         KymaConfigurationUpdates::new(driver_service.clone(), Arc::clone(&hooks)),
     );
-    // Upstream's app-endpoints service is served unwrapped (no Kyma hooks apply).
-    // TODO(upstream v0.1.8): confirm the Kyma layer needs no hook for app endpoints.
+    // Upstream v0.1.8's app-endpoints service, served unwrapped as upstream's binary
+    // serves it: ResolveSupervisorAppEndpoint only reads the sandbox's pod, and the
+    // Kyma hooks act on create and configuration updates, so none applies. Like
+    // upstream's binary, the app listener stays at its default (off), so it answers
+    // "no endpoint".
     let app_endpoints_service = ComputeDriverAppEndpointsServer::new(driver_service.clone());
     let service = ComputeDriverServer::new(KymaComputeDriver::new(
         driver_service,

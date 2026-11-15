@@ -429,6 +429,31 @@ try bad-q7-extra-san-cm 'gateway.extraArgs sets --server-san; use gateway.certMa
 try good-q8-gardener-renew-half '' t "${GD16[@]}" --set gateway.certManager.certificateRenewBefore=4380h
 try bad-q8-gardener-renew-over "${RENEW16/5000h/4381h}" t "${GD16[@]}" --set gateway.certManager.certificateRenewBefore=4381h
 try good-q8-otlp-gateway-off '' t "${OFF4[@]}" --set gateway.otlp.endpoint=http://otel.example.org:4318
+# 20. Upstream v0.1.8: metrics listener TLS (its metrics.tls and _toml.tpl refusals),
+# and the gateway pod's priorityClassName and topologySpreadConstraints.
+MT20=(--set gateway.metrics.tls.enabled=true)
+try good-q9-metrics-tls '' t "${MT20[@]}"
+try good-q9-metrics-mtls '' t "${MT20[@]}" --set gateway.metrics.tls.certSecretName=metrics-tls \
+	--set gateway.metrics.tls.clientCaSecretName=scrape-ca --set gateway.metrics.tls.requireClientCert=true
+try good-q9-metrics-tls-config '' t "${MT20[@]}" \
+	--set-json 'gatewayConfig={"openshell.gateway.metrics_tls":{"cert_path":"/elsewhere.crt","client_ca_path":"/x"}}'
+try good-q9-metrics-tls-off-config '' t \
+	--set-json 'gatewayConfig={"openshell.gateway.metrics_tls":{"cert_path":"/elsewhere.crt"}}'
+try bad-q9-metrics-require 'gateway.metrics.tls.requireClientCert requires gateway.metrics.tls.clientCaSecretName' t \
+	"${MT20[@]}" --set gateway.metrics.tls.requireClientCert=true
+try bad-q9-metrics-port 'gateway.metrics.tls.enabled requires gateway.metricsPort to be non-zero' t \
+	"${MT20[@]}" --set gateway.metricsPort=0
+try bad-q9-metrics-client-ca 'gateway.metrics.tls.clientCaSecretName must not reuse the gateway client CA Secret' t \
+	"${MT20[@]}" --set gateway.tls.enabled=true --set gateway.tls.clientCa.enabled=true \
+	--set gateway.metrics.tls.clientCaSecretName=t-openshell-driver-kyma-server-tls
+try bad-q9-metrics-client-ca-named 'gateway.metrics.tls.clientCaSecretName must not reuse the gateway client CA Secret' t \
+	"${MT20[@]}" --set gateway.tls.enabled=true --set gateway.tls.clientCa.enabled=true \
+	--set gateway.tls.clientCa.secretName=my-ca --set gateway.metrics.tls.clientCaSecretName=my-ca
+try bad-q9-metrics-client-tls 'gateway.metrics.tls.clientCaSecretName must not reuse the gateway client TLS Secret' t \
+	"${MT20[@]}" --set gateway.metrics.tls.clientCaSecretName=t-openshell-driver-kyma-client-tls
+try bad-q9-metrics-string 'gateway.metrics.tls.enabled must be a boolean' t --set-string gateway.metrics.tls.enabled=true
+try good-q9-scheduling '' t --set priorityClassName=openshell-critical \
+	--set-json 'topologySpreadConstraints=[{"maxSkew":1,"topologyKey":"topology.kubernetes.io/zone","whenUnsatisfiable":"ScheduleAnyway"}]'
 
 uv run --quiet --no-project --python 3.12 --with pyyaml==6.0.2 python - "$WORK" "$CHART" <<'PY'
 import pathlib, sys, tomllib
@@ -1248,6 +1273,49 @@ if 4318 not in (pod_egress_ports(case) or []):
     failures.append(f"{case}: the pod NetworkPolicy egress ports are {pod_egress_ports(case)!r}, want 4318 among them")
 if any(c["name"] == "gateway" for c in (pod_spec(case) or {}).get("containers", [])):
     failures.append(f"{case}: a gateway container rendered with gateway.enabled=false")
+
+# 20. Metrics TLS: upstream's table and mounts; the chart's paths win over gatewayConfig,
+# and no table renders while it is off.
+MT_SERVER, MT_CA = "/etc/openshell-metrics/server", "/etc/openshell-metrics/client-ca"
+def metrics_state(case):
+    spec, gw = pod_spec(case), gateway_container(case)
+    names = ("metrics-tls-cert", "metrics-tls-client-ca")
+    return (flatten(gateway_toml(case)).get("openshell.gateway.metrics_tls"),
+            [m for m in gw.get("volumeMounts", []) if m["name"] in names],
+            [v for v in spec.get("volumes", []) if v["name"] in names])
+table, mounts, vols = metrics_state("good-q9-metrics-tls")
+if table != {"cert_path": MT_SERVER + "/tls.crt", "key_path": MT_SERVER + "/tls.key", "require_client_auth": False}:
+    failures.append(f"good-q9-metrics-tls: metrics_tls table is {table}")
+if mounts != [{"name": "metrics-tls-cert", "mountPath": MT_SERVER, "readOnly": True}]:
+    failures.append(f"good-q9-metrics-tls: metrics mounts are {mounts}")
+if [(v["name"], v["secret"]["secretName"]) for v in vols] != [("metrics-tls-cert", "t-openshell-driver-kyma-server-tls")]:
+    failures.append(f"good-q9-metrics-tls: metrics volumes are {vols}, want the server TLS Secret reused")
+table, mounts, vols = metrics_state("good-q9-metrics-mtls")
+if table != {"cert_path": MT_SERVER + "/tls.crt", "key_path": MT_SERVER + "/tls.key",
+             "client_ca_path": MT_CA + "/ca.crt", "require_client_auth": True}:
+    failures.append(f"good-q9-metrics-mtls: metrics_tls table is {table}")
+if [m["mountPath"] for m in mounts] != [MT_SERVER, MT_CA]:
+    failures.append(f"good-q9-metrics-mtls: metrics mounts are {mounts}")
+want_vols = [("metrics-tls-cert", "metrics-tls", None),
+             ("metrics-tls-client-ca", "scrape-ca", [{"key": "ca.crt", "path": "ca.crt"}])]
+if [(v["name"], v["secret"]["secretName"], v["secret"].get("items")) for v in vols] != want_vols:
+    failures.append(f"good-q9-metrics-mtls: metrics volumes are {vols}")
+table = metrics_state("good-q9-metrics-tls-config")[0]
+if table != {"cert_path": MT_SERVER + "/tls.crt", "key_path": MT_SERVER + "/tls.key", "require_client_auth": False}:
+    failures.append(f"good-q9-metrics-tls-config: gatewayConfig's paths survived: {table}")
+if metrics_state("good-q9-metrics-tls-off-config") != (None, [], []):
+    failures.append(f"good-q9-metrics-tls-off-config: metrics TLS rendered while off: {metrics_state('good-q9-metrics-tls-off-config')}")
+if metrics_state("good-p1-defaults") != (None, [], []):
+    failures.append("good-p1-defaults: metrics TLS rendered by default")
+spec = pod_spec("good-q9-scheduling")
+if spec.get("priorityClassName") != "openshell-critical":
+    failures.append(f"good-q9-scheduling: priorityClassName is {spec.get('priorityClassName')!r}")
+if spec.get("topologySpreadConstraints") != [{"maxSkew": 1, "topologyKey": "topology.kubernetes.io/zone",
+                                              "whenUnsatisfiable": "ScheduleAnyway"}]:
+    failures.append(f"good-q9-scheduling: topologySpreadConstraints are {spec.get('topologySpreadConstraints')}")
+spec = pod_spec("good-p1-defaults")
+if "priorityClassName" in spec or "topologySpreadConstraints" in spec:
+    failures.append("good-p1-defaults: scheduling fields rendered by default")
 
 if failures:
     print("CHART_PARITY_FAIL:")
