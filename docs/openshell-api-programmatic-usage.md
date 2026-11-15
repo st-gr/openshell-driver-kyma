@@ -2,9 +2,9 @@
 
 > **Written for upstream OpenShell v0.1.8 / chart 0.14.0.** The Python sample
 > below is verified: its requests are built from stubs generated from the
-> v0.1.8 protos, and it ran live on 2026-11-14 against a scratch release of
-> the 0.13.0 chart (client-certificate auth over a port-forward). The RPCs and
-> messages it uses are the same in v0.1.7 and v0.1.8.
+> v0.1.8 protos, and it ran live on 2026-11-15 against a 0.14.0 release through
+> `gatewayIngress` with an OIDC bearer token, and on 2026-11-14 against a scratch
+> 0.13.0 release with a client certificate over a port-forward.
 
 This guide is for engineers who drive OpenShell sandboxes from their own
 services or scripts instead of the `openshell` CLI. It covers how to reach

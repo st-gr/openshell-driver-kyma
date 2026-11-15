@@ -6,6 +6,19 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **`scripts/check-gateway-config.sh` feeds the `gateway.metrics.tls` table to the
+  pinned gateway**, which rejects unknown or mistyped keys there.
+- `values.yaml` notes that a metrics TLS certificate the gateway cannot load disables
+  the metrics listener (event `metrics_tls_listener_disabled`) rather than falling
+  back to plaintext.
+
+### Documentation
+
+- The Python sample in `docs/openshell-api-programmatic-usage.md` ran live against a
+  0.14.0 release through `gatewayIngress` with an OIDC token.
+
 ## [0.14.0] — 2026-11-15
 
 ### Changed
