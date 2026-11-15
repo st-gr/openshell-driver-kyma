@@ -502,7 +502,9 @@ gateway:
   # the gateway's server TLS Secret (created by the chart's PKI hook or cert-manager).
   # clientCaSecretName (key ca.crt) verifies scrapers' client certificates; it must
   # not be the gateway's client CA or client TLS Secret, which sandboxes can read.
-  # A scraper must then use https on gateway.metricsPort.
+  # A scraper must then use https on gateway.metricsPort. If the gateway cannot load
+  # the certificate files (wrong Secret or keys), it logs metrics_tls_listener_disabled
+  # and keeps running without a metrics listener; it does not fall back to plaintext.
   metrics:
     tls:
       enabled: false

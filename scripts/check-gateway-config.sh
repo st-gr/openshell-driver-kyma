@@ -390,4 +390,21 @@ if ! tr -d '\n│ ' <<<"$out" | grep -q "failedtoreadVaultCAbundle'/etc/openshel
   exit 1
 fi
 echo "GATEWAY_CREDENTIAL_DRIVER_ACCEPTED (vault)"
+# Metrics listener TLS (gateway.metrics.tls, upstream v0.1.8): the table with every key
+# the chart renders (client CA and require_client_auth included) must parse; an unknown
+# or mistyped key fails here. Its runtime use is not probed: without a compute driver the
+# gateway waits on the driver socket before it starts the metrics listener. (With
+# unreadable certificate files it logs metrics_tls_listener_disabled and keeps running
+# without metrics.)
+render templates/gateway-config.yaml --set gateway.metrics.tls.enabled=true \
+  --set gateway.metrics.tls.clientCaSecretName=scrape-ca --set gateway.metrics.tls.requireClientCert=true \
+  > "$WORK/rendered-metrics-tls.yaml"
+python3 - "$WORK/rendered-metrics-tls.yaml" "$WORK/gateway-metrics-tls.toml" <<'PY'
+import sys, yaml
+doc = yaml.safe_load(open(sys.argv[1]))
+open(sys.argv[2], "w").write(doc["data"]["gateway.toml"])
+PY
+grep -q '^\[openshell.gateway.metrics_tls\]' "$WORK/gateway-metrics-tls.toml" \
+  || { echo "ERROR: the metrics TLS render has no [openshell.gateway.metrics_tls]; nothing to test" >&2; exit 1; }
+check_config metrics-tls "$WORK/gateway-metrics-tls.toml"
 echo "GATEWAY_CONFIG_ACCEPTED"
