@@ -6,18 +6,70 @@ and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.15.0] — 2026-11-23
+
 ### Changed
 
+- **Upstream OpenShell v0.1.8 → v0.1.9**: crates, chart `upstream.version`, and the
+  gateway, supervisor and sandbox-runtime digests. Synced by hand: the weekly sync
+  run of 2026-11-23 failed before making any change (the Claude step got no answer
+  from its main model).
+  - The driver mirrors upstream's two new startup budgets,
+    `--runtime-bootstrap-grace-seconds` (default 300) and
+    `--sandbox-attach-request-timeout-seconds`, each 1-86400 seconds. Its logs use
+    ANSI colours only on a terminal, as upstream's, so logs collected by Kubernetes
+    are plain text.
+  - **The OIDC issuer CA (`gateway.oidc.caConfigMapName`) now applies to OIDC
+    discovery and JWKS requests only**, as in upstream's chart: the chart passes it
+    as `--oidc-ca-bundle`, adding to the platform trust roots, instead of setting
+    `SSL_CERT_FILE`, which replaced the trust store for all of the gateway's
+    outbound TLS. `gatewayConfig` may no longer set `openshell.gateway.oidc.ca_bundle`.
 - **`scripts/check-gateway-config.sh` feeds the `gateway.metrics.tls` table to the
   pinned gateway**, which rejects unknown or mistyped keys there.
 - `values.yaml` notes that a metrics TLS certificate the gateway cannot load disables
   the metrics listener (event `metrics_tls_listener_disabled`) rather than falling
   back to plaintext.
 
+### Added
+
+- **Upstream chart parity for v0.1.9:**
+  - `gateway.metrics.enabled` (upstream's `metrics.enabled`, default `true`):
+    `false` drops the metrics listener (`--metrics-port`), its container, Service
+    and NetworkPolicy ports.
+  - The gateway ports are checked as upstream's chart checks them: `grpcPort`,
+    `healthPort` and `metricsPort` are integers from 1 to 65535, gRPC and health
+    differ, and metrics differs from both while enabled. `gateway.metrics.tls`
+    now requires `gateway.metrics.enabled`.
+  - `driver.runtimeBootstrapGraceSeconds` and
+    `driver.sandboxAttachRequestTimeoutSeconds` (empty = upstream's defaults) for
+    slow isolation backends, refused outside 1-86400 at render time.
+  - Covered by `scripts/check-chart-parity.sh` (section 21) and
+    `scripts/check-gateway-config.sh` (metrics off, `--oidc-ca-bundle`).
+
+### Upgrading
+
+- `gateway.metricsPort: 0` no longer turns the metrics listener off; the render
+  fails. Set `gateway.metrics.enabled: false` and keep a valid port.
+- If you relied on `gateway.oidc.caConfigMapName` to trust a private CA for other
+  outbound TLS of the gateway (anything but the OIDC issuer), that no longer
+  happens.
+- Upstream v0.1.9 behaviour changes (see its release notes):
+  - Wildcard network policy endpoints no longer allow private IP literals on
+    their own; add an exact endpoint or an `allowed_ips` grant. The chart's
+    inference profile uses an exact host and is not affected.
+  - On Postgres (`gateway.dbPersistence.externalDbSecret`), gateway migration
+    `010` builds indexes with a plain `CREATE INDEX`, which blocks writes to the
+    `objects` table while it runs.
+  - Middleware selectors may no longer include a port.
+  - Authorization denials of write methods are now OCSF Create, Update or Delete
+    instead of Other (99); select them by `class_uid: 6003` and `status_id: 2`.
+
 ### Documentation
 
 - The Python sample in `docs/openshell-api-programmatic-usage.md` ran live against a
   0.14.0 release through `gatewayIngress` with an OIDC token.
+- Docs move to chart 0.15.0 / upstream v0.1.9; the production guide lists the
+  new options.
 
 ## [0.14.0] — 2026-11-15
 

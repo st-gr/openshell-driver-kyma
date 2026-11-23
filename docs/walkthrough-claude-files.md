@@ -4,7 +4,7 @@ This is the canonical hands-on guide. It takes a clean Kyma cluster
 through:
 
 1. Cluster prerequisites + namespace bootstrap.
-2. installing the chart (`0.14.0`) from OCI.
+2. installing the chart (`0.15.0`) from OCI.
 3. Installing the `openshell` CLI on your host.
 4. Creating a Claude-equipped sandbox.
 5. Uploading a file to the sandbox.
@@ -122,7 +122,7 @@ curl -fsSL https://raw.githubusercontent.com/st-gr/openshell-driver-kyma/main/de
 
 ```bash
 helm install ods oci://ghcr.io/st-gr/charts/openshell-driver-kyma \
-  --version 0.14.0 \
+  --version 0.15.0 \
   --namespace "$NS" \
   -f my-values.yaml \
   --wait --timeout=300s
@@ -195,7 +195,7 @@ cat > /tmp/draft.md <<'EOF'
 
 Three things shipped this week:
 - Helm chart published as OCI artifact.
-- Driver release on upstream OpenShell v0.1.8.
+- Driver release on upstream OpenShell v0.1.9.
 - E2E live-cluster smoke succeeded.
 
 Two things outstanding:
@@ -452,7 +452,7 @@ kubectl -n "$NS" run cli --restart=Never --image=alpine:3.20 --command -- sleep 
 # Inside the pod (one-time setup):
 kubectl -n "$NS" exec cli -- sh -c '
   apk add --no-cache curl rsync openssh-client &&
-  curl -fsSL https://github.com/NVIDIA/OpenShell/releases/download/v0.1.8/openshell-x86_64-unknown-linux-musl.tar.gz \
+  curl -fsSL https://github.com/NVIDIA/OpenShell/releases/download/v0.1.9/openshell-x86_64-unknown-linux-musl.tar.gz \
     | tar -xz -C /usr/local/bin &&
   /usr/local/bin/openshell gateway add --local http://ods-openshell-driver-kyma:8080
 '

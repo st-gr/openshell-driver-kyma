@@ -20,12 +20,12 @@ flowchart TB
         V["inferenceProvider:<br/>baseUrl, modelId, credential Secret"]
     end
 
-    subgraph S3["3 — helm install chart 0.14.0"]
-        POD["driver + gateway pod 2/2<br/>gateway v0.1.8, Unix socket"]
+    subgraph S3["3 — helm install chart 0.15.0"]
+        POD["driver + gateway pod 2/2<br/>gateway v0.1.9, Unix socket"]
         HOOK["hook Job: provider profile import +<br/>provider create (auto-deletes)"]
     end
 
-    S45["4-5 — install openshell CLI v0.1.8,<br/>port-forward :8080,<br/>gateway add --local"]
+    S45["4-5 — install openshell CLI v0.1.9,<br/>port-forward :8080,<br/>gateway add --local"]
 
     subgraph S6["6 — run Claude in a sandbox"]
         CREATE["sandbox create --provider ods-anthropic"]
@@ -217,7 +217,7 @@ Notes on why this is short:
 
 ```bash
 helm install ods oci://ghcr.io/st-gr/charts/openshell-driver-kyma \
-  --version 0.14.0 \
+  --version 0.15.0 \
   --namespace "$NS" \
   -f my-values.yaml \
   --wait --timeout=300s
@@ -261,15 +261,15 @@ See [`install-cli.md`](install-cli.md) for the full matrix. For a
 quick smoke test on Linux (or WSL2):
 
 ```bash
-VERSION=v0.1.8
+VERSION=v0.1.9
 curl -fsSL "https://github.com/NVIDIA/OpenShell/releases/download/${VERSION}/openshell-x86_64-unknown-linux-musl.tar.gz" \
   | tar -xz -C /usr/local/bin
 openshell --version
 ```
 
 **Keep the CLI and the gateway on the same version.** The chart pins
-the gateway to the upstream `v0.1.8` digest (see `values.yaml`), so install
-the matching `v0.1.8` CLI. The gRPC contract does drift between releases: a
+the gateway to the upstream `v0.1.9` digest (see `values.yaml`), so install
+the matching `v0.1.9` CLI. The gRPC contract does drift between releases: a
 newer CLI against an older gateway can fail on individual commands whose
 response shape changed. If you bump one, bump the other.
 
@@ -438,8 +438,8 @@ cluster-wide — remove it separately with a matching
 
 ## Versions
 
-This tutorial targets chart `openshell-driver-kyma` `0.14.0`, which deploys
-upstream NVIDIA OpenShell `v0.1.8`: the gateway, supervisor and sandbox
+This tutorial targets chart `openshell-driver-kyma` `0.15.0`, which deploys
+upstream NVIDIA OpenShell `v0.1.9`: the gateway, supervisor and sandbox
 runtime images are pinned by digest to that release, and the CLI you install
 in step 4 must be the same release. The agent-sandbox controller is v0.5.2.
 The chart's CI installs the chart against a real gateway image and follows a
