@@ -663,6 +663,23 @@ compares metrics.tls.clientCaSecretName against the same Secret.
 {{- end }}
 
 {{/*
+Whether the gateway's metrics listener is on (gateway.metrics.enabled), as
+upstream v0.1.9's openshell.metricsEnabled: a missing value means on, an explicit
+false stays false, anything but a boolean is refused. "true" or empty.
+*/}}
+{{- define "openshell-driver-kyma.metricsEnabled" -}}
+{{- $metrics := .Values.gateway.metrics | default dict -}}
+{{- $enabled := true -}}
+{{- if hasKey $metrics "enabled" -}}
+{{- if not (kindIs "bool" $metrics.enabled) -}}
+{{- fail (printf "gateway.metrics.enabled must be a boolean (true or false), got the %s %q." (kindOf $metrics.enabled) (toString $metrics.enabled)) -}}
+{{- end -}}
+{{- $enabled = $metrics.enabled -}}
+{{- end -}}
+{{- if $enabled -}}true{{- end -}}
+{{- end }}
+
+{{/*
 The metrics listener's TLS Secret (gateway.metrics.tls.certSecretName, or the
 server TLS Secret as upstream's server.tls.certSecretName default).
 */}}

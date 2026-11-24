@@ -2214,7 +2214,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "openshell-bedrock-bridge"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2236,7 +2236,7 @@ dependencies = [
 [[package]]
 name = "openshell-core"
 version = "0.0.0"
-source = "git+https://github.com/NVIDIA/OpenShell?tag=v0.1.8#f3d976590d3eb1379690a2abaf0f0e26c21d487d"
+source = "git+https://github.com/NVIDIA/OpenShell?tag=v0.1.9#ce58cf8e9b953281352d98a637e41616295b1318"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2275,7 +2275,7 @@ dependencies = [
 [[package]]
 name = "openshell-crypto"
 version = "0.0.0"
-source = "git+https://github.com/NVIDIA/OpenShell?tag=v0.1.8#f3d976590d3eb1379690a2abaf0f0e26c21d487d"
+source = "git+https://github.com/NVIDIA/OpenShell?tag=v0.1.9#ce58cf8e9b953281352d98a637e41616295b1318"
 dependencies = [
  "aws-lc-rs",
  "jsonwebtoken",
@@ -2294,7 +2294,7 @@ dependencies = [
 [[package]]
 name = "openshell-driver-kubernetes"
 version = "0.0.0"
-source = "git+https://github.com/NVIDIA/OpenShell?tag=v0.1.8#f3d976590d3eb1379690a2abaf0f0e26c21d487d"
+source = "git+https://github.com/NVIDIA/OpenShell?tag=v0.1.9#ce58cf8e9b953281352d98a637e41616295b1318"
 dependencies = [
  "bytes",
  "clap",
@@ -2336,7 +2336,7 @@ dependencies = [
 
 [[package]]
 name = "openshell-driver-kyma"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "axum",
  "clap",
@@ -2360,7 +2360,7 @@ dependencies = [
 [[package]]
 name = "openshell-extension-core"
 version = "0.0.0"
-source = "git+https://github.com/NVIDIA/OpenShell?tag=v0.1.8#f3d976590d3eb1379690a2abaf0f0e26c21d487d"
+source = "git+https://github.com/NVIDIA/OpenShell?tag=v0.1.9#ce58cf8e9b953281352d98a637e41616295b1318"
 dependencies = [
  "hyper-util",
  "serde",
@@ -2373,7 +2373,7 @@ dependencies = [
 [[package]]
 name = "openshell-isolation-interface"
 version = "0.0.0"
-source = "git+https://github.com/NVIDIA/OpenShell?tag=v0.1.8#f3d976590d3eb1379690a2abaf0f0e26c21d487d"
+source = "git+https://github.com/NVIDIA/OpenShell?tag=v0.1.9#ce58cf8e9b953281352d98a637e41616295b1318"
 dependencies = [
  "openshell-core",
  "serde",
@@ -2385,7 +2385,7 @@ dependencies = [
 [[package]]
 name = "openshell-ocsf"
 version = "0.0.0"
-source = "git+https://github.com/NVIDIA/OpenShell?tag=v0.1.8#f3d976590d3eb1379690a2abaf0f0e26c21d487d"
+source = "git+https://github.com/NVIDIA/OpenShell?tag=v0.1.9#ce58cf8e9b953281352d98a637e41616295b1318"
 dependencies = [
  "chrono",
  "serde",
@@ -2399,7 +2399,7 @@ dependencies = [
 [[package]]
 name = "openshell-otel"
 version = "0.0.0"
-source = "git+https://github.com/NVIDIA/OpenShell?tag=v0.1.8#f3d976590d3eb1379690a2abaf0f0e26c21d487d"
+source = "git+https://github.com/NVIDIA/OpenShell?tag=v0.1.9#ce58cf8e9b953281352d98a637e41616295b1318"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2431,7 +2431,7 @@ dependencies = [
 [[package]]
 name = "openshell-policy"
 version = "0.0.0"
-source = "git+https://github.com/NVIDIA/OpenShell?tag=v0.1.8#f3d976590d3eb1379690a2abaf0f0e26c21d487d"
+source = "git+https://github.com/NVIDIA/OpenShell?tag=v0.1.9#ce58cf8e9b953281352d98a637e41616295b1318"
 dependencies = [
  "hickory-proto",
  "miette",
@@ -2445,7 +2445,7 @@ dependencies = [
 [[package]]
 name = "openshell-policy-schema"
 version = "0.0.0"
-source = "git+https://github.com/NVIDIA/OpenShell?tag=v0.1.8#f3d976590d3eb1379690a2abaf0f0e26c21d487d"
+source = "git+https://github.com/NVIDIA/OpenShell?tag=v0.1.9#ce58cf8e9b953281352d98a637e41616295b1318"
 dependencies = [
  "miette",
  "noyalib",
@@ -2458,7 +2458,7 @@ dependencies = [
 [[package]]
 name = "openshell-sandbox-backend"
 version = "0.0.0"
-source = "git+https://github.com/NVIDIA/OpenShell?tag=v0.1.8#f3d976590d3eb1379690a2abaf0f0e26c21d487d"
+source = "git+https://github.com/NVIDIA/OpenShell?tag=v0.1.9#ce58cf8e9b953281352d98a637e41616295b1318"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2490,7 +2490,7 @@ dependencies = [
 [[package]]
 name = "openshell-supervisor-control"
 version = "0.0.0"
-source = "git+https://github.com/NVIDIA/OpenShell?tag=v0.1.8#f3d976590d3eb1379690a2abaf0f0e26c21d487d"
+source = "git+https://github.com/NVIDIA/OpenShell?tag=v0.1.9#ce58cf8e9b953281352d98a637e41616295b1318"
 dependencies = [
  "openshell-core",
  "openshell-otel",

@@ -33,6 +33,14 @@ pub struct UpstreamArgs {
         default_value = "{}"
     )]
     pub admission_config_json: openshell_core::resource_admission::DriverAdmissionConfig,
+    /// Runtime bootstrap budget in seconds.
+    #[arg(long, env = "OPENSHELL_RUNTIME_BOOTSTRAP_GRACE_SECONDS", default_value = "300",
+        value_parser = clap::value_parser!(u64).range(1..=86_400))]
+    pub runtime_bootstrap_grace_seconds: u64,
+    /// Initial attachment budget passed to dedicated supervisor Pods.
+    #[arg(long, env = "OPENSHELL_ATTACH_REQUEST_TIMEOUT_SECONDS",
+        value_parser = clap::value_parser!(u64).range(1..=86_400))]
+    pub sandbox_attach_request_timeout_seconds: Option<u64>,
     /// Public compute-driver Unix socket used by an external gateway.
     #[arg(long, env = "OPENSHELL_COMPUTE_DRIVER_SOCKET")]
     pub bind_socket: Option<PathBuf>,
@@ -263,6 +271,8 @@ pub fn compute_config(
                 openshell_driver_kubernetes::config::KubernetesAppListenerConfig::default(),
             boundary_port: args.sandbox_runtime_boundary_port,
         },
+        runtime_bootstrap_grace_seconds: args.runtime_bootstrap_grace_seconds,
+        sandbox_attach_request_timeout_seconds: args.sandbox_attach_request_timeout_seconds,
         https_proxy: args.https_proxy,
         no_proxy: args.no_proxy,
         proxy_auth_secret_name: args.proxy_auth_secret_name,

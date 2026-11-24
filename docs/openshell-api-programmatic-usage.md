@@ -1,10 +1,11 @@
 # Programmatic OpenShell API usage
 
-> **Written for upstream OpenShell v0.1.8 / chart 0.14.0.** The Python sample
+> **Written for upstream OpenShell v0.1.9 / chart 0.15.0.** The Python sample
 > below is verified: its requests are built from stubs generated from the
-> v0.1.8 protos, and it ran live on 2026-11-15 against a 0.14.0 release through
-> `gatewayIngress` with an OIDC bearer token, and on 2026-11-14 against a scratch
-> 0.13.0 release with a client certificate over a port-forward.
+> v0.1.8 protos (every message it uses is unchanged in v0.1.9), and it ran live on
+> 2026-11-15 against a 0.14.0 release through `gatewayIngress` with an OIDC bearer
+> token, and on 2026-11-14 against a scratch 0.13.0 release with a client
+> certificate over a port-forward.
 
 This guide is for engineers who drive OpenShell sandboxes from their own
 services or scripts instead of the `openshell` CLI. It covers how to reach
@@ -35,8 +36,8 @@ gRPC-Web and no Connect protocol: a browser client needs its own gRPC-Web
 proxy, which this chart does not provide.
 
 - Package: `openshell.v1`
-- Service: `OpenShell` (86 RPCs in v0.1.8), plus `SandboxUpdates`, both in
-  [`proto/openshell.proto`](https://github.com/NVIDIA/OpenShell/blob/v0.1.8/proto/openshell.proto)
+- Service: `OpenShell` (86 RPCs in v0.1.9), plus `SandboxUpdates` and `ServiceDiscovery`, all in
+  [`proto/openshell.proto`](https://github.com/NVIDIA/OpenShell/blob/v0.1.9/proto/openshell.proto)
 - Server reflection is on, so `grpcurl` can list and describe methods without
   the proto files (see [`grpc-without-cli.md`](grpc-without-cli.md)).
 
@@ -158,7 +159,7 @@ four files at the tag your gateway runs:
 ```bash
 mkdir -p proto gen
 for f in openshell datamodel sandbox options; do
-  curl -fsSL "https://raw.githubusercontent.com/NVIDIA/OpenShell/v0.1.8/proto/$f.proto" \
+  curl -fsSL "https://raw.githubusercontent.com/NVIDIA/OpenShell/v0.1.9/proto/$f.proto" \
     -o "proto/$f.proto"
 done
 ```
@@ -205,7 +206,7 @@ Save it as `sample.py` next to the `gen/` directory:
 #!/usr/bin/env python3
 """List sandboxes, create one, wait for Ready, exec `echo hello`, delete it.
 
-Stubs generated from upstream OpenShell v0.1.8 protos into ./gen.
+Stubs generated from upstream OpenShell v0.1.9 protos into ./gen.
 """
 import os
 import sys
@@ -380,7 +381,7 @@ Points worth knowing about the request shapes:
 ## Beyond the sample
 
 These snippets use the sample's `pb`, `dm`, `ws()`, stub and metadata, and the
-file snippets also `import io, tarfile`. They are checked against the v0.1.8
+file snippets also `import io, tarfile`. They are checked against the v0.1.9
 stubs like the sample.
 
 ### Credentials: providers
@@ -473,7 +474,7 @@ def upload_stream(stub, md, name, payload, remote_path):
 
 `ForwardTcp` is a bidirectional stream of `TcpForwardFrame`s. The first frame
 is `init` with the sandbox, its workspace and the target; after that both
-sides send `data` bytes. In v0.1.8 the TCP target must be a loopback address
+sides send `data` bytes. In v0.1.9 the TCP target must be a loopback address
 inside the sandbox (`127.0.0.1`, `::1` or `localhost`):
 
 ```python
@@ -495,7 +496,7 @@ A shorter Node version of the same flow with plain
 same four proto files at runtime with `@grpc/proto-loader`. `keepCase: true`
 keeps the proto field names (`workspace_scope`, `follow_status`, ...), so they
 match the Python sample. This sample has not been run; the field names are
-those of the v0.1.8 protos.
+those of the v0.1.9 protos.
 
 ```typescript
 import * as grpc from "@grpc/grpc-js";
@@ -569,7 +570,7 @@ main();
 
 ## References
 
-- Upstream protos at v0.1.8: <https://github.com/NVIDIA/OpenShell/tree/v0.1.8/proto>
+- Upstream protos at v0.1.9: <https://github.com/NVIDIA/OpenShell/tree/v0.1.9/proto>
 - Upstream project: <https://github.com/NVIDIA/OpenShell>
 - [`grpc-without-cli.md`](grpc-without-cli.md): `grpcurl` and reflection
 - [`production-deployment.md`](production-deployment.md): OIDC, TLS, mTLS and `gatewayIngress`

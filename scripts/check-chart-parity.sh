@@ -75,6 +75,8 @@ try good-p5-oidc '' t "${OIDC5[@]}" --set gateway.oidc.jwksTtl=600 --set gateway
 	--set 'gateway.oidc.jwksAllowedOrigins={https://keys.example.org,https://k2.example.org}' \
 	--set gateway.oidc.dangerouslyAllowInsecureHttp=true
 try good-p5-oidc-ca '' t "${OIDC5[@]}" --set gateway.oidc.caConfigMapName=issuer-ca
+try bad-p5-oidc-ca-config 'gatewayConfig must not set openshell.gateway.oidc.ca_bundle' t "${OIDC5[@]}" \
+	--set-json 'gatewayConfig={"openshell.gateway.oidc":{"ca_bundle":"/etc/custom/ca.pem"}}'
 try good-p5-ca-no-issuer '' t --set gateway.oidc.caConfigMapName=issuer-ca
 
 # 7. Pod plumbing: SA annotations, grace period, probe timings, host aliases, JWT Secret mode.
@@ -441,8 +443,10 @@ try good-q9-metrics-tls-off-config '' t \
 	--set-json 'gatewayConfig={"openshell.gateway.metrics_tls":{"cert_path":"/elsewhere.crt"}}'
 try bad-q9-metrics-require 'gateway.metrics.tls.requireClientCert requires gateway.metrics.tls.clientCaSecretName' t \
 	"${MT20[@]}" --set gateway.metrics.tls.requireClientCert=true
-try bad-q9-metrics-port 'gateway.metrics.tls.enabled requires gateway.metricsPort to be non-zero' t \
+try bad-q9-metrics-port 'gateway.metricsPort must be an integer between 1 and 65535' t \
 	"${MT20[@]}" --set gateway.metricsPort=0
+try bad-q9-metrics-tls-disabled 'gateway.metrics.tls.enabled requires gateway.metrics.enabled=true' t \
+	"${MT20[@]}" --set gateway.metrics.enabled=false
 try bad-q9-metrics-client-ca 'gateway.metrics.tls.clientCaSecretName must not reuse the gateway client CA Secret' t \
 	"${MT20[@]}" --set gateway.tls.enabled=true --set gateway.tls.clientCa.enabled=true \
 	--set gateway.metrics.tls.clientCaSecretName=t-openshell-driver-kyma-server-tls
@@ -452,6 +456,23 @@ try bad-q9-metrics-client-ca-named 'gateway.metrics.tls.clientCaSecretName must 
 try bad-q9-metrics-client-tls 'gateway.metrics.tls.clientCaSecretName must not reuse the gateway client TLS Secret' t \
 	"${MT20[@]}" --set gateway.metrics.tls.clientCaSecretName=t-openshell-driver-kyma-client-tls
 try bad-q9-metrics-string 'gateway.metrics.tls.enabled must be a boolean' t --set-string gateway.metrics.tls.enabled=true
+# 21. Upstream v0.1.9: metrics.enabled, the gateway port checks, and the driver's
+# startup budgets (clap range 1-86400).
+try good-r1-metrics-off '' t --set gateway.metrics.enabled=false
+try good-r1-metrics-off-port-shared '' t --set gateway.metrics.enabled=false --set gateway.metricsPort=9092
+try bad-r1-metrics-string 'gateway.metrics.enabled must be a boolean' t --set-string gateway.metrics.enabled=false
+try bad-r1-grpc-port 'gateway.grpcPort must be an integer between 1 and 65535' t --set gateway.grpcPort=70000
+try bad-r1-health-port 'gateway.healthPort must be an integer between 1 and 65535' t --set-string gateway.healthPort=abc
+try bad-r1-grpc-health 'gateway.grpcPort and gateway.healthPort must be different' t --set gateway.healthPort=8080
+try bad-r1-metrics-collide 'gateway.metricsPort must differ from gateway.grpcPort and gateway.healthPort' t \
+	--set gateway.metricsPort=9092
+try good-r1-budgets '' t --set driver.runtimeBootstrapGraceSeconds=900 --set driver.sandboxAttachRequestTimeoutSeconds=1
+try bad-r1-budget-zero 'driver.runtimeBootstrapGraceSeconds must be empty or a whole number of seconds from 1 to 86400' t \
+	--set driver.runtimeBootstrapGraceSeconds=0
+try bad-r1-budget-big 'driver.sandboxAttachRequestTimeoutSeconds must be empty or a whole number of seconds from 1 to 86400' t \
+	--set driver.sandboxAttachRequestTimeoutSeconds=86401
+try bad-r1-budget-text 'driver.runtimeBootstrapGraceSeconds must be empty or a whole number of seconds from 1 to 86400' t \
+	--set-string driver.runtimeBootstrapGraceSeconds=5m
 try good-q9-scheduling '' t --set priorityClassName=openshell-critical \
 	--set-json 'topologySpreadConstraints=[{"maxSkew":1,"topologyKey":"topology.kubernetes.io/zone","whenUnsatisfiable":"ScheduleAnyway"}]'
 
@@ -700,23 +721,28 @@ for flag in ("--oidc-scopes-claim", "--oidc-jwks-allowed-origins", "--oidc-dange
         failures.append(f"good-p5-default: gateway args carry {flag}: {args}")
 
 CA_DIR = "/etc/openshell-tls/oidc-ca"
+# Upstream v0.1.9: the issuer CA applies to OIDC requests only (its ca_bundle, here the
+# --oidc-ca-bundle flag); the process-wide SSL_CERT_FILE the chart set before must be gone.
 def ca_state(case):
     spec = pod_spec(case)
     gw = gateway_container(case)
     return (env_of(gw).get("SSL_CERT_FILE", {}).get("value"),
+            next((a.split("=", 1)[1] for a in gw.get("args", []) if a.startswith("--oidc-ca-bundle=")), None),
             [m for m in gw.get("volumeMounts", []) if m["name"] == "oidc-ca"],
             [v for v in spec.get("volumes", []) if v["name"] == "oidc-ca"])
 
-env_v, mounts, vols = ca_state("good-p5-oidc-ca")
-if env_v != CA_DIR + "/ca.crt":
-    failures.append(f"good-p5-oidc-ca: SSL_CERT_FILE is {env_v!r}")
+env_v, bundle, mounts, vols = ca_state("good-p5-oidc-ca")
+if env_v is not None:
+    failures.append(f"good-p5-oidc-ca: SSL_CERT_FILE is still set ({env_v!r})")
+if bundle != CA_DIR + "/ca.crt":
+    failures.append(f"good-p5-oidc-ca: --oidc-ca-bundle is {bundle!r}")
 if mounts != [{"name": "oidc-ca", "mountPath": CA_DIR, "readOnly": True}]:
     failures.append(f"good-p5-oidc-ca: oidc-ca mounts are {mounts}")
 if vols != [{"name": "oidc-ca", "configMap": {"name": "issuer-ca"}}]:
     failures.append(f"good-p5-oidc-ca: oidc-ca volumes are {vols}")
-if ca_state("good-p5-ca-no-issuer") != (None, [], []):
+if ca_state("good-p5-ca-no-issuer") != (None, None, [], []):
     failures.append(f"good-p5-ca-no-issuer: CA wiring rendered without an issuer: {ca_state('good-p5-ca-no-issuer')}")
-if ca_state("good-p5-default") != (None, [], []):
+if ca_state("good-p5-default") != (None, None, [], []):
     failures.append("good-p5-default: CA wiring rendered without caConfigMapName")
 
 # 7. Pod plumbing.
@@ -1316,6 +1342,33 @@ if spec.get("topologySpreadConstraints") != [{"maxSkew": 1, "topologyKey": "topo
 spec = pod_spec("good-p1-defaults")
 if "priorityClassName" in spec or "topologySpreadConstraints" in spec:
     failures.append("good-p1-defaults: scheduling fields rendered by default")
+
+# 21. metrics.enabled=false drops the flag, the container, Service and NetworkPolicy
+# ports and the TOML key; on (default) keeps them.
+def metrics_wiring(case):
+    gw = gateway_container(case)
+    svc = next((d for d in docs(case) if d.get("kind") == "Service"
+                and d["metadata"]["name"] == "t-openshell-driver-kyma"), {})
+    np = next((d for d in docs(case) if d.get("kind") == "NetworkPolicy"
+               and d["metadata"]["name"].endswith("-driver")), {})
+    np_ports = [p["port"] for r in np.get("spec", {}).get("ingress", []) for p in r.get("ports", [])]
+    return ("--metrics-port" in gw.get("args", []),
+            any(p["name"] == "gw-metrics" for p in gw.get("ports", [])),
+            any(p["name"] == "gw-metrics" for p in svc.get("spec", {}).get("ports", [])),
+            9091 in np_ports,
+            "metrics_bind_address" in flatten(gateway_toml(case)).get("openshell.gateway", {}))
+if metrics_wiring("good-p1-defaults")[:4] != (True, True, True, True):
+    failures.append(f"good-p1-defaults: metrics wiring is {metrics_wiring('good-p1-defaults')}, want flag and all ports")
+if metrics_wiring("good-r1-metrics-off") != (False, False, False, False, False):
+    failures.append(f"good-r1-metrics-off: metrics wiring is {metrics_wiring('good-r1-metrics-off')}, want none")
+env = env_of(driver_container("good-r1-budgets"))
+if (env.get("OPENSHELL_RUNTIME_BOOTSTRAP_GRACE_SECONDS", {}).get("value"),
+        env.get("OPENSHELL_ATTACH_REQUEST_TIMEOUT_SECONDS", {}).get("value")) != ("900", "1"):
+    failures.append(f"good-r1-budgets: driver env is {env.get('OPENSHELL_RUNTIME_BOOTSTRAP_GRACE_SECONDS')}, "
+                    f"{env.get('OPENSHELL_ATTACH_REQUEST_TIMEOUT_SECONDS')}")
+env = env_of(driver_container("good-p1-defaults"))
+if "OPENSHELL_RUNTIME_BOOTSTRAP_GRACE_SECONDS" in env or "OPENSHELL_ATTACH_REQUEST_TIMEOUT_SECONDS" in env:
+    failures.append("good-p1-defaults: startup budgets rendered by default")
 
 if failures:
     print("CHART_PARITY_FAIL:")

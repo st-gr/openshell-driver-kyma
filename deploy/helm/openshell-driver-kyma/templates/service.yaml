@@ -51,10 +51,12 @@ spec:
       port: {{ .Values.gateway.healthPort }}
       targetPort: gw-health
       protocol: TCP
+    {{- if include "openshell-driver-kyma.metricsEnabled" . }}
     - name: gw-metrics
       port: {{ .Values.gateway.metricsPort }}
       targetPort: gw-metrics
       protocol: TCP
+    {{- end }}
     {{- end }}
 {{- if $split }}
 ---

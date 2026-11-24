@@ -25,6 +25,8 @@ driver:
   saTokenTtlSecs: 7200
   runtimeClassName: example-runtime
   supervisorRuntimeClassName: example-supervisor-runtime
+  runtimeBootstrapGraceSeconds: 900
+  sandboxAttachRequestTimeoutSeconds: 600
   sandboxSshSocketPath: /run/example-ssh.sock
   bindAddress: 127.0.0.1:50062
   otlpEndpoint: https://collector.example:4317

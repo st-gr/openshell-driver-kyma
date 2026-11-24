@@ -199,7 +199,14 @@ check_args rbac-roles \
   --set gateway.oidc.rolesClaim=groups \
   --set gateway.oidc.adminRole=osh-admin \
   --set gateway.oidc.userRole=osh-user
+# gateway.metrics.enabled=false (upstream v0.1.9): no --metrics-port at all.
+check_args metrics-off --set gateway.metrics.enabled=false
+grep -qx -- '--metrics-port' "$WORK/args.txt" \
+  && { echo "ERROR: the metrics-off render still passes --metrics-port" >&2; exit 1; }
+# The issuer CA arrives as --oidc-ca-bundle (gateway.oidc.caConfigMapName, upstream v0.1.9):
+# a TOML [openshell.gateway.oidc] table with only ca_bundle is refused ("missing field issuer").
 check_args oidc-extras \
+  --set gateway.oidc.caConfigMapName=issuer-ca \
   --set gateway.oidc.issuer=https://issuer.example.org \
   --set gateway.oidc.audience=a \
   --set gateway.oidc.jwksTtl=600 \

@@ -6,7 +6,7 @@ was the structural reference for this project. This document captures the
 concrete differences between it and the Kyma driver.
 
 The Kyma driver runs upstream OpenShell's Kubernetes driver
-(`openshell-driver-kubernetes`, release v0.1.8) unchanged, so provisioning,
+(`openshell-driver-kubernetes`, release v0.1.9) unchanged, so provisioning,
 sandbox authentication and isolation are upstream's, and it adds two things
 of its own: request enrichment (the Istio opt-out and Kagenti labels, plus
 configured sandbox environment) and Pod Security labels on the namespaces the
@@ -162,7 +162,7 @@ an in-cluster proxy patch each sandbox's CR.
 Kyma driver: follows upstream OpenShell's provider-profile model (see NVIDIA's
 [Inference](https://docs.nvidia.com/openshell/how-it-works/inference) and
 [Provider profiles](https://docs.nvidia.com/openshell/how-it-works/providers/profiles)
-pages). Upstream (v0.1.2 and later, current v0.1.8) has no `inference.local` endpoint, no router bundle
+pages). Upstream (v0.1.2 and later, current v0.1.9) has no `inference.local` endpoint, no router bundle
 and no command that sets a cluster-wide inference route:
 
 - The chart renders a provider profile (the host and port of

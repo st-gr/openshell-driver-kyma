@@ -29,9 +29,27 @@ the gateway requires gateway.sandboxJwt, whose PKI hook (or cert-manager) create
 {{- fail (printf "gateway.metrics.tls.%s must be a boolean (true or false), got the %s %q." $key (kindOf (get $metricsTls $key)) (toString (get $metricsTls $key))) -}}
 {{- end -}}
 {{- end -}}
+{{- /* The gateway ports, as upstream v0.1.9's _helpers.tpl validates service.port,
+healthPort and metricsPort: integers from 1 to 65535, gRPC and health distinct, and
+metrics distinct from both while its listener is on. */ -}}
+{{- $metricsEnabled := include "openshell-driver-kyma.metricsEnabled" . -}}
+{{- $ports := dict -}}
+{{- range $key := list "grpcPort" "healthPort" "metricsPort" -}}
+{{- $value := toString (get $.Values.gateway $key) -}}
+{{- if or (not (regexMatch `^[0-9]+$` $value)) (lt (int $value) 1) (gt (int $value) 65535) -}}
+{{- fail (printf "gateway.%s must be an integer between 1 and 65535, got %q.%s" $key $value (ternary " To turn the metrics listener off, set gateway.metrics.enabled=false and keep a valid port." "" (eq $key "metricsPort"))) -}}
+{{- end -}}
+{{- $_ := set $ports $key (int $value) -}}
+{{- end -}}
+{{- if eq $ports.grpcPort $ports.healthPort -}}
+{{- fail "gateway.grpcPort and gateway.healthPort must be different." -}}
+{{- end -}}
+{{- if and $metricsEnabled (or (eq $ports.metricsPort $ports.grpcPort) (eq $ports.metricsPort $ports.healthPort)) -}}
+{{- fail "gateway.metricsPort must differ from gateway.grpcPort and gateway.healthPort while gateway.metrics.enabled is true." -}}
+{{- end -}}
 {{- if $metricsTls.enabled -}}
-{{- if not (int .Values.gateway.metricsPort) -}}
-{{- fail "gateway.metrics.tls.enabled requires gateway.metricsPort to be non-zero." -}}
+{{- if not $metricsEnabled -}}
+{{- fail "gateway.metrics.tls.enabled requires gateway.metrics.enabled=true." -}}
 {{- end -}}
 {{- if and $metricsTls.requireClientCert (not $metricsTls.clientCaSecretName) -}}
 {{- fail "gateway.metrics.tls.requireClientCert requires gateway.metrics.tls.clientCaSecretName." -}}

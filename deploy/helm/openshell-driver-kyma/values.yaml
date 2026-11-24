@@ -97,11 +97,11 @@ driver:
   # starting with `sha256:` and the helper emits `<repo>@sha256:<digest>`
   # automatically.
   #
-  # This digest is supervisor v0.1.8, version-matched to gateway.image
+  # This digest is supervisor v0.1.9, version-matched to gateway.image
   # below. It tracked `:latest` until chart 0.3.0 — that tag moved twice
   # in one week, so sandboxes were silently picking up new privileged
   # binaries. Re-pin both together when bumping upstream.
-  supervisorImage: ghcr.io/nvidia/openshell/supervisor@sha256:deadeacfdba6d12ca27e538d0002696369d4de5a4fcad075ab503495503af9d1
+  supervisorImage: ghcr.io/nvidia/openshell/supervisor@sha256:f1ec231b5dbe5b6a40c33acb2ac847995aabb959a56134ef6d7d7aa4f43199d3
   # The gateway endpoint sandboxes dial (OPENSHELL_GRPC_ENDPOINT). Empty
   # defaults to this release's Service when gateway.enabled is true, https://
   # when gateway.tls.enabled and http:// otherwise, as upstream's chart derives
@@ -199,7 +199,7 @@ driver:
   # Sandbox runtime (isolation backend) image, digest-pinned. Upstream's
   # compiled-in default depends on build variables a git-dependency build does
   # not set, so the chart always passes it.
-  sandboxRuntimeImage: ghcr.io/nvidia/openshell/sandbox@sha256:f0fe7dbf18d833acb5da99c405231124718f23b524aa8e3c0108e6f37530033b
+  sandboxRuntimeImage: ghcr.io/nvidia/openshell/sandbox@sha256:e57d07cd6cc1fc314b80368d6b51ec6fbf825fb62cd8f081312941180846866f
   sandboxRuntimeImagePullPolicy: ""
   supervisorImagePullPolicy: ""
   # Default sandbox image when a create request names none
@@ -215,6 +215,16 @@ driver:
   # OPENSHELL_K8S_SUPERVISOR_RUNTIME_CLASS_NAME). Admin-only; never inherits
   # runtimeClassName. Empty = omit the field.
   supervisorRuntimeClassName: ""
+  # Startup budgets for slow isolation backends (upstream v0.1.9 driver options,
+  # each 1-86400 seconds). runtimeBootstrapGraceSeconds: how long a sandbox's
+  # runtime may take to bootstrap (OPENSHELL_RUNTIME_BOOTSTRAP_GRACE_SECONDS;
+  # empty = upstream's 300). sandboxAttachRequestTimeoutSeconds: the initial
+  # attachment budget passed to dedicated supervisor pods
+  # (OPENSHELL_ATTACH_REQUEST_TIMEOUT_SECONDS; empty = upstream's default). The
+  # gateway's own windows (provisioning_repair_window_seconds and related) go in
+  # gatewayConfig.
+  runtimeBootstrapGraceSeconds: ""
+  sandboxAttachRequestTimeoutSeconds: ""
   sandboxSshSocketPath: ""
   bindAddress: ""
   # OTLP trace collector (OPENSHELL_OTLP_ENDPOINT), e.g.
@@ -324,7 +334,7 @@ driver:
 # The upstream NVIDIA/OpenShell release this chart's driver links. Must equal
 # the tag in the workspace Cargo.toml (scripts/check-chart-render.sh).
 upstream:
-  version: v0.1.8
+  version: v0.1.9
 
 networkPolicy:
   # NetworkPolicies the chart renders:
@@ -450,7 +460,7 @@ gateway:
       timeoutSeconds: 1
       failureThreshold: 3
   image:
-    # Pinned by digest to the gateway image upstream published for `v0.1.8`,
+    # Pinned by digest to the gateway image upstream published for `v0.1.9`,
     # the same release as `upstream.version`, the Cargo.toml tag, the
     # supervisor and sandbox runtime images above, and the `openshell` CLI the
     # provider hook downloads. Re-pin them together when `upstream.version`
@@ -458,7 +468,7 @@ gateway:
     # shape changed. Resolve a digest with `docker buildx imagetools inspect`
     # on https://github.com/NVIDIA/OpenShell/pkgs/container/openshell%2Fgateway
     repository: ghcr.io/nvidia/openshell/gateway
-    tag: "sha256:d66352a54c680b652e5ddd7d19b9c1189568d18016f360b9b8c64014f13d89c4"
+    tag: "sha256:1fd9e1e807990e66c9486a28d3ce9d649fd7528df48d0e830d2de2148b52dfe5"
     pullPolicy: IfNotPresent
   # The gateway's name: its OCSF identity, its OTel resource and the in-process
   # driver build context. "" = the chart fullname. driver.gatewayName, the
@@ -494,7 +504,12 @@ gateway:
     endpoint: ""      # e.g. http://collector.observability:4317
     serviceName: ""   # "" = the gateway's own default
   grpcPort: 8080
+  # The gateway's Prometheus listener port (1-65535). Turn the listener off with
+  # metrics.enabled below, not with port 0 (refused since upstream v0.1.9).
   metricsPort: 9091
+  # metrics.enabled (upstream v0.1.9's metrics.enabled): the metrics listener, its
+  # container, Service and NetworkPolicy ports. false drops all of them; the port
+  # must still be valid.
   # TLS, optionally mutual, for the metrics listener (upstream v0.1.8's
   # metrics.tls), rendered into the gateway TOML as [openshell.gateway.metrics_tls].
   # Plaintext stays the default. The chart creates no metrics PKI: certSecretName
@@ -506,6 +521,7 @@ gateway:
   # the certificate files (wrong Secret or keys), it logs metrics_tls_listener_disabled
   # and keeps running without a metrics listener; it does not fall back to plaintext.
   metrics:
+    enabled: true
     tls:
       enabled: false
       certSecretName: ""
@@ -557,9 +573,10 @@ gateway:
     # tokens are then verified against keys an attacker on the path could replace.
     dangerouslyAllowInsecureHttp: false
     # A ConfigMap in .Release.Namespace whose ca.crt signs the issuer's TLS
-    # certificate. Mounted into the gateway and set as SSL_CERT_FILE, which
-    # REPLACES the trust store for ALL outbound TLS of the gateway. Used only
-    # with an issuer.
+    # certificate. Mounted into the gateway and passed as --oidc-ca-bundle (upstream
+    # v0.1.9's oidc ca_bundle): it adds to the platform trust roots for OIDC
+    # discovery and JWKS requests only. Used only with an issuer. (Before 0.15.0 the
+    # chart set SSL_CERT_FILE, which replaced the trust store for all outbound TLS.)
     caConfigMapName: ""
     # A Secret you manage in .Release.Namespace holding the OIDC client secret,
     # for the provider hook's client-credentials grant. The chart never reads it.

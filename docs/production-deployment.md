@@ -43,8 +43,10 @@ issuer and audience. The ingress gateway checks no token. You need:
   (the CLI redirects to it on first auth).
 
   For an issuer with a private CA, `gateway.oidc.caConfigMapName` names a
-  ConfigMap in the release namespace whose `ca.crt` signs the issuer. It
-  replaces the gateway's trust store for all outbound TLS.
+  ConfigMap in the release namespace whose `ca.crt` signs the issuer. Since
+  0.15.0 (upstream v0.1.9) it adds to the platform trust roots for OIDC
+  discovery and JWKS requests only; before, it replaced the gateway's trust
+  store for all outbound TLS.
 
   If the issuer is published through **this cluster's own ingress gateway**,
   the gateway pod reaches it on the ingress pod's container port (8443 for
@@ -130,7 +132,7 @@ imagePullSecrets:
 gateway:
   enabled: true
   # The gateway, supervisor and sandbox-runtime images default to digests of
-  # the upstream OpenShell release named by `upstream.version` (v0.1.8). Leave
+  # the upstream OpenShell release named by `upstream.version` (v0.1.9). Leave
   # them alone unless you move that version too: they must match each other
   # and the driver.
 
@@ -549,10 +551,16 @@ openshell status
   `[]`), `gateway.enableWebsocketTunnel` (`false`),
   `gateway.policyValidationFailureMode` (`fail_closed`),
   `gateway.serviceHostnameFormat` (`""`, readable names),
-  `gateway.metrics.tls.*` (TLS or mTLS for the metrics port, default off; a
-  scraper then needs https), `priorityClassName` and `topologySpreadConstraints`
-  for the gateway pod (both empty), and `driver.supervisorRuntimeClassName`
-  (empty).
+  `gateway.metrics.enabled` (`true`; `false` drops the metrics listener and its
+  ports), `gateway.metrics.tls.*` (TLS or mTLS for the metrics port, default
+  off; a scraper then needs https), `priorityClassName` and
+  `topologySpreadConstraints` for the gateway pod (both empty),
+  `driver.supervisorRuntimeClassName` (empty), and
+  `driver.runtimeBootstrapGraceSeconds` and
+  `driver.sandboxAttachRequestTimeoutSeconds` (empty, upstream's defaults) for
+  slow isolation backends. The gateway's own startup windows
+  (`provisioning_repair_window_seconds` and related) and mutation limits go in
+  `gatewayConfig`.
 
 ## Reaching a service inside a sandbox
 

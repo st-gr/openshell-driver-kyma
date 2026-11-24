@@ -126,7 +126,8 @@ key would silently do nothing). database_url is refused by _toml.tpl in every ta
       "jwks_ttl_secs" "gateway.oidc.jwksTtl"
       "scopes_claim" "gateway.oidc.scopesClaim"
       "jwks_allowed_origins" "gateway.oidc.jwksAllowedOrigins"
-      "dangerously_allow_insecure_http" "gateway.oidc.dangerouslyAllowInsecureHttp") -}}
+      "dangerously_allow_insecure_http" "gateway.oidc.dangerouslyAllowInsecureHttp"
+      "ca_bundle" "gateway.oidc.caConfigMapName") -}}
 {{- range $tableName := keys $ownedKeys | sortAlpha -}}
 {{- $table := get $config $tableName -}}
 {{- if kindIs "map" $table -}}

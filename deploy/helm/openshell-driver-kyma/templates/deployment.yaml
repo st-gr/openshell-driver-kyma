@@ -147,12 +147,6 @@ spec:
                   name: {{ .Values.gateway.dbPersistence.externalDbSecret | quote }}
                   key: uri
             {{- end }}
-            {{- if and .Values.gateway.oidc.issuer .Values.gateway.oidc.caConfigMapName }}
-            # Trusts the issuer's CA (replaces the trust store for ALL outbound
-            # TLS of the gateway).
-            - name: SSL_CERT_FILE
-              value: /etc/openshell-tls/oidc-ca/ca.crt
-            {{- end }}
           # The gateway has no `run` subcommand; the default action is to
           # run the server. Listing flags directly under args is correct.
           args:
@@ -177,8 +171,10 @@ spec:
             - {{ .Values.gateway.grpcPort | quote }}
             - --health-port
             - {{ .Values.gateway.healthPort | quote }}
+            {{- if include "openshell-driver-kyma.metricsEnabled" . }}
             - --metrics-port
             - {{ .Values.gateway.metricsPort | quote }}
+            {{- end }}
             - --compute-driver
             - kyma
             - --compute-driver-socket
@@ -231,6 +227,12 @@ spec:
             {{- if $.Values.gateway.oidc.dangerouslyAllowInsecureHttp }}
             - --oidc-dangerously-allow-insecure-http=true
             {{- end }}
+            {{- /* The issuer's CA for OIDC requests only (upstream v0.1.9's ca_bundle). A flag,
+                 like the issuer: an [openshell.gateway.oidc] table holding only ca_bundle is
+                 refused by the gateway ("missing field `issuer`"). */}}
+            {{- if $.Values.gateway.oidc.caConfigMapName }}
+            - --oidc-ca-bundle=/etc/openshell-tls/oidc-ca/ca.crt
+            {{- end }}
             {{- end }}
             {{- /* Upstream takes one comma-separated --server-san: the wildcard that tells it the
                  domain of sandbox service URLs (its default, openshell.localhost, stays
@@ -249,9 +251,11 @@ spec:
             - name: gw-health
               containerPort: {{ .Values.gateway.healthPort }}
               protocol: TCP
+            {{- if include "openshell-driver-kyma.metricsEnabled" . }}
             - name: gw-metrics
               containerPort: {{ .Values.gateway.metricsPort }}
               protocol: TCP
+            {{- end }}
           startupProbe:
             httpGet:
               path: /healthz

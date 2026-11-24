@@ -43,7 +43,8 @@ of openshell-driver-kyma.gatewayArgGuards.
   "--oidc-jwks-ttl" "gateway.oidc.jwksTtl"
   "--oidc-scopes-claim" "gateway.oidc.scopesClaim"
   "--oidc-jwks-allowed-origins" "gateway.oidc.jwksAllowedOrigins"
-  "--oidc-dangerously-allow-insecure-http" "gateway.oidc.dangerouslyAllowInsecureHttp")) -}}
+  "--oidc-dangerously-allow-insecure-http" "gateway.oidc.dangerouslyAllowInsecureHttp"
+  "--oidc-ca-bundle" "gateway.oidc.caConfigMapName")) -}}
 {{- end -}}
 {{- end -}}
 

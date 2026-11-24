@@ -6,23 +6,23 @@ crash-loop once the driver starts.
 
 Every rule below is one of upstream's startup refusals in
 KubernetesComputeConfig::validate_workspace_mode (openshell-driver-kubernetes
-src/config.rs, v0.1.8), so a value upstream would refuse fails `helm template`
+src/config.rs, v0.1.9), so a value upstream would refuse fails `helm template`
 instead of crash-looping the pod:
-  managed   config.rs:897   gateway id is a DNS-1123 label
-            config.rs:907   "openshell-<id>-" plus a 19-character workspace
+  managed   config.rs:929   gateway id is a DNS-1123 label
+            config.rs:939   "openshell-<id>-" plus a 19-character workspace
                             name fits 63 characters, so the id is at most 33
-            config.rs:918   managed SSH ingress needs a gateway namespace
+            config.rs:950   managed SSH ingress needs a gateway namespace
                             and a gateway pod selector (checked on the
                             effective values, openshell-driver-kyma.
                             managedSshIngress: with the in-pod gateway both
                             default to its own pod)
-  operator  config.rs:933   exactly one of the namespace label or file...
-            config.rs:939   ...not both
+  operator  config.rs:965   exactly one of the namespace label or file...
+            config.rs:971   ...not both
 Not mirrored because no chart value can reach them: an empty gateway id
-(config.rs:894, the id defaults to the release fullname) and an empty operator
-label or file (config.rs:945-953, an empty value is simply not passed).
+(config.rs:926, the id defaults to the release fullname) and an empty operator
+label or file (config.rs:977-985, an empty value is simply not passed).
 
-Also mirrored, from upstream v0.1.8:
+Also mirrored, from upstream v0.1.9:
   OTLP exports openshell-core sandbox_env.rs SupervisorOtlpArgs: each protocol
                is a clap enum (grpc, http/protobuf), and --otlp-cert-file and
                --otlp-key-file `requires` each other. The OCSF schema version is
@@ -31,6 +31,8 @@ Also mirrored, from upstream v0.1.8:
                allowedPodAnnotations / allowedPodLabels): each entry is an exact
                key or `<domain>/*`, with a valid prefix and name, outside the
                reserved openshell.ai and agents.x-k8s.io domains
+  startup      main.rs (v0.1.9) --runtime-bootstrap-grace-seconds and
+  budgets      --sandbox-attach-request-timeout-seconds: clap u64 range 1-86400
 
 Called via `{{ include "openshell-driver-kyma.workspaceGuards" . }}` from
 deployment.yaml. */}}
@@ -76,6 +78,13 @@ deployment.yaml. */}}
 {{- $value := get $.Values.driver $key | default "" -}}
 {{- if not (has $value (list "" "grpc" "http/protobuf")) -}}
 {{- fail (printf "driver.%s must be empty, grpc or http/protobuf, got %q." $key (toString $value)) -}}
+{{- end -}}
+{{- end -}}
+{{- range $key := list "runtimeBootstrapGraceSeconds" "sandboxAttachRequestTimeoutSeconds" -}}
+{{- $raw := get $.Values.driver $key -}}
+{{- $value := ternary "" (toString $raw) (kindIs "invalid" $raw) -}}
+{{- if and $value (or (not (regexMatch `^[0-9]+$` $value)) (lt (int64 $value) 1) (gt (int64 $value) 86400)) -}}
+{{- fail (printf "driver.%s must be empty or a whole number of seconds from 1 to 86400 (upstream's driver range), got %q." $key $value) -}}
 {{- end -}}
 {{- end -}}
 {{- if ne (empty .Values.driver.otlpCertFile) (empty .Values.driver.otlpKeyFile) -}}

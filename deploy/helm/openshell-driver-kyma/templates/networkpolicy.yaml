@@ -58,8 +58,10 @@ spec:
           protocol: TCP
         - port: {{ .Values.gateway.healthPort }}
           protocol: TCP
+        {{- if include "openshell-driver-kyma.metricsEnabled" . }}
         - port: {{ .Values.gateway.metricsPort }}
           protocol: TCP
+        {{- end }}
       {{- end }}
   egress:
     - ports:
